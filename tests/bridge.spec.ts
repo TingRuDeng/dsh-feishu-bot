@@ -228,6 +228,41 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(feishu.sent.at(-1)!.text).toContain('/ls')
   })
 
+  it('/ls lists only sessions under allowedWorkspaces (design §6.6)', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
+    // A session whose cwd lies OUTSIDE the allowed roots must not be listed
+    // and must not be bindable by number.
+    const outside = await mkdtemp(join(tmpdir(), 'outside-ws-'))
+    dirs.push(outside)
+    const handle = await ctx.agents.create({
+      sessionId: 'outside-session' as never,
+      meta: { cwd: outside },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    await ctx.sessions.flush(handle.agent.session)
+    await deliver({ text: '/new' })   // one inside-workspace session
+    await deliver({ text: '/release' })
+    await deliver({ text: '/ls' })
+    const listing = feishu.sent.at(-1)!.text
+    expect(listing).not.toContain('outside-session')
+    expect(listing).not.toContain(outside)
+    expect(listing).toContain(root)
+  })
+
+  it('/use by full id also rejects sessions outside allowedWorkspaces', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter([]))
+    const outside = await mkdtemp(join(tmpdir(), 'outside-ws-'))
+    dirs.push(outside)
+    const handle = await ctx.agents.create({
+      sessionId: 'outside-direct' as never,
+      meta: { cwd: outside },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    await ctx.sessions.flush(handle.agent.session)
+    await deliver({ text: '/use outside-direct' })
+    expect(feishu.sent.at(-1)!.text).toContain('无法绑定')
+  })
+
   it('non-text messages get the unsupported-content notice', async () => {
     const { feishu, deliver } = await mountBridge(new MockAdapter([]))
     await deliver({ text: undefined })

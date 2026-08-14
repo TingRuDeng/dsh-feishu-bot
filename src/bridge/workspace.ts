@@ -62,3 +62,36 @@ export async function authorizeCwd(
   }
   return { ok: false, reason: 'outside-workspaces' }
 }
+
+/**
+ * Build a session-cwd workspace filter for `/ls` and `/use` (design §6.6:
+ * only sessions under `allowedWorkspaces` are listable or bindable).
+ *
+ * Roots resolve through realpath ONCE at build time; the returned predicate
+ * is synchronous and does not touch the filesystem, so a recorded session
+ * cwd is compared as stored (canonical at creation via {@link authorizeCwd};
+ * foreign sessions created by Web keep whatever the harness recorded).
+ * A cwd-less header never passes. Fail-closed on an empty allowlist.
+ * @param allowedWorkspaces - configured roots (may use a leading `~`).
+ * @returns a predicate over a session header's recorded cwd.
+ */
+export async function buildWorkspaceFilter(
+  allowedWorkspaces: readonly string[],
+): Promise<(cwd: string | undefined) => boolean> {
+  const roots: string[] = []
+  for (const root of allowedWorkspaces) {
+    const expanded = expandHome(root)
+    try {
+      roots.push(await realpath(expanded))
+    } catch {
+      // Nonexistent configured root: authorizes nothing, same as authorizeCwd.
+    }
+    // Also accept the pre-realpath spelling: harness session headers may
+    // record the logical path (e.g. /Users/... vs /private/...) on macOS.
+    if (isAbsolute(expanded) && !roots.includes(expanded)) roots.push(expanded)
+  }
+  return (cwd) => {
+    if (cwd === undefined || !isAbsolute(cwd)) return false
+    return roots.some(root => contains(root, cwd))
+  }
+}

@@ -80,8 +80,12 @@ export class FeishuGateway extends Service {
   protected async [Service.init](): Promise<void> {
     const appId = await this.requireCredential(this.config.appIdRef)
     const appSecret = await this.requireCredential(this.config.appSecretRef)
-    this.client = new Lark.Client({ appId, appSecret })
-    this.wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error })
+    // The SDK's error formatter logs the failed request's config.data —
+    // the full message body. Route SDK logs through a redactor that strips
+    // body-bearing fields before they reach the process log.
+    const logger = redactingSdkLogger(this.ctx)
+    this.client = new Lark.Client({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error, logger })
+    this.wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error, logger })
     const dispatcher = new Lark.EventDispatcher({}).register({
       'im.message.receive_v1': async (data) => {
         this.dispatchInbound(data)
@@ -171,6 +175,47 @@ export class FeishuGateway extends Service {
     const send = tail.then(run, run)
     this.sendTails.set(chatId, send.then(() => undefined, () => undefined))
     return send
+  }
+}
+
+/**
+ * SDK logger that removes message bodies before logging.
+ *
+ * The SDK's `formatErrors` includes `config.data` (the outbound JSON body,
+ * i.e. full chat text) and `response.data` in every logged HTTP failure.
+ * This logger deep-walks each argument and replaces any `data` field with a
+ * length marker, keeping status/url/code facts that diagnostics need.
+ * @param ctx - context whose logger receives the redacted lines.
+ * @returns a logger in the SDK's expected error/warn/info/debug/trace form.
+ */
+export function redactingSdkLogger(ctx: Context): {
+  error: (...args: unknown[]) => void
+  warn: (...args: unknown[]) => void
+  info: (...args: unknown[]) => void
+  debug: (...args: unknown[]) => void
+  trace: (...args: unknown[]) => void
+} {
+  const redact = (value: unknown, depth: number): unknown => {
+    if (depth > 6 || typeof value !== 'object' || value === null) return value
+    if (Array.isArray(value)) return value.map(item => redact(item, depth + 1))
+    const out: Record<string, unknown> = {}
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = key === 'data'
+        ? `[redacted ${typeof entry === 'string' ? entry.length : JSON.stringify(entry ?? '').length} chars]`
+        : redact(entry, depth + 1)
+    }
+    return out
+  }
+  const line = (args: unknown[]): string => args.map(arg => {
+    const cleaned = redact(arg, 0)
+    return typeof cleaned === 'string' ? cleaned : JSON.stringify(cleaned)
+  }).join(' ')
+  return {
+    error: (...args) => ctx.logger.error('feishu-sdk: %s', line(args)),
+    warn: (...args) => ctx.logger.warn('feishu-sdk: %s', line(args)),
+    info: (...args) => ctx.logger.info('feishu-sdk: %s', line(args)),
+    debug: () => {},
+    trace: () => {},
   }
 }
 

@@ -23,7 +23,7 @@ import {
   type InboundEvent, type InboundMessage, type SessionIdString,
 } from './domain.ts'
 import { parseCommand } from './commands.ts'
-import { authorizeCwd } from './workspace.ts'
+import { authorizeCwd, buildWorkspaceFilter } from './workspace.ts'
 import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
 import { reconcileMessage } from './inbound.ts'
 import { segmentText } from './outbound.ts'
@@ -90,6 +90,16 @@ async function mount(ctx: Context, config: Config): Promise<void> {
   const agentOptions = (): AgentOptions =>
     ({ provider: config.agentProvider, model: config.agentModel })
   const resolve = createBridgeAgentResolver(ctx, agentOptions)
+
+  /** Recorded cwd of a session: live header first, then persisted header. */
+  const sessionCwd = async (sessionId: string): Promise<string | undefined> => {
+    for (const session of ctx.sessions.list()) {
+      if (String(session.id) === sessionId) return session.header.cwd
+    }
+    const header = (await ctx.sessionPersistence.list())
+      .find(h => String(h.id) === sessionId)
+    return header?.cwd
+  }
 
   /** Last /ls numbering per chat: ordinal → sessionId (process-local). */
   const listings = new Map<string, string[]>()
@@ -198,13 +208,16 @@ async function mount(ctx: Context, config: Config): Promise<void> {
         return
       case 'ls': {
         // Persisted headers plus live-only sessions (an empty just-created
-        // session has no persistence artifact yet — upstream contract).
+        // session has no persistence artifact yet — upstream contract),
+        // scoped to allowedWorkspaces (design §6.6): sessions outside the
+        // roots are neither listed nor numbered.
+        const inWorkspace = await buildWorkspaceFilter(config.allowedWorkspaces)
         const persisted = (await ctx.sessionPersistence.list())
-          .filter(h => h.cwd !== undefined && h.origin !== 'subagent')
+          .filter(h => inWorkspace(h.cwd) && h.origin !== 'subagent')
         const seen = new Set(persisted.map(h => String(h.id)))
         const live = ctx.sessions.list()
           .filter(sess => !seen.has(String(sess.id))
-            && sess.header.cwd !== undefined && sess.header.origin !== 'subagent')
+            && inWorkspace(sess.header.cwd) && sess.header.origin !== 'subagent')
           .map(sess => sess.header)
         const headers = [...live, ...persisted]
           .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
@@ -263,6 +276,14 @@ async function mount(ctx: Context, config: Config): Promise<void> {
             return
           }
           targetId = picked
+        }
+        // Workspace gate BEFORE resolving: a session outside the allowed
+        // roots is not bindable even by full id (design §6.6).
+        const inWorkspace = await buildWorkspaceFilter(config.allowedWorkspaces)
+        const targetCwd = sessionCwd(targetId)
+        if (!inWorkspace(await targetCwd)) {
+          await commit('无法绑定：该会话不在允许的工作区内。')
+          return
         }
         const target = targetId as unknown as SessionId
         const resolved = await resolve(target)

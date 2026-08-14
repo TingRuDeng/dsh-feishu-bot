@@ -30,22 +30,24 @@ const wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerL
 const dispatcher = new Lark.EventDispatcher({}).register({
   'im.message.receive_v1': async (data) => {
     const chatId = data.message.chat_id
-    const openId = data.sender.sender_id?.open_id
     const chatType = data.message.chat_type
-    let text = '(non-text)'
+    // Connectivity smoke only: never log or echo message text, sender ids,
+    // or anything a screenshotted terminal could leak. Length proves the
+    // payload decoded; a fixed acknowledgement proves the send path.
+    let textLength = 0
     try {
-      text = JSON.parse(data.message.content).text ?? '(no text field)'
-    } catch { /* non-text message content stays as the placeholder */ }
-    console.log(`[smoke] message: chat=${chatId} type=${chatType} open_id=${openId} text=${JSON.stringify(text)}`)
+      textLength = (JSON.parse(data.message.content).text ?? '').length
+    } catch { /* non-text message content: length stays 0 */ }
+    console.log(`[smoke] message received: chat=${chatId.slice(0, 8)}… type=${chatType} textChars=${textLength}`)
     await client.im.v1.message.create({
       params: { receive_id_type: 'chat_id' },
       data: {
         receive_id: chatId,
         msg_type: 'text',
-        content: JSON.stringify({ text: `echo: ${text} (dsh-feishu-bot M0 smoke)` }),
+        content: JSON.stringify({ text: `连通性正常：收到 ${textLength} 字（dsh-feishu-bot smoke）` }),
       },
     })
-    console.log('[smoke] echo sent')
+    console.log('[smoke] ack sent')
   },
 })
 
