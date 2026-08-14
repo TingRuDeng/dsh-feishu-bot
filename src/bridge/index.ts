@@ -91,6 +91,9 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     ({ provider: config.agentProvider, model: config.agentModel })
   const resolve = createBridgeAgentResolver(ctx, agentOptions)
 
+  /** Last /ls numbering per chat: ordinal → sessionId (process-local). */
+  const listings = new Map<string, string[]>()
+
   /** Serial work queue per chat; recovery and fresh events share it. */
   const chatTails = new Map<string, Promise<void>>()
   const enqueueChatWork = (chatId: string, work: () => Promise<void>): Promise<void> => {
@@ -155,7 +158,9 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     }
     const message = createUserMessage({
       content: [{ type: 'text', text: record.text ?? '' }],
-      source: { kind: 'plugin', plugin: 'feishu-bot' },
+      // The Feishu human IS the user: Web transcripts and activity rows key
+      // on kind 'user'; `via` keeps the frontend provenance durable.
+      source: { kind: 'user', via: 'feishu' } as never,
     })
     // Durable commit point BEFORE followup (crash window covered by recovery).
     await inboundEvents.put(eventId, {
@@ -192,13 +197,46 @@ async function mount(ctx: Context, config: Config): Promise<void> {
         ].join('\n'))
         return
       case 'ls': {
-        const headers = await ctx.sessionPersistence.list()
-        const rows = headers
+        // Persisted headers plus live-only sessions (an empty just-created
+        // session has no persistence artifact yet — upstream contract).
+        const persisted = (await ctx.sessionPersistence.list())
           .filter(h => h.cwd !== undefined && h.origin !== 'subagent')
+        const seen = new Set(persisted.map(h => String(h.id)))
+        const live = ctx.sessions.list()
+          .filter(sess => !seen.has(String(sess.id))
+            && sess.header.cwd !== undefined && sess.header.origin !== 'subagent')
+          .map(sess => sess.header)
+        const headers = [...live, ...persisted]
           .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
-          .slice(0, 10)
-          .map(h => `${h.id}  ${h.cwd ?? ''}`)
-        await commit(rows.length === 0 ? '没有可绑定的会话。用 /new 新建。' : rows.join('\n'))
+          .slice(0, 20)
+        if (headers.length === 0) {
+          listings.delete(chatId)
+          await commit('没有可绑定的会话。用 /new 新建。')
+          return
+        }
+        // Group by workspace directory; number across groups so /use <n> works.
+        const groups = new Map<string, typeof headers>()
+        for (const header of headers) {
+          const list = groups.get(header.cwd!) ?? []
+          list.push(header)
+          groups.set(header.cwd!, list)
+        }
+        const ordered: string[] = []
+        const lines: string[] = []
+        for (const [cwd, group] of groups) {
+          lines.push(`📁 ${cwd}`)
+          for (const header of group) {
+            ordered.push(String(header.id))
+            const short = String(header.id).length > 24
+              ? `${String(header.id).slice(0, 21)}…` : String(header.id)
+            const when = header.createdAt === undefined
+              ? '' : `  ${new Date(header.createdAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+            lines.push(`  [${ordered.length}] ${short}${when}`)
+          }
+        }
+        listings.set(chatId, ordered)
+        lines.push('回复 /use <编号> 绑定。')
+        await commit(lines.join('\n'))
         return
       }
       case 'status': {
@@ -216,17 +254,27 @@ async function mount(ctx: Context, config: Config): Promise<void> {
         return
       }
       case 'use': {
-        const target = command.sessionId as unknown as SessionId
+        let targetId = command.sessionId
+        if (/^\d+$/u.test(targetId)) {
+          const ordered = listings.get(chatId)
+          const picked = ordered?.[Number(targetId) - 1]
+          if (picked === undefined) {
+            await commit('编号无效或列表已过期。请先发送 /ls 获取最新编号。')
+            return
+          }
+          targetId = picked
+        }
+        const target = targetId as unknown as SessionId
         const resolved = await resolve(target)
         if ('error' in resolved) { await commit(`无法绑定：${resolved.error.code}`); return }
         const binding: ChatBinding = {
-          sessionId: command.sessionId as SessionIdString,
+          sessionId: targetId as SessionIdString,
           status: 'active',
           boundBy: record.senderOpenId as FeishuOpenId,
           boundAt: Date.now(),
         }
         await bindings.put(chatId, binding)
-        await commit(`已绑定 ${command.sessionId}。直接发消息即可对话。`)
+        await commit(`已绑定 ${targetId}。直接发消息即可对话。`)
         return
       }
       case 'new': {
@@ -363,7 +411,7 @@ async function mount(ctx: Context, config: Config): Promise<void> {
         }
         const message = createUserMessage({
           content: [{ type: 'text', text: record.text }],
-          source: { kind: 'plugin', plugin: 'feishu-bot' },
+          source: { kind: 'user', via: 'feishu' } as never,
         })
         await inboundEvents.put(eventId, { ...record, target: targetId, messageId: message.id as never })
         resolved.agent.followup(message)

@@ -185,6 +185,49 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(feishu.sent).toEqual([])
   })
 
+  it('routed text is logged with source kind user (Web renders it as the human)', async () => {
+    const { ctx, deliver } = await mountBridge(new MockAdapter([textResponse('ok')]))
+    await deliver({ text: '/new' })
+    await deliver({ text: '来自手机的消息' })
+    const live = [...(ctx.agents as unknown as { entries?: () => Iterable<[string, unknown]> }).entries?.() ?? []]
+    // Find the bound session via any live agent's log.
+    let found = false
+    for (const sessionId of ctx.sessions.list().map(s => s.id)) {
+      const agent = ctx.agents.get(sessionId)
+      if (agent === undefined) continue
+      for (const event of agent.session.events) {
+        if (event.type !== 'user/message') continue
+        const data = event.data as { content?: { type: string; text?: string }[]; source?: { kind?: string } }
+        if (data.content?.some(b => b.text === '来自手机的消息')) {
+          expect(data.source?.kind).toBe('user')
+          found = true
+        }
+      }
+    }
+    void live
+    expect(found).toBe(true)
+  })
+
+  it('/ls groups by workspace with numbers; /use <n> binds by number', { timeout: 20_000 }, async () => {
+    const { feishu, deliver } = await mountBridge(new MockAdapter([]))
+    await deliver({ text: '/new' })          // create one session so /ls has a row
+    await deliver({ text: '/release' })
+    await deliver({ text: '/ls' })
+    const listing = feishu.sent.at(-1)!.text
+    expect(listing).toContain('[1]')          // numbered entry
+    expect(listing).toContain('📁')           // workspace group header
+    await deliver({ text: '/use 1' })
+    expect(feishu.sent.at(-1)!.text).toContain('已绑定')
+    await deliver({ text: '/status' })
+    expect(feishu.sent.at(-1)!.text).toContain('绑定：')
+  })
+
+  it('/use <n> without a prior /ls explains the numbering is stale', async () => {
+    const { feishu, deliver } = await mountBridge(new MockAdapter([]))
+    await deliver({ text: '/use 3' })
+    expect(feishu.sent.at(-1)!.text).toContain('/ls')
+  })
+
   it('non-text messages get the unsupported-content notice', async () => {
     const { feishu, deliver } = await mountBridge(new MockAdapter([]))
     await deliver({ text: undefined })
