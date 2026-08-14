@@ -138,6 +138,14 @@ const STATUS_HEADER = {
   failed: { title: '任务失败', template: 'red' },
 } as const
 
+/** Card-facing token facts (design §6.3): count shown only when provider-anchored. */
+export interface TokenInfo {
+  /** Current request-and-response pressure from tokenMeter. */
+  totalTokens: number
+  /** True when the baseline is provider usage; false for heuristic estimates. */
+  anchored: boolean
+}
+
 /**
  * Render one snapshot as a Feishu interactive card.
  *
@@ -145,11 +153,14 @@ const STATUS_HEADER = {
  * the body is exactly one `思考中.....` hint; tool activity replaces it with
  * the current tool names and the running call count; a terminal card never
  * repeats the header state in the body — it keeps only the factual summary
- * (tool count, duration).
+ * (tool count, duration). The token line (design §6.3) shows the count only
+ * for provider-anchored measurements, `未知` for estimates, and nothing when
+ * no measurement was taken.
  * @param snapshot - the reduced turn state.
+ * @param tokens - optional tokenMeter facts for the session.
  * @returns the card JSON for msg_type `interactive`.
  */
-export function renderTaskCard(snapshot: TaskCardSnapshot): FeishuCard {
+export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo): FeishuCard {
   const { title, template } = STATUS_HEADER[snapshot.status]
   const lines: string[] = []
   if (snapshot.status === 'running') {
@@ -165,6 +176,9 @@ export function renderTaskCard(snapshot: TaskCardSnapshot): FeishuCard {
     if (snapshot.toolCallCount > 0) lines.push(`共调用工具 ${snapshot.toolCallCount} 次`)
     if (snapshot.durationMs !== null) lines.push(`耗时 ${formatDuration(snapshot.durationMs)}`)
     if (lines.length === 0) lines.push('（无工具调用）')
+  }
+  if (tokens !== undefined) {
+    lines.push(tokens.anchored ? `token 用量：${tokens.totalTokens}` : 'token 用量：未知（provider 未上报）')
   }
   return {
     config: { wide_screen_mode: true },

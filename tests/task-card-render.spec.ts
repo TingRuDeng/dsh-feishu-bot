@@ -45,6 +45,20 @@ describe('renderTaskCard', () => {
     expect(JSON.stringify(renderTaskCard({ ...base, status: 'failed', currentTools: [] }))).toContain('失败')
   })
 
+  it('token line: usage-anchored measurements show the count, others show 未知 (design §6.3)', () => {
+    const running = { ...base, status: 'running' as const, currentTools: ['Bash'], toolCallCount: 1 }
+    let json = JSON.stringify(renderTaskCard(running, { totalTokens: 1234, anchored: true }))
+    expect(json).toContain('1234')
+    expect(json).toContain('token')
+    // Estimated baseline: never show the number (no fake precision).
+    json = JSON.stringify(renderTaskCard(running, { totalTokens: 999, anchored: false }))
+    expect(json).not.toContain('999')
+    expect(json).toContain('未知')
+    // No measurement available at all: omit the line entirely.
+    json = JSON.stringify(renderTaskCard(running))
+    expect(json).not.toContain('token')
+  })
+
   it('deterministic: same snapshot → identical JSON', () => {
     const snap = { ...base, status: 'running' as const, currentTools: ['Bash'] }
     expect(JSON.stringify(renderTaskCard(snap))).toBe(JSON.stringify(renderTaskCard(snap)))

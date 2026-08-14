@@ -27,7 +27,7 @@ import { authorizeCwd, buildWorkspaceFilter } from './workspace.ts'
 import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
 import { reconcileMessage } from './inbound.ts'
 import { segmentText } from './outbound.ts'
-import { reduceTaskCard, renderTaskCard } from './task-card.ts'
+import { reduceTaskCard, renderTaskCard, type TokenInfo } from './task-card.ts'
 
 /** Bridge configuration; every deployment-varying choice is a field here. */
 export interface Config {
@@ -170,7 +170,19 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     if (session === undefined) return
     const snapshot = reduceTaskCard(session.events, tracker.turn)
     if (snapshot === undefined) return
-    const card = renderTaskCard(snapshot)
+    // tokenMeter is present in the web profile but deliberately NOT in
+    // inject: ctx.get() degrades to no token line when the service is
+    // absent instead of parking the whole plugin (design §6.3: token
+    // absence is not a defect).
+    const meter = ctx.get('tokenMeter') as { measure?: (s: unknown) => { totalTokens: number; baseline: { kind: string } } } | undefined
+    let tokens: TokenInfo | undefined
+    try {
+      const measured = meter?.measure?.(session)
+      if (measured !== undefined) {
+        tokens = { totalTokens: measured.totalTokens, anchored: measured.baseline.kind === 'usage' }
+      }
+    } catch { /* measurement failure degrades to no token line; card facts stay valid */ }
+    const card = renderTaskCard(snapshot, tokens)
     tracker.updating = true
     void (async () => {
       try {
