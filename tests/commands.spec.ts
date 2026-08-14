@@ -32,6 +32,11 @@ describe('parseCommand', () => {
     expect(parseCommand('/use a b')).toEqual({ kind: 'invalid', name: 'use', problem: 'extra-arguments' })
   })
 
+  it('/stop is an argument-less command (M2)', () => {
+    expect(parseCommand('/stop')).toEqual({ kind: 'stop' })
+    expect(parseCommand('/stop now')).toEqual({ kind: 'invalid', name: 'stop', problem: 'extra-arguments' })
+  })
+
   it('argument-less commands reject stray arguments', () => {
     expect(parseCommand('/ls')).toEqual({ kind: 'ls' })
     expect(parseCommand('/status')).toEqual({ kind: 'status' })

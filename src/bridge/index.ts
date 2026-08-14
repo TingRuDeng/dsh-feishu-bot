@@ -27,6 +27,7 @@ import { authorizeCwd, buildWorkspaceFilter } from './workspace.ts'
 import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
 import { reconcileMessage } from './inbound.ts'
 import { segmentText } from './outbound.ts'
+import { reduceTaskCard, renderTaskCard } from './task-card.ts'
 
 /** Bridge configuration; every deployment-varying choice is a field here. */
 export interface Config {
@@ -146,6 +147,87 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     }
   })
 
+  /**
+   * Task cards: one card per (chat, session, turn), throttled patches while
+   * running, terminal state frozen. Card state is process-local and
+   * droppable (design §6.3: a restart never rebuilds an old card).
+   */
+  interface CardTracker {
+    turn: number
+    messageId: string | undefined
+    /** Send in flight or pending throttle timer. */
+    updating: boolean
+    /** A change arrived during the throttle window; re-render at expiry. */
+    dirty: boolean
+    lastPatchAt: number
+    frozen: boolean
+  }
+  const cards = new Map<string, CardTracker>() // key: chatId
+  const CARD_EVENT_TYPES = new Set(['turn/start', 'tool/call', 'tool/result', 'turn/end'])
+
+  const pushCard = (chatId: string, sessionId: SessionIdString, tracker: CardTracker): void => {
+    const session = ctx.sessions.list().find(s => String(s.id) === (sessionId as string))
+    if (session === undefined) return
+    const snapshot = reduceTaskCard(session.events, tracker.turn)
+    if (snapshot === undefined) return
+    const card = renderTaskCard(snapshot)
+    tracker.updating = true
+    void (async () => {
+      try {
+        if (tracker.messageId === undefined) {
+          tracker.messageId = await ctx.feishu.sendCard(chatId, card)
+        } else {
+          await ctx.feishu.patchCard(tracker.messageId, card)
+        }
+        tracker.lastPatchAt = Date.now()
+        if (snapshot.status !== 'running') tracker.frozen = true
+      } catch (error: unknown) {
+        // Progress cards are droppable; log and move on (terminal text
+        // replies travel the reliable outbox path, not the card).
+        ctx.logger.warn('feishu-bridge card update failed for %s: %s', chatId, String(error))
+      } finally {
+        tracker.updating = false
+        if (tracker.dirty && !tracker.frozen) {
+          tracker.dirty = false
+          scheduleCard(chatId, sessionId, tracker)
+        }
+      }
+    })()
+  }
+
+  const scheduleCard = (chatId: string, sessionId: SessionIdString, tracker: CardTracker): void => {
+    if (tracker.updating || tracker.frozen) { tracker.dirty = true; return }
+    const wait = Math.max(0, config.cardThrottleMs - (Date.now() - tracker.lastPatchAt))
+    tracker.updating = true
+    const timer = setTimeout(() => {
+      tracker.updating = false
+      pushCard(chatId, sessionId, tracker)
+    }, wait)
+    ctx.effect(() => () => clearTimeout(timer), 'feishuBridge.cardTimer')
+  }
+
+  ctx.on('session/event', (session, event) => {
+    if (!CARD_EVENT_TYPES.has(event.type)) return
+    const turn = (event.data as { turn?: number }).turn
+    if (turn === undefined) return
+    for (const [chatId, binding] of bindings.entries()) {
+      if (binding.status !== 'active' || (binding.sessionId as string) !== (session.id as string)) continue
+      let tracker = cards.get(chatId)
+      if (event.type === 'turn/start' || tracker === undefined || tracker.turn !== turn) {
+        // New turn (or first observation): a fresh card; the old one stays frozen.
+        tracker = { turn, messageId: undefined, updating: false, dirty: false, lastPatchAt: 0, frozen: false }
+        cards.set(chatId, tracker)
+      }
+      if (event.type === 'turn/end') {
+        // Terminal renders bypass the throttle: freeze the card now.
+        tracker.dirty = false
+        pushCard(chatId, binding.sessionId, tracker)
+      } else {
+        scheduleCard(chatId, binding.sessionId, tracker)
+      }
+    }
+  })
+
   const reply = (chatId: string, text: string): void => {
     void ctx.feishu.sendText(chatId, text).catch((error: unknown) => {
       ctx.logger.error('feishu-bridge reply to %s failed: %s', chatId, String(error))
@@ -200,8 +282,9 @@ async function mount(ctx: Context, config: Config): Promise<void> {
           '可用命令：',
           '/new [cwd] — 新建会话并绑定（cwd 须在允许的工作区内）',
           '/ls — 列出可绑定的会话',
-          '/use <sessionId> — 绑定既有会话',
+          '/use <sessionId|编号> — 绑定既有会话（编号来自 /ls）',
           '/status — 当前绑定状态',
+          '/stop — 停止当前任务（排队消息保留）',
           '/release — 解绑当前会话',
           '普通文本会作为消息发给绑定的会话。',
         ].join('\n'))
@@ -263,7 +346,26 @@ async function mount(ctx: Context, config: Config): Promise<void> {
         const binding = bindings.get(chatId)
         if (binding === undefined) { await commit('当前没有绑定。'); return }
         await bindings.delete(chatId)
+        cards.delete(chatId)
         await commit(`已解绑 ${binding.sessionId}。会话仍在运行，可随时 /use 重新绑定。`)
+        return
+      }
+      case 'stop': {
+        const binding = bindings.get(chatId)
+        if (binding === undefined || binding.status !== 'active') {
+          await commit('当前没有绑定的会话。')
+          return
+        }
+        const agent = ctx.agents.get(binding.sessionId as unknown as SessionId)
+        if (agent === undefined || agent.status !== 'running') {
+          await commit('会话当前没有在执行任务。')
+          return
+        }
+        // keepInbox: queued messages survive for the next turn (design M2).
+        // The completion answer is the turn/end terminal the card listener
+        // renders as 已停止 — not whenIdle(), which a queued followup defers.
+        agent.cancel({ kind: 'user' }, { keepInbox: true })
+        await commit('已请求停止当前任务。结果以任务卡状态为准；排队中的消息会在下一轮继续。')
         return
       }
       case 'use': {

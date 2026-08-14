@@ -12,6 +12,7 @@ export type ParsedCommand =
   | { kind: 'ls' }
   | { kind: 'status' }
   | { kind: 'release' }
+  | { kind: 'stop' }
   | { kind: 'help' }
   | { kind: 'invalid'; name: string; problem: 'missing-argument' | 'extra-arguments' }
   | { kind: 'unknown'; name: string }
@@ -39,6 +40,7 @@ export function parseCommand(text: string): ParsedCommand | undefined {
     case 'ls':
     case 'status':
     case 'release':
+    case 'stop':
     case 'help':
       if (rest.length > 0) return { kind: 'invalid', name: head, problem: 'extra-arguments' }
       return { kind: head }

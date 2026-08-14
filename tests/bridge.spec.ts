@@ -6,7 +6,7 @@
  * round-trip (assistant reply reaches the chat), /status, /release,
  * dedup, and non-p2p rejection.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -28,6 +28,7 @@ import type { FeishuInboundMessage } from '../src/gateway/index.ts'
 /** Stub transport: records sends, never talks to Feishu. */
 class StubFeishu extends Service {
   sent: { chatId: string; text: string }[] = []
+  cards: { messageId: string; card: object }[] = []
   constructor(ctx: Context) {
     super(ctx, 'feishu')
   }
@@ -35,6 +36,16 @@ class StubFeishu extends Service {
   async sendText(chatId: string, text: string): Promise<string> {
     this.sent.push({ chatId, text })
     return `om_${this.sent.length}`
+  }
+
+  async sendCard(_chatId: string, card: object): Promise<string> {
+    const messageId = `card_${this.cards.length + 1}`
+    this.cards.push({ messageId, card })
+    return messageId
+  }
+
+  async patchCard(messageId: string, card: object): Promise<void> {
+    this.cards.push({ messageId, card })
   }
 }
 
@@ -164,6 +175,41 @@ describe('assembled bridge (M1 acceptance)', () => {
     await deliver({ text: '请帮我做一件事' })
     const texts = feishu.sent.map(s => s.text)
     expect(texts.some(t => t.includes('模型的回答'))).toBe(true)
+  })
+
+  it('task card projects turn progress and freezes at completion (M2)', { timeout: 20_000 }, async () => {
+    const { feishu, deliver } = await mountBridge(new MockAdapter([textResponse('答复')]))
+    await deliver({ text: '/new' })
+    await deliver({ text: '跑个任务' })
+    // The turn produced a card (turn/start schedules, turn/end freezes).
+    expect(feishu.cards.length).toBeGreaterThan(0)
+    const last = JSON.stringify(feishu.cards.at(-1)!.card)
+    expect(last).toContain('已完成')
+  })
+
+  it('/stop without a running task reports idle; without a binding reports unbound (M2)', async () => {
+    const { feishu, deliver } = await mountBridge(new MockAdapter([]))
+    await deliver({ text: '/stop' })
+    expect(feishu.sent.at(-1)!.text).toContain('没有绑定')
+    await deliver({ text: '/new' })
+    await deliver({ text: '/stop' })
+    expect(feishu.sent.at(-1)!.text).toContain('没有在执行')
+  })
+
+  it('/stop during a hung turn freezes the card as stopped (M2)', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '开始一个会卡住的任务' })
+    await deliver({ text: '/stop' })
+    expect(feishu.sent.at(-1)!.text).toContain('已请求停止')
+    // The abort terminal (turn/end aborted) renders the frozen stopped card.
+    await vi.waitFor(() => {
+      const last = feishu.cards.at(-1)
+      if (last === undefined || !JSON.stringify(last.card).includes('已停止')) {
+        throw new Error('stopped card not rendered yet')
+      }
+    }, { timeout: 10_000, interval: 100 })
+    void ctx
   })
 
   it('/status and /release reflect and clear the binding', { timeout: 20_000 }, async () => {

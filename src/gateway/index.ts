@@ -176,6 +176,46 @@ export class FeishuGateway extends Service {
     this.sendTails.set(chatId, send.then(() => undefined, () => undefined))
     return send
   }
+
+  /**
+   * Send an interactive card, FIFO within the chat (shared queue with text).
+   * @param chatId - destination chat id.
+   * @param card - the card JSON (msg_type `interactive` content).
+   * @returns the sent Feishu message id (needed for later patches).
+   */
+  async sendCard(chatId: string, card: object): Promise<string> {
+    const run = async (): Promise<string> => {
+      const client = this.client
+      if (client === undefined || this.disposed) throw new Error('feishu-gateway: disposed')
+      const response = await client.im.v1.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
+      })
+      const messageId = response?.data?.message_id
+      if (messageId === undefined) throw new Error(`card send returned no message_id (code ${String(response?.code)})`)
+      return messageId
+    }
+    const tail = this.sendTails.get(chatId) ?? Promise.resolve()
+    const send = tail.then(run, run)
+    this.sendTails.set(chatId, send.then(() => undefined, () => undefined))
+    return send
+  }
+
+  /**
+   * Replace a sent card's content in place. Progress updates are droppable
+   * (design §6.3: non-terminal card state is disposable), so no retry and
+   * no queueing — a failed patch surfaces to the caller, who decides.
+   * @param messageId - the card message id returned by {@link sendCard}.
+   * @param card - the full replacement card JSON.
+   */
+  async patchCard(messageId: string, card: object): Promise<void> {
+    const client = this.client
+    if (client === undefined || this.disposed) throw new Error('feishu-gateway: disposed')
+    await client.im.v1.message.patch({
+      path: { message_id: messageId },
+      data: { content: JSON.stringify(card) },
+    })
+  }
 }
 
 /**
