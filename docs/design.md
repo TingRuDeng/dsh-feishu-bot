@@ -272,10 +272,10 @@ im.message.receive_v1 回调 → 入 per-chat 业务队列，队内依次：
 
 ### 6.3 出站投影
 
-**数据暴露立场（安全评审 2026-08 确认为设计行为）**：绑定即授权上传——assistant 回复原样发往飞书服务器（含模型输出的代码/文件内容/命令结果），命令回帖含本机绝对路径与会话 id。不做出站内容过滤（过滤会静默破坏正文完整性且给出虚假安全感）；信任边界在**谁能绑定**（allowedOpenIds fail-closed）与**哪些会话可见**（allowedWorkspaces 约束 /ls、/use、/new 三个入口）。部署者不得把"不可离机"的工作区加入白名单。**边界精确含义**：allowedWorkspaces 约束的是飞书侧"哪些会话可绑定/列出/新建"，不约束绑定后 agent 的读取面——上游沙箱只围栏写入（fs-sandbox "every mode permits reading"；Seatbelt `(allow default)`+`(deny file-write*)`），任何会话都能读本 OS 用户可读的一切文件并在回复中复述。读隔离须靠独立 OS 用户，非本插件配置可达。桥自身日志与审计只落 id/hash，SDK 失败日志经脱敏 logger 剥离 config.data/response.data 正文。
+**数据暴露立场（安全评审 2026-08 确认为设计行为）**：绑定即授权上传——assistant 回复发往飞书服务器（含模型输出的代码/文件内容/命令结果），命令回帖含本机绝对路径与会话 id。不做出站内容过滤；本地绝对路径 Markdown 链接只做展示改写（`[label](/path)` → ``label（`/path`）``），路径本身仍会上传。信任边界在**谁能绑定**（allowedOpenIds fail-closed）与**哪些会话可见**（allowedWorkspaces 约束 /ls、/use、/new 三个入口）。部署者不得把"不可离机"的工作区加入白名单。**边界精确含义**：allowedWorkspaces 约束的是飞书侧"哪些会话可绑定/列出/新建"，不约束绑定后 agent 的读取面——上游沙箱只围栏写入（fs-sandbox "every mode permits reading"；Seatbelt `(allow default)`+`(deny file-write*)`），任何会话都能读本 OS 用户可读的一切文件并在回复中复述。读隔离须靠独立 OS 用户，非本插件配置可达。桥自身日志与审计只落 id/hash，SDK 失败日志经脱敏 logger 剥离 config.data/response.data 正文。
 
 1. **终态结果卡（经 outbox，§5 `outboundSegments`）**：仅投递**已提交**的 `assistant/message`；不投未提交流式 delta。流程：
-   - 观察到绑定 session 的 `assistant/message` ⇒ 按完整 create-message envelope 的 UTF-8 JSON 字节数做 24KB 软上限预检 ⇒ 整行优先装箱，单行仍超限时按 Unicode 码点二分切割 ⇒ 渲染绿色结果卡（标题 `工作区名 · 最终结果 · i/N`）；
+   - 观察到绑定 session 的 `assistant/message` ⇒ 将本地绝对路径 Markdown 链接改写为可读代码样式（HTTP/相对链接保持不变）⇒ 按完整 create-message envelope 的 UTF-8 JSON 字节数做 24KB 软上限预检 ⇒ 整行优先装箱，单行仍超限时按 Unicode 码点二分切割 ⇒ 渲染绿色结果卡（标题 `工作区名 · 最终结果 · i/N`）；
    - 每段以 `pending` 写入 outbox 后才发送（主键为 `chatId+sessionId+sourceEventSeq+segmentIndex` 的确定性编码）；结果卡创建失败显式降级同段纯文本，任一发送路径成功后才清正文并写 `sent`，两条路径都失败则保留 `pending`；
    - **重启恢复**：启动扫描 `pending` 段按 (chat, sourceEventSeq, segmentIndex) 排序续发。**发送成功与 `sent` 写入之间崩溃的窗口无法消除**（飞书发消息 API 无幂等键），该窗口内的段重启后会重发一次——接受为已知限制，卡片标题带 `i/N` 使重复肉眼可辨；超恢复期限（24h）的 pending 段放弃 + 审计，不再补发。
 2. **任务卡**：每 turn 一张，展示状态 / 当前工具 / token / 耗时。

@@ -9,6 +9,16 @@ export interface ResultCardSegment {
   card: FeishuCard
 }
 
+const LOCAL_MARKDOWN_LINK = /\[([^\]\n]+)\]\(<?(\/[^)>\n]+)>?\)/gu
+
+/** Replace non-portable absolute-path links with readable inline code. */
+function rewriteFeishuLocalMarkdownLinks(content: string): string {
+  return content.replace(LOCAL_MARKDOWN_LINK, (_match: string, label: string, path: string) => {
+    const safePath = path.trim().replaceAll('`', 'ˋ')
+    return `${label.trim()}（\`${safePath}\`）`
+  })
+}
+
 /** Render one durable assistant-result segment as a green Feishu card. */
 export function renderResultCard(
   workspaceName: string, text: string, segmentIndex: number, segmentCount: number,
@@ -67,7 +77,7 @@ export function segmentResultCards(
   text: string,
   maxEnvelopeBytes = RESULT_CARD_SOFT_LIMIT_BYTES,
 ): ResultCardSegment[] {
-  const normalized = text.trim()
+  const normalized = rewriteFeishuLocalMarkdownLinks(text.trim())
   if (normalized === '') return []
 
   // One code point per card is a strict upper bound on the final count.

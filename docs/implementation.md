@@ -100,7 +100,7 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 ## M4：可靠性与体验（进行中）
 
-**状态：前两项已实现：① `/ls` 编号快照默认 5 分钟过期（`listingTtlMs` 可配置）；②终态回复改为绿色结果卡，按完整 create-message envelope 的 24KB 软上限分片，卡片失败降级文本且保留 durable outbox 语义。后续排期见 [HANDOFF.md](HANDOFF.md)，需求清单见 [weclaw-lessons.md](weclaw-lessons.md) 二次深读 A 节。**
+**状态：前三项已实现：① `/ls` 编号快照默认 5 分钟过期（`listingTtlMs` 可配置）；②终态回复改为绿色结果卡，按完整 create-message envelope 的 24KB 软上限分片，卡片失败降级文本且保留 durable outbox 语义；③本地绝对路径 Markdown 链接在分片前改写为可读代码样式，网页链接保持不变。后续排期见 [HANDOFF.md](HANDOFF.md)。**
 
 ## M4：可靠性
 

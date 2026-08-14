@@ -97,7 +97,7 @@ weclaw（`~/Desktop/mycode/weclaw`，AGPL-3.0）在真实飞书使用中迭代�
 ### A. 决定采纳（M4/M5 排期）
 
 1. **终态答复卡片化 + 30KB 容量预检分片**（result_card.go，M4 已落地）：最终结果用绿头卡而非纯文本，标题 `工作区名 · 最终结果 · i/N`；发送前本地构造完整 create-message envelope 测 JSON 尺寸（软上限 24KB），按行分片、超长行二分切割；卡片失败降级纯文本，durable outbox 不变。
-2. **本地路径链接改写**（result_card.go rewriteFeishuLocalMarkdownLinks）：`[label](/local/path)` 在飞书里是死链接，正则改写成 `label（`/local/path`）` 代码样式。我们的回复常含文件路径链接，直接适用。
+2. **本地路径链接改写**（result_card.go rewriteFeishuLocalMarkdownLinks，M4 已落地）：`[label](/local/path)` 在飞书里是死链接，正则改写成 ``label（`/local/path`）`` 代码样式；网页链接保持不变，路径内反引号替换为 `ˋ`，避免破坏代码片段。
 3. **思考中指示器追加/剥离规范**（progress_render.go append/trimActiveThinkingIndicator）：运行中卡片正文尾部统一追加"思考中"指示器，进入终态时统一剥离——幂等操作（HasSuffix 判重）。我们目前是整体替换正文，可借鉴其"终态绝不残留进行时指示"的收口。
 4. **进度时间线 reducer 的三条规则**（task_view_reducer.go + task_progress_timeline.go）：①旧 sequence 拒绝（防乱序回写）；②终态后进展拒绝（closed 即冻结）；③同 ID 进度原地更新而非追加（工具重试/plan 更新不刷屏）。我们的 reduceTaskCard 已有 ②，①③ 值得补——尤其未来接入 plan/todo 进度时。
 5. **卡片受理≠完成两段式**（choice_status_card.go）：按钮点击先受理（蓝色"已受理：X / 正在处理中"），业务完成后再补终态 patch（绿色"已完成"）。我们审批点击是同步 resolve、可以一步到位；但 M4 计划的会话切换按钮（耗时操作）必须用这个两段式。

@@ -5,6 +5,20 @@ import {
 } from '../src/bridge/result-card.ts'
 
 describe('result-card capacity preflight', () => {
+  it('renders local Markdown links as readable paths while preserving web links', () => {
+    const content = '请检查 [login.html](/home/debian/workspace/login.html:233)、[登录模板](</home/debian/My Project/login.html:3>)，并参考 [上游文档](https://example.com/docs) 与 [项目说明](docs/README.md)。'
+    const [segment] = segmentResultCards('oc_test', 'workspace', content)
+
+    expect(segment!.text).toBe('请检查 login.html（`/home/debian/workspace/login.html:233`）、登录模板（`/home/debian/My Project/login.html:3`），并参考 [上游文档](https://example.com/docs) 与 [项目说明](docs/README.md)。')
+    expect(segment!.card.elements[0]!.text.content).toBe(segment!.text)
+  })
+
+  it('neutralizes backticks inside a local path so inline code stays balanced', () => {
+    const [segment] = segmentResultCards('oc_test', 'workspace', '[奇怪文件](/tmp/a`b.txt)')
+
+    expect(segment!.text).toBe('奇怪文件（`/tmp/aˋb.txt`）')
+  })
+
   it('packs whole lines first and measures the full create-message envelope', () => {
     const first = '甲'.repeat(200)
     const second = '乙'.repeat(200)
