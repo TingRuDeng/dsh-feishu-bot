@@ -23,6 +23,10 @@ Credentials: set `FEISHU_APP_ID` / `FEISHU_APP_SECRET` where the dsh credentials
 
 Verified against deepseek-harness 0.1.0-rc.5.
 
+## Data exposure model
+
+Binding a chat uploads that session's conversation to Feishu **by design**: assistant replies — including any source code, file contents, command output, or secrets the model chooses to print — are sent verbatim to Tencent/ByteDance-operated Feishu servers, and command replies include absolute local paths and session ids. There is no outbound content filter; the trust boundary is **who may bind**, enforced fail-closed by `allowedOpenIds` (empty rejects everyone) and `allowedWorkspaces` (`/ls`/`/use`/`/new` are all scoped to the configured roots). Do not allowlist a workspace whose sessions must not leave the machine. Message bodies never enter the plugin's own logs or audit records (ids and hashes only), and the Feishu SDK's failure logs are routed through a redactor that strips request/response bodies.
+
 ## License
 
 MIT. Architecture references to other community bridges are cited in the design doc; no AGPL code is copied.
