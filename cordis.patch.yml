@@ -17,7 +17,7 @@
       name: 'dsh-feishu-bot/bridge'
       config:
         allowedOpenIds:
-          - on_efb6c1f5bbcbfcc86ef910ac03b56ea6
+          - ou_your_open_id
         allowedWorkspaces:
           - ~/Desktop/mycode
         defaultWorkspace: ~/Desktop/mycode
