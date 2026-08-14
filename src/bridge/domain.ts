@@ -88,6 +88,12 @@ export const pendingCard = z.object({
   kind: z.literal('approval'),
   pendingId: z.string().min(1),
   chatId: brandedString<'FeishuChatId'>(),
+  /** The paired approval audit id (approval/asked); decision routing key. */
+  approvalId: z.string().min(1),
+  /** Card-presented facts, kept for the restart sweep's frozen re-render. */
+  toolName: z.string(),
+  reason: z.string().optional(),
+  sessionTitle: z.string(),
   /** Backfilled after send; absent = crashed before exposure, sweep deletes. */
   cardMessageId: brandedString<'FeishuMessageId'>().optional(),
   createdAt: z.number().int().nonnegative(),

@@ -90,6 +90,31 @@ export class FeishuGateway extends Service {
       'im.message.receive_v1': async (data) => {
         this.dispatchInbound(data)
       },
+      // Card button clicks. The handler slot is read at call time so the
+      // business plugin can (re)register across HMR without a reconnect.
+      'card.action.trigger': async (data: {
+        operator?: { open_id?: string }
+        event?: { operator?: { open_id?: string } }
+        action?: { value?: unknown }
+        context?: { open_message_id?: string }
+      }) => {
+        if (this.disposed) return {}
+        const handler = this.cardActionHandler
+        if (handler === undefined) return {}
+        const operatorOpenId = data.operator?.open_id ?? data.event?.operator?.open_id ?? ''
+        const action: FeishuCardAction = {
+          operatorOpenId,
+          messageId: data.context?.open_message_id ?? '',
+          value: data.action?.value,
+        }
+        try {
+          const result = await handler(action)
+          return result?.toast === undefined ? {} : { toast: { type: 'info', content: result.toast } }
+        } catch (error: unknown) {
+          this.ctx.logger.error('feishu-gateway card action handler failed: %s', String(error))
+          return { toast: { type: 'error', content: '处理失败，请稍后重试' } }
+        }
+      },
       // Subscribed read-status events need explicit no-op handlers; an
       // unhandled subscription makes the SDK log `not found handler` on
       // every read receipt (weclaw production lesson).
@@ -140,6 +165,20 @@ export class FeishuGateway extends Service {
       createTimeMs: Number(data.message.create_time),
       text,
     })
+  }
+
+  private cardActionHandler: ((action: FeishuCardAction) => Promise<{ toast?: string } | undefined>) | undefined
+
+  /**
+   * Register the card-button click handler (single slot; the business
+   * plugin owns all card semantics). The returned effect unregisters.
+   * @param handler - receives operator open_id, card message id, and the button's value payload; may return a toast.
+   */
+  handleCardActions(handler: (action: FeishuCardAction) => Promise<{ toast?: string } | undefined>): void {
+    this.cardActionHandler = handler
+    this.ctx.effect(() => () => {
+      if (this.cardActionHandler === handler) this.cardActionHandler = undefined
+    }, 'feishu.cardActionHandler')
   }
 
   /**
@@ -257,6 +296,16 @@ export function redactingSdkLogger(ctx: Context): {
     debug: () => {},
     trace: () => {},
   }
+}
+
+/** One card-button click, normalized for the business plugin. */
+export interface FeishuCardAction {
+  /** The clicking user's open_id (may be empty when Feishu omits it). */
+  operatorOpenId: string
+  /** The card's message id (patch target). */
+  messageId: string
+  /** The clicked button's value payload, verbatim. */
+  value: unknown
 }
 
 /**

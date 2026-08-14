@@ -58,7 +58,8 @@
     "@deepseek-ai/dsh-storage-domain": "link:../deepseek-harness/packages/storage/storage-domain",
     "@larksuiteoapi/node-sdk": "^1.44.0",
     "zod": "^4.4.3",
-    "@deepseek-ai/dsh-credentials": "link:../deepseek-harness/packages/credentials/credentials"
+    "@deepseek-ai/dsh-credentials": "link:../deepseek-harness/packages/credentials/credentials",
+    "@deepseek-ai/dsh-user-approval": "link:../deepseek-harness/packages/interaction/user-approval"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

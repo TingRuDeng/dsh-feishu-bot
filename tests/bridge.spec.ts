@@ -12,6 +12,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
+import UserApproval from '@deepseek-ai/dsh-user-approval'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -47,6 +48,18 @@ class StubFeishu extends Service {
   async patchCard(messageId: string, card: object): Promise<void> {
     this.cards.push({ messageId, card })
   }
+
+  cardHandler: ((action: { operatorOpenId: string; messageId: string; value: unknown }) => Promise<{ toast?: string } | undefined>) | undefined
+
+  handleCardActions(handler: (action: { operatorOpenId: string; messageId: string; value: unknown }) => Promise<{ toast?: string } | undefined>): void {
+    this.cardHandler = handler
+  }
+
+  /** Test hook: simulate a card button click. */
+  async clickCard(operatorOpenId: string, messageId: string, value: unknown): Promise<{ toast?: string } | undefined> {
+    if (this.cardHandler === undefined) throw new Error('no card handler registered')
+    return this.cardHandler({ operatorOpenId, messageId, value })
+  }
 }
 
 const dirs: string[] = []
@@ -75,6 +88,7 @@ async function mountBridge(adapter: MockAdapter, configOverrides: object = {}): 
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(UserApproval)
   await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions') })
   await ctx.plugin(Storage)
   await ctx.plugin(StorageJson, { root: join(root, 'storages') })
@@ -210,6 +224,58 @@ describe('assembled bridge (M1 acceptance)', () => {
       }
     }, { timeout: 10_000, interval: 100 })
     void ctx
+  })
+
+  it('approval plan α: card click allow resolves the request; card freezes (M3)', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '触发一个长任务' })   // turn opens and hangs
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const outcome = ctx.approval.request({ agent, toolName: 'Bash', reason: '要执行危险命令' })
+    // The bridge's prepended listener pairs the asked event and sends a card.
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('审批请求'))) throw new Error('no card yet')
+    }, { timeout: 10_000, interval: 50 })
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('审批请求'))!
+    const value = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]
+    expect(value).toBeDefined()
+    const toast = await feishu.clickCard(OWNER, sent.messageId, { pendingId: value, action: 'allow' })
+    expect(toast?.toast).toContain('已允许')
+    expect(await outcome).toBe('allowed-once')
+    // The pending card froze into the decided state.
+    const frozen = feishu.cards.at(-1)!
+    expect(JSON.stringify(frozen.card)).toContain('已允许')
+  })
+
+  it('approval: unauthorized clicker is rejected without consuming the pending entry (M3)', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const outcome = ctx.approval.request({ agent, toolName: 'Write', reason: 'x' })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('审批请求'))) throw new Error('no card yet')
+    }, { timeout: 10_000, interval: 50 })
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('审批请求'))!
+    const value = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]!
+    const badToast = await feishu.clickCard('ou_intruder', sent.messageId, { pendingId: value, action: 'allow' })
+    expect(badToast?.toast).toContain('没有权限')
+    // The rightful owner can still decide afterwards.
+    const goodToast = await feishu.clickCard(OWNER, sent.messageId, { pendingId: value, action: 'reject' })
+    expect(goodToast?.toast).toContain('已拒绝')
+    expect(await outcome).toBe('rejected')
+  })
+
+  it('approval with no bound chat delegates to the rest of the chain (M3)', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '任务' })
+    await deliver({ text: '/release' })  // unbind: bridge must step aside
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const outcome = await ctx.approval.request({ agent, toolName: 'Bash' })
+    // No listener beyond the bridge: the fail-closed default answers.
+    expect(outcome).toBe('unavailable')
+    expect(feishu.cards.some(c => JSON.stringify(c.card).includes('审批请求'))).toBe(false)
   })
 
   it('/status and /release reflect and clear the binding', { timeout: 20_000 }, async () => {

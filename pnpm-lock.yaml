@@ -32,6 +32,9 @@ importers:
       '@deepseek-ai/dsh-storage-domain':
         specifier: link:../deepseek-harness/packages/storage/storage-domain
         version: link:../deepseek-harness/packages/storage/storage-domain
+      '@deepseek-ai/dsh-user-approval':
+        specifier: link:../deepseek-harness/packages/interaction/user-approval
+        version: link:../deepseek-harness/packages/interaction/user-approval
       '@larksuiteoapi/node-sdk':
         specifier: ^1.44.0
         version: 1.73.0

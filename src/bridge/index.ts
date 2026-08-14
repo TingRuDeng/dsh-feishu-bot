@@ -28,6 +28,9 @@ import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
 import { reconcileMessage } from './inbound.ts'
 import { segmentText } from './outbound.ts'
 import { reduceTaskCard, renderTaskCard, type TokenInfo } from './task-card.ts'
+import { pairApprovalId, renderApprovalCard, renderApprovalCardFrozen, type ApprovalCardSpec } from './approval.ts'
+import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
+import type {} from '@deepseek-ai/dsh-user-approval'
 
 /** Bridge configuration; every deployment-varying choice is a field here. */
 export interface Config {
@@ -47,6 +50,8 @@ export interface Config {
   agentProvider: string
   /** LLM model for sessions the bridge resumes or creates. */
   agentModel: string
+  /** Web GUI base URL shown on approval cards. */
+  webUrl: string
 }
 
 export const Config: z<Config> = z.object({
@@ -58,6 +63,7 @@ export const Config: z<Config> = z.object({
   segmentMaxChars: z.natural().default(2_000),
   agentProvider: z.string().default('deepseek'),
   agentModel: z.string().default('deepseek-chat'),
+  webUrl: z.string().default('http://127.0.0.1:3080'),
 })
 
 export const name = 'feishu-bridge'
@@ -87,6 +93,7 @@ async function mount(ctx: Context, config: Config): Promise<void> {
   const bindings = domain.table('bindings')
   const inboundEvents = domain.table('inbound_events')
   const outboundSegments = domain.table('outbound_segments')
+  const pendingCards = domain.table('pending_cards')
 
   const agentOptions = (): AgentOptions =>
     ({ provider: config.agentProvider, model: config.agentModel })
@@ -245,6 +252,161 @@ async function mount(ctx: Context, config: Config): Promise<void> {
       ctx.logger.error('feishu-bridge reply to %s failed: %s', chatId, String(error))
     })
   }
+
+  /**
+   * Approval channel (design §6.4, plan α: prepend + next() parallel race).
+   *
+   * In-memory pending registry: pendingId → resolver facts. Durable
+   * pendingCards mirrors it for the restart sweep only; decisions always
+   * route through this registry.
+   */
+  interface PendingApproval {
+    approvalId: string
+    chatId: string
+    spec: ApprovalCardSpec
+    resolve: (outcome: ApprovalOutcome) => void
+    settled: boolean
+    cardMessageId?: string
+  }
+  const pendingApprovals = new Map<string, PendingApproval>()
+
+  /** approvalIds held by this channel; feeds the pairing scan's claimed set. */
+  const claimedApprovalIds = (): Set<string> => {
+    const ids = new Set<string>()
+    for (const entry of pendingApprovals.values()) ids.add(entry.approvalId)
+    return ids
+  }
+
+  const freezeCard = (entry: PendingApproval, state: Parameters<typeof renderApprovalCardFrozen>[1]): void => {
+    if (entry.cardMessageId === undefined) return
+    void ctx.feishu.patchCard(entry.cardMessageId, renderApprovalCardFrozen(entry.spec, state))
+      .catch((error: unknown) => {
+        ctx.logger.warn('feishu-bridge approval card freeze failed: %s', String(error))
+      })
+  }
+
+  ctx.on('approval/request', async (req, next) => {
+    // Only requests for sessions bound to some active chat concern Feishu.
+    let boundChatId: string | undefined
+    for (const [chatId, binding] of bindings.entries()) {
+      if (binding.status === 'active' && (binding.sessionId as string) === String(req.agent.session.id)) {
+        boundChatId = chatId
+        break
+      }
+    }
+    if (boundChatId === undefined) return next()
+    const approvalId = pairApprovalId(req.agent.session.events, req.callId as string | undefined, claimedApprovalIds())
+    // No pairable asked event (or ambiguity): conservatively step aside.
+    if (approvalId === undefined) return next()
+
+    const pendingId = `pc_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    const spec: ApprovalCardSpec = {
+      pendingId,
+      toolName: req.toolName,
+      ...req.reason === undefined ? {} : { reason: req.reason },
+      sessionTitle: String(req.agent.session.id),
+      webUrl: config.webUrl,
+    }
+    let entry: PendingApproval
+    const feishuAnswer = new Promise<ApprovalOutcome>((resolvePromise) => {
+      entry = {
+        approvalId, chatId: boundChatId, spec, settled: false,
+        resolve: (outcome) => {
+          if (entry.settled) return
+          entry.settled = true
+          pendingApprovals.delete(pendingId)
+          void pendingCards.delete(pendingId as never).catch(() => undefined)
+          resolvePromise(outcome)
+        },
+      }
+    })
+    pendingApprovals.set(pendingId, entry!)
+
+    // Durable-first (compensation ladder, design §6.4): record → card →
+    // backfill. A failure at any rung unwinds and delegates via next().
+    try {
+      await pendingCards.put(pendingId as never, {
+        kind: 'approval', pendingId, chatId: boundChatId, approvalId,
+        toolName: req.toolName,
+        ...req.reason === undefined ? {} : { reason: req.reason },
+        sessionTitle: spec.sessionTitle, createdAt: Date.now(),
+      } as never)
+    } catch (error: unknown) {
+      pendingApprovals.delete(pendingId)
+      ctx.logger.error('feishu-bridge approval record write failed: %s', String(error))
+      return next()
+    }
+    let cardMessageId: string
+    try {
+      cardMessageId = await ctx.feishu.sendCard(boundChatId, renderApprovalCard(spec))
+    } catch (error: unknown) {
+      pendingApprovals.delete(pendingId)
+      void pendingCards.delete(pendingId as never).catch(() => undefined)
+      ctx.logger.error('feishu-bridge approval card send failed: %s', String(error))
+      return next()
+    }
+    entry!.cardMessageId = cardMessageId
+    try {
+      await pendingCards.update(pendingId as never, { cardMessageId } as never)
+    } catch { /* backfill miss only widens the restart sweep's invalidation to this card */ }
+
+    // Withdrawal: the asker aborted — freeze and release without deciding.
+    const onAbort = (): void => {
+      const live = pendingApprovals.get(pendingId)
+      if (live === undefined || live.settled) return
+      live.settled = true
+      pendingApprovals.delete(pendingId)
+      void pendingCards.delete(pendingId as never).catch(() => undefined)
+      freezeCard(live, 'withdrawn')
+    }
+    req.signal?.addEventListener('abort', onAbort, { once: true })
+
+    // Plan α: delegate immediately; both channels stay live; the first REAL
+    // decision wins. The chain's fail-closed 'unavailable' (no other
+    // answerer) is NOT a decision — the Feishu card is live, so this channel
+    // keeps waiting instead of losing to an empty chain (weclaw: absence of
+    // an answer never defaults the outcome).
+    const web = next()
+    const webDecision = web.then((outcome): Promise<ApprovalOutcome> | ApprovalOutcome => {
+      if (outcome === 'unavailable') return new Promise<ApprovalOutcome>(() => {})
+      // Web decided first: freeze our card.
+      const live = pendingApprovals.get(pendingId)
+      if (live !== undefined && !live.settled) {
+        live.settled = true
+        pendingApprovals.delete(pendingId)
+        void pendingCards.delete(pendingId as never).catch(() => undefined)
+        req.signal?.removeEventListener('abort', onAbort)
+        freezeCard(live, 'elsewhere')
+      }
+      return outcome
+    }, (): Promise<ApprovalOutcome> => new Promise<ApprovalOutcome>(() => {}))
+    return Promise.race([feishuAnswer, webDecision])
+  }, { prepend: true })
+
+  /** Card button clicks: validate, resolve the pending entry, freeze the card. */
+  ctx.feishu.handleCardActions(async (action) => {
+    const value = action.value as { pendingId?: string; action?: string } | undefined
+    const pendingId = value?.pendingId
+    const verb = value?.action
+    if (pendingId === undefined || (verb !== 'allow' && verb !== 'reject')) return {}
+    // Permission: allowlist member (§7.2). Empty operator id fails closed.
+    if (!config.allowedOpenIds.includes(action.operatorOpenId)) {
+      return { toast: '你没有权限操作此审批' }
+    }
+    const entry = pendingApprovals.get(pendingId)
+    if (entry === undefined || entry.settled) {
+      return { toast: '该审批已失效或已在别处决定' }
+    }
+    // The card's chat must still hold an active binding for the session.
+    const binding = bindings.get(entry.chatId as FeishuChatId)
+    if (binding === undefined || binding.status !== 'active') {
+      return { toast: '该会话已解绑，审批按钮已失效' }
+    }
+    const outcome: ApprovalOutcome = verb === 'allow' ? 'allowed-once' : 'rejected'
+    entry.resolve(outcome)
+    freezeCard(entry, verb === 'allow' ? 'decided-allow' : 'decided-reject')
+    return { toast: verb === 'allow' ? '已允许（本次）' : '已拒绝' }
+  })
 
   /** Route one deduplicated, authorized text message to the bound session. */
   const routeMessage = async (eventId: FeishuEventId, record: InboundMessage): Promise<void> => {
@@ -494,8 +656,33 @@ async function mount(ctx: Context, config: Config): Promise<void> {
   })
 
   await recoverInterrupted()
+  await sweepPendingCards()
   ctx.logger.info('feishu-bridge mounted: %d user(s), %d workspace root(s), %d binding(s)',
     config.allowedOpenIds.length, config.allowedWorkspaces.length, bindings.size)
+
+  /**
+   * Restart sweep (design §6.4): every persisted pending approval card is
+   * from a dead process. With a cardMessageId, freeze it as invalidated;
+   * without one (crashed before exposure), just delete. Never write
+   * approval/decided — card invalidation is not a decision.
+   */
+  async function sweepPendingCards(): Promise<void> {
+    for (const [key, record] of pendingCards.entries()) {
+      if (record.cardMessageId !== undefined) {
+        const spec: ApprovalCardSpec = {
+          pendingId: record.pendingId, toolName: record.toolName,
+          ...record.reason === undefined ? {} : { reason: record.reason },
+          sessionTitle: record.sessionTitle, webUrl: config.webUrl,
+        }
+        void ctx.feishu.patchCard(record.cardMessageId as string, renderApprovalCardFrozen(spec, 'invalidated'))
+          .catch((error: unknown) => {
+            ctx.logger.warn('feishu-bridge stale approval card freeze failed: %s', String(error))
+          })
+        ctx.logger.info('feishu-bridge: invalidated stale approval card %s', record.pendingId)
+      }
+      await pendingCards.delete(key)
+    }
+  }
 
   /** Startup reconciliation (design §6.1/§6.2) on the same per-chat queues. */
   async function recoverInterrupted(): Promise<void> {
