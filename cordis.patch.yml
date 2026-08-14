@@ -5,6 +5,19 @@
 #
 # Credentials are credential references resolved by the dsh credentials
 # service; no secrets live in this file or this repository.
+#
+# Deployment values (your open_id allowlist and workspace roots) belong in
+# your profile's own patch layer (~/.dsh/profiles/<name>/cordis.patch.yml),
+# which applies after this bundle layer:
+#
+#   - id: feishu-bridge
+#     config:
+#       allowedOpenIds: [ou_your_open_id]
+#       allowedWorkspaces: [~/your/workspace/root]
+#       defaultWorkspace: ~/your/workspace/root
+#
+# The defaults below are fail-closed: an empty allowlist rejects every
+# sender and an empty workspace list rejects every /new.
 
 - insert:
     - id: feishu-gateway
@@ -16,10 +29,7 @@
     - id: feishu-bridge
       name: 'dsh-feishu-bot/bridge'
       config:
-        allowedOpenIds:
-          - ou_your_open_id
-        allowedWorkspaces:
-          - ~/Desktop/mycode
-        defaultWorkspace: ~/Desktop/mycode
+        allowedOpenIds: []
+        allowedWorkspaces: []
         freshnessMs: 600000
         cardThrottleMs: 1000
