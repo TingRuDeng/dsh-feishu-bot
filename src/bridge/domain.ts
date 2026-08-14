@@ -117,7 +117,7 @@ export type FeishuBotGlobal = z.infer<typeof feishuBotGlobal>
 
 /** The feishu-bot domain: identity, version, and all four tables. */
 export const feishuBotDomain = defineDomain({
-  name: 'feishu-bot',
+  name: 'feishu_bot',
   version: 1,
   global: {
     schema: feishuBotGlobal,
@@ -125,9 +125,9 @@ export const feishuBotDomain = defineDomain({
   },
   tables: {
     bindings: domainTable<FeishuChatId, ChatBinding>(chatBinding),
-    inboundEvents: domainTable<FeishuEventId, InboundEvent>(inboundEvent),
-    pendingCards: domainTable<PendingCardId, PendingCard>(pendingCard),
-    outboundSegments: domainTable<OutboundSegmentId, OutboundSegment>(outboundSegment),
+    inbound_events: domainTable<FeishuEventId, InboundEvent>(inboundEvent),
+    pending_cards: domainTable<PendingCardId, PendingCard>(pendingCard),
+    outbound_segments: domainTable<OutboundSegmentId, OutboundSegment>(outboundSegment),
   },
 })
 

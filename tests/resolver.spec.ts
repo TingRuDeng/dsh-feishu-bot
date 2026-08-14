@@ -42,7 +42,7 @@ async function mount(root: string, adapter: MockAdapter): Promise<Context> {
   return ctx
 }
 
-const agentOptions = { config: { provider: 'mock', model: 'm' } }
+const agentOptions = { provider: 'mock', model: 'm' }
 
 function balancedTurn(): SessionEvent[] {
   return [

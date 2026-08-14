@@ -17,6 +17,9 @@ importers:
       '@deepseek-ai/dsh-brand':
         specifier: link:../deepseek-harness/packages/util/brand
         version: link:../deepseek-harness/packages/util/brand
+      '@deepseek-ai/dsh-credentials':
+        specifier: link:../deepseek-harness/packages/credentials/credentials
+        version: link:../deepseek-harness/packages/credentials/credentials
       '@deepseek-ai/dsh-llm':
         specifier: link:../deepseek-harness/packages/llm/llm
         version: link:../deepseek-harness/packages/llm/llm
@@ -45,6 +48,12 @@ importers:
       '@deepseek-ai/dsh-session-persistence-jsonl':
         specifier: link:../deepseek-harness/packages/session/session-persistence-jsonl
         version: link:../deepseek-harness/packages/session/session-persistence-jsonl
+      '@deepseek-ai/dsh-storage':
+        specifier: link:../deepseek-harness/packages/storage/storage
+        version: link:../deepseek-harness/packages/storage/storage
+      '@deepseek-ai/dsh-storage-json':
+        specifier: link:../deepseek-harness/packages/storage/storage-json
+        version: link:../deepseek-harness/packages/storage/storage-json
       '@deepseek-ai/dsh-system-prompt':
         specifier: link:../deepseek-harness/packages/core/system-prompt
         version: link:../deepseek-harness/packages/core/system-prompt

@@ -53,7 +53,7 @@ function feishuMessage(text: string) {
   })
 }
 
-const agentOptions = { config: { provider: 'mock', model: 'm' } }
+const agentOptions = { provider: 'mock', model: 'm' }
 
 /** Smallest resumable log: one balanced completed turn (upstream fixture shape). */
 function balancedTurn(): SessionEvent[] {
