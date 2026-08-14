@@ -87,12 +87,12 @@ export function createBridgeAgentResolver(
         }
       } catch (error: unknown) {
         if (error instanceof ApiRemoteSessionNotFound) {
-          return { error: { code: 'session-not-found', message: error.message } }
+          return { error: { code: 'session-not-found', message: 'session not found' } }
         }
         // Lost a create/resume race to another frontend: the live agent is fine.
         const fencedRetry = fencedLive(sessionId)
         if (fencedRetry !== undefined) return fencedRetry
-        return { error: { code: 'internal', message: `resume failed for "${sessionId}": ${String(error)}` } }
+        return { error: { code: 'internal', message: `resume failed for session "${sessionId}"` } }
       } finally {
         resumes.delete(sessionId)
       }

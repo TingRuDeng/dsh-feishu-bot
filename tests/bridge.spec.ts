@@ -1,10 +1,9 @@
 /**
  * Assembled bridge behavior: full plugin mount over real SessionStore,
  * AgentRegistry, AgentLoop, JSONL persistence, and a JSON storage domain,
- * with a stub `feishu` transport capturing outbound sends. Covers the M1
- * acceptance flows: allowlist, /help, /new authorization, /use + text
- * round-trip (assistant reply reaches the chat), /status, /release,
- * dedup, and non-p2p rejection.
+ * with a stub `feishu` transport capturing outbound sends. Covers the bridge
+ * acceptance flows from M1 through M5: authorization and commands, durable
+ * recovery, terminal projection, approvals, retention, and HMR readiness.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
@@ -33,11 +32,13 @@ class StubFeishu extends Service {
   cards: { messageId: string; card: object }[] = []
   resultCardAttempts: object[] = []
   failResultCards = false
+  failTexts = false
   constructor(ctx: Context) {
     super(ctx, 'feishu')
   }
 
   async sendText(chatId: string, text: string): Promise<string> {
+    if (this.failTexts) throw new Error('simulated text failure')
     this.sent.push({ chatId, text })
     return `om_${this.sent.length}`
   }
@@ -56,16 +57,18 @@ class StubFeishu extends Service {
     this.cards.push({ messageId, card })
   }
 
-  cardHandler: ((action: { operatorOpenId: string; messageId: string; value: unknown }) => Promise<{ toast?: string } | undefined>) | undefined
+  cardHandler: ((action: { operatorOpenId: string; chatId: string; messageId: string; value: unknown }) => Promise<{ toast?: string } | undefined>) | undefined
 
-  handleCardActions(handler: (action: { operatorOpenId: string; messageId: string; value: unknown }) => Promise<{ toast?: string } | undefined>): void {
+  handleCardActions(handler: (action: { operatorOpenId: string; chatId: string; messageId: string; value: unknown }) => Promise<{ toast?: string } | undefined>): void {
     this.cardHandler = handler
   }
 
   /** Test hook: simulate a card button click. */
-  async clickCard(operatorOpenId: string, messageId: string, value: unknown): Promise<{ toast?: string } | undefined> {
+  async clickCard(
+    operatorOpenId: string, messageId: string, value: unknown, chatId = 'oc_chat_1',
+  ): Promise<{ toast?: string } | undefined> {
     if (this.cardHandler === undefined) throw new Error('no card handler registered')
-    return this.cardHandler({ operatorOpenId, messageId, value })
+    return this.cardHandler({ operatorOpenId, chatId, messageId, value })
   }
 }
 
@@ -77,16 +80,18 @@ afterEach(async () => {
 })
 
 const OWNER = 'ou_test_owner'
+const OTHER = 'ou_test_other'
 
-async function mountBridge(adapter: MockAdapter, configOverrides: object = {}): Promise<{
+async function mountBridge(adapter: MockAdapter, configOverrides: object = {}, existingRoot?: string): Promise<{
   ctx: Context
   feishu: StubFeishu
   root: string
+  bridgeFiber: { dispose: () => Promise<void> }
   deliver: (message: Partial<FeishuInboundMessage> & { text?: string }) => Promise<void>
   drain: () => Promise<void>
 }> {
-  const root = await mkdtemp(join(tmpdir(), 'feishu-bridge-'))
-  dirs.push(root)
+  const root = existingRoot ?? await mkdtemp(join(tmpdir(), 'feishu-bridge-'))
+  if (existingRoot === undefined) dirs.push(root)
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(LlmRuntime)
@@ -102,7 +107,7 @@ async function mountBridge(adapter: MockAdapter, configOverrides: object = {}): 
   await ctx.plugin(StorageDomain, { backend: 'json' })
   ctx.llm.registerAdapter(['mock'], adapter)
   await ctx.plugin(StubFeishu)
-  await ctx.plugin(bridge, {
+  const bridgeFiber = ctx.plugin(bridge, {
     allowedOpenIds: [OWNER],
     allowedWorkspaces: [root],
     defaultWorkspace: root,
@@ -112,8 +117,13 @@ async function mountBridge(adapter: MockAdapter, configOverrides: object = {}): 
     agentModel: 'm',
     ...configOverrides,
   })
-  // Bridge mount is async behind apply(); give its domain open a beat.
-  await new Promise(resolve => setTimeout(resolve, 50))
+  await bridgeFiber.await()
+  await vi.waitFor(() => {
+    if (ctx.storageDomain.get('feishu_bot') === undefined) throw new Error('bridge domain not mounted yet')
+  }, { timeout: 5_000, interval: 10 })
+  await vi.waitFor(() => {
+    if (ctx.get('feishuBridgeReady') === undefined) throw new Error('bridge startup recovery not settled yet')
+  }, { timeout: 5_000, interval: 10 })
   const feishu = ctx.get('feishu') as unknown as StubFeishu
   void feishu
 
@@ -142,7 +152,7 @@ async function mountBridge(adapter: MockAdapter, configOverrides: object = {}): 
       last = count
     }
   }
-  return { ctx, feishu, root, deliver, drain }
+  return { ctx, feishu, root, bridgeFiber, deliver, drain }
 }
 
 describe('assembled bridge (M1 acceptance)', () => {
@@ -166,11 +176,12 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(feishu.sent[0]!.text).toContain('/use')
   })
 
-  it('duplicate event ids are consumed once (at-least-once dedup)', async () => {
+  it('duplicate committed command events replay the first result without re-running work', async () => {
     const { feishu, deliver } = await mountBridge(new MockAdapter([]))
     await deliver({ eventId: 'ev_dup', text: '/help' })
     await deliver({ eventId: 'ev_dup', text: '/help' })
-    expect(feishu.sent).toHaveLength(1)
+    expect(feishu.sent).toHaveLength(2)
+    expect(feishu.sent[1]!.text).toBe(feishu.sent[0]!.text)
   })
 
   it('free text without a binding explains how to bind', async () => {
@@ -227,6 +238,7 @@ describe('assembled bridge (M1 acceptance)', () => {
       segmentCount: 1,
       text: '',
       status: 'sent',
+      attempts: 1,
       createdAt: expect.any(Number),
     }])
   })
@@ -319,6 +331,53 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(await outcome).toBe('rejected')
   })
 
+  it('approval: forwarded chats and mismatched card messages cannot decide a pending request', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const outcome = ctx.approval.request({ agent, toolName: 'Bash' })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('审批请求'))) throw new Error('no card yet')
+    }, { timeout: 10_000, interval: 50 })
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('审批请求'))!
+    const pendingId = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]!
+
+    const forwarded = await feishu.clickCard(OWNER, sent.messageId, { pendingId, action: 'allow' }, 'oc_forwarded')
+    expect(forwarded?.toast).toContain('不属于')
+    await expect(Promise.race([
+      outcome.then(() => 'decided'),
+      new Promise<'pending'>(resolve => setTimeout(() => resolve('pending'), 20)),
+    ])).resolves.toBe('pending')
+
+    const wrongMessage = await feishu.clickCard(OWNER, 'card_forged', { pendingId, action: 'allow' })
+    expect(wrongMessage?.toast).toContain('不属于')
+    const accepted = await feishu.clickCard(OWNER, sent.messageId, { pendingId, action: 'reject' })
+    expect(accepted?.toast).toContain('已拒绝')
+    expect(await outcome).toBe('rejected')
+  })
+
+  it('approval: a card cannot decide after its chat is rebound to another session', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '任务' })
+    const original = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const outcome = ctx.approval.request({ agent: original, toolName: 'Write', reason: '旧会话审批' })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('旧会话审批'))) throw new Error('no card yet')
+    }, { timeout: 10_000, interval: 50 })
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('旧会话审批'))!
+    const pendingId = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]!
+
+    await deliver({ text: '/new' })
+    const toast = await feishu.clickCard(OWNER, sent.messageId, { pendingId, action: 'allow' })
+    expect(toast?.toast).toContain('失效')
+    await expect(Promise.race([
+      outcome.then(() => 'decided'),
+      new Promise<'pending'>(resolve => setTimeout(() => resolve('pending'), 20)),
+    ])).resolves.toBe('pending')
+  })
+
   it('approval: a JSON-string button value decides the same as an object (M3 fix)', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })
@@ -341,6 +400,9 @@ describe('assembled bridge (M1 acceptance)', () => {
     await deliver({ text: '/new' })
     const toast = await feishu.clickCard(OWNER, 'card_x', 'not-json-at-all')
     expect(toast?.toast).toBeDefined()
+
+    const nullToast = await feishu.clickCard(OWNER, 'card_x', null)
+    expect(nullToast?.toast).toBeDefined()
   })
 
   it('parallel approvals collapse into one group card with per-item buttons (M3 UX)', { timeout: 20_000 }, async () => {
@@ -429,6 +491,61 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(feishu.sent.at(-1)!.text).toContain('未绑定')
   })
 
+  it('only boundBy may release or stop an active binding', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter([]), {
+      allowedOpenIds: [OWNER, OTHER],
+    })
+    await deliver({ text: '/new' })
+    const original = ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1') as { sessionId: string }
+
+    await deliver({ senderOpenId: OTHER, text: '/release' })
+    expect(feishu.sent.at(-1)!.text).toContain('绑定者')
+    expect(ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1'))
+      .toMatchObject({ sessionId: original.sessionId, status: 'active' })
+
+    await deliver({ senderOpenId: OTHER, text: '/stop' })
+    expect(feishu.sent.at(-1)!.text).toContain('绑定者')
+  })
+
+  it('only boundBy may replace an active binding with /use', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]), {
+      allowedOpenIds: [OWNER, OTHER],
+    })
+    await deliver({ text: '/new' })
+    const original = ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1') as { sessionId: string }
+    await ctx.agents.create({
+      sessionId: 'second-session' as never,
+      meta: { cwd: root },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+
+    await deliver({ senderOpenId: OTHER, text: '/use second-session' })
+    expect(feishu.sent.at(-1)!.text).toContain('绑定者')
+    expect(ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1'))
+      .toMatchObject({ sessionId: original.sessionId, status: 'active' })
+  })
+
+  it('an allowlisted but non-boundBy operator cannot decide an approval', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']), {
+      allowedOpenIds: [OWNER, OTHER],
+    })
+    await deliver({ text: '/new' })
+    await deliver({ text: '任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const outcome = ctx.approval.request({ agent, toolName: 'Bash' })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('审批请求'))) throw new Error('no card yet')
+    }, { timeout: 10_000, interval: 50 })
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('审批请求'))!
+    const pendingId = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]!
+
+    const denied = await feishu.clickCard(OTHER, sent.messageId, { pendingId, action: 'allow' })
+    expect(denied?.toast).toContain('绑定者')
+    const accepted = await feishu.clickCard(OWNER, sent.messageId, { pendingId, action: 'reject' })
+    expect(accepted?.toast).toContain('已拒绝')
+    expect(await outcome).toBe('rejected')
+  })
+
   it('stale events expire without visible effect', async () => {
     const { feishu, deliver } = await mountBridge(new MockAdapter([]))
     await deliver({ text: '/help', createTimeMs: Date.now() - 3_600_000 })
@@ -515,8 +632,150 @@ describe('assembled bridge (M1 acceptance)', () => {
 
   it('non-text messages get the unsupported-content notice', async () => {
     const { feishu, deliver } = await mountBridge(new MockAdapter([]))
-    await deliver({ text: undefined })
+    await deliver({ eventId: 'ev_non_text', text: undefined })
+    await deliver({ eventId: 'ev_non_text', text: undefined })
     expect(feishu.sent).toHaveLength(1)
     expect(feishu.sent[0]!.text).toContain('非文本')
+  })
+
+  it('restart resumes a durable pending outbox segment and advances its watermark', { timeout: 20_000 }, async () => {
+    const first = await mountBridge(new MockAdapter([]))
+    const domain = first.ctx.storageDomain.get('feishu_bot')!
+    await domain.table('outbound_segments').put('oc_chat_1:s-recover:7:0', {
+      chatId: 'oc_chat_1', sessionId: 's-recover', sourceEventSeq: 7,
+      segmentIndex: 0, segmentCount: 1, text: '重启后续发',
+      status: 'pending', attempts: 0, createdAt: Date.now(),
+    })
+    await first.ctx.fiber.dispose()
+
+    const second = await mountBridge(new MockAdapter([]), {}, first.root)
+    const recovered = second.ctx.storageDomain.get('feishu_bot')!
+    let row: {
+      status: string; text: string; attempts: number
+    } | undefined
+    await vi.waitFor(() => {
+      row = recovered.table('outbound_segments').get('oc_chat_1:s-recover:7:0') as typeof row
+      if (row?.status !== 'sent') throw new Error(`outbox row is still ${row?.status ?? 'missing'}`)
+      if (!Object.values((recovered.global.get() as { watermarks: Record<string, number> }).watermarks).includes(7)) {
+        throw new Error('outbox watermark has not advanced yet')
+      }
+    }, { timeout: 5_000, interval: 10 })
+    expect(row).toMatchObject({ status: 'sent', text: '', attempts: 1 })
+    expect(second.feishu.cards.some(card => JSON.stringify(card.card).includes('重启后续发'))).toBe(true)
+    expect(Object.values((recovered.global.get() as { watermarks: Record<string, number> }).watermarks))
+      .toContain(7)
+  })
+
+  it('restart abandons an over-TTL pending outbox row without sending its body', { timeout: 20_000 }, async () => {
+    const config = { outboundPendingTtlMs: 10 }
+    const first = await mountBridge(new MockAdapter([]), config)
+    const domain = first.ctx.storageDomain.get('feishu_bot')!
+    await domain.table('outbound_segments').put('oc_chat_1:s-stale:9:0', {
+      chatId: 'oc_chat_1', sessionId: 's-stale', sourceEventSeq: 9,
+      segmentIndex: 0, segmentCount: 1, text: '不应发送的正文',
+      status: 'pending', attempts: 2, createdAt: Date.now() - 1_000,
+    })
+    await first.ctx.fiber.dispose()
+
+    const second = await mountBridge(new MockAdapter([]), config, first.root)
+    let row: { status: string; text: string; attempts: number } | undefined
+    await vi.waitFor(() => {
+      row = second.ctx.storageDomain.get('feishu_bot')!
+        .table('outbound_segments').get('oc_chat_1:s-stale:9:0') as typeof row
+      if (row?.status !== 'abandoned') throw new Error(`outbox row is still ${row?.status ?? 'missing'}`)
+    }, { timeout: 5_000, interval: 10 })
+    expect(row).toMatchObject({ status: 'abandoned', text: '', attempts: 2 })
+    expect(second.feishu.cards.some(card => JSON.stringify(card.card).includes('不应发送的正文'))).toBe(false)
+    expect(second.feishu.sent.some(message => message.text.includes('不应发送的正文'))).toBe(false)
+  })
+
+  it('restart rejects an over-TTL received message and clears its text', { timeout: 20_000 }, async () => {
+    const config = { recoveryTtlMs: 10 }
+    const first = await mountBridge(new MockAdapter([]), config)
+    const domain = first.ctx.storageDomain.get('feishu_bot')!
+    await domain.table('inbound_events').put('ev_stale_recovery', {
+      kind: 'message', chatId: 'oc_chat_1', senderOpenId: OWNER,
+      receivedAt: Date.now() - 1_000, status: 'received', text: '不得残留',
+    })
+    await first.ctx.fiber.dispose()
+
+    const second = await mountBridge(new MockAdapter([]), config, first.root)
+    let row: { status: string; text?: string; reason?: string } | undefined
+    await vi.waitFor(() => {
+      row = second.ctx.storageDomain.get('feishu_bot')!
+        .table('inbound_events').get('ev_stale_recovery') as typeof row
+      if (row?.status !== 'rejected') throw new Error(`inbound row is still ${row?.status ?? 'missing'}`)
+    }, { timeout: 5_000, interval: 10 })
+    expect(row).toMatchObject({ status: 'rejected', reason: 'interrupted' })
+    expect(row?.text).toBeUndefined()
+    expect(second.feishu.sent.at(-1)?.text).toContain('超过恢复期限')
+  })
+
+  it('restart marks a binding unavailable when its session no longer exists', { timeout: 20_000 }, async () => {
+    const first = await mountBridge(new MockAdapter([]))
+    const domain = first.ctx.storageDomain.get('feishu_bot')!
+    await domain.table('bindings').put('oc_chat_1', {
+      sessionId: 'missing-session', status: 'active', boundBy: OWNER, boundAt: Date.now(),
+    })
+    await first.ctx.fiber.dispose()
+
+    const second = await mountBridge(new MockAdapter([]), {}, first.root)
+    await vi.waitFor(() => {
+      expect(second.ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1'))
+        .toMatchObject({ sessionId: 'missing-session', status: 'unavailable' })
+    }, { timeout: 5_000, interval: 10 })
+    expect(second.feishu.sent.at(-1)?.text).toContain('已标记为不可用')
+  })
+
+  it('restart reconciles a staged /use target by restoring its missing binding once', { timeout: 20_000 }, async () => {
+    const first = await mountBridge(new MockAdapter([textResponse('seed persisted session')]))
+    await first.deliver({ text: '/new' })
+    await first.deliver({ text: '先产生一轮可恢复日志' })
+    const domain = first.ctx.storageDomain.get('feishu_bot')!
+    const binding = domain.table('bindings').get('oc_chat_1') as { sessionId: string }
+    await domain.table('bindings').delete('oc_chat_1')
+    await domain.table('inbound_events').put('ev_interrupted_use', {
+      kind: 'command', chatId: 'oc_chat_1', senderOpenId: OWNER,
+      receivedAt: Date.now(), status: 'received', command: 'use',
+      commandArgsHash: 'hash-only', target: binding.sessionId,
+    })
+    await first.ctx.fiber.dispose()
+
+    const second = await mountBridge(new MockAdapter([]), {}, first.root)
+    const recovered = second.ctx.storageDomain.get('feishu_bot')!
+    await vi.waitFor(() => {
+      expect(recovered.table('bindings').get('oc_chat_1'))
+        .toMatchObject({ sessionId: binding.sessionId, status: 'active' })
+      expect(recovered.table('inbound_events').get('ev_interrupted_use'))
+        .toMatchObject({ status: 'committed', target: binding.sessionId })
+    }, { timeout: 5_000, interval: 20 })
+    expect(recovered.table('bindings').get('oc_chat_1'))
+      .toMatchObject({ sessionId: binding.sessionId, status: 'active' })
+    expect(recovered.table('inbound_events').get('ev_interrupted_use'))
+      .toMatchObject({ status: 'committed', target: binding.sessionId })
+  })
+
+  it('bridge HMR disposal closes its domain and unregisters inbound and approval listeners', { timeout: 20_000 }, async () => {
+    const mounted = await mountBridge(new MockAdapter(['hang']))
+    const handle = await mounted.ctx.agents.create({
+      sessionId: 'hmr-external' as never,
+      meta: { cwd: mounted.root },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    await mounted.deliver({ text: '/use hmr-external' })
+    await mounted.deliver({ text: '保持一个开放中的 turn' })
+    const agent = handle.agent
+    await vi.waitFor(() => { expect(agent.status).toBe('running') }, { timeout: 5_000, interval: 20 })
+    const sentBefore = mounted.feishu.sent.length
+    expect(mounted.ctx.get('feishuBridgeReady')).toEqual({ domainName: 'feishu_bot' })
+
+    await mounted.bridgeFiber.dispose()
+    expect(mounted.ctx.storageDomain.get('feishu_bot')).toBeUndefined()
+    expect(mounted.ctx.get('feishuBridgeReady')).toBeUndefined()
+    await mounted.deliver({ text: '/help' })
+    expect(mounted.feishu.sent).toHaveLength(sentBefore)
+    await expect(mounted.ctx.approval.request({ agent, toolName: 'Bash' }))
+      .resolves.toBe('unavailable')
+    expect(mounted.feishu.cards.some(card => JSON.stringify(card.card).includes('审批请求'))).toBe(false)
   })
 })

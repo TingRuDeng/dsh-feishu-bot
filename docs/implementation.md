@@ -26,13 +26,13 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 ### 骨架任务
 
-- 建仓库 `~/Desktop/mycode/dsh-feishu-bot`：package.json（`dsh.bundle.patch`）、tsconfig、`cordis.patch.yml` 两行、`src/gateway`（空服务注册 `ctx.feishu`）、`src/bridge`（空 apply）、`src/invariant.ts`、vitest 骨架。
+- 建仓库 `~/Desktop/mycode/dsh-feishu-bot`：package.json（`dsh.bundle.patch`）、tsconfig、`cordis.patch.yml` 三行（gateway / bridge / invariant）、`src/gateway`、`src/bridge`、`src/invariant.ts`、vitest 骨架。
 - 飞书企业自建应用建号、开权限、拿 App ID/Secret 存入 credentials。
 - 白名单拿到本人 open_id。
 
 ### 验收
 
-- `--dump-config` 可见两行；web profile 正常启动；gateway 长连接收到消息打审计日志。
+- `--dump-config` 可见三行；web profile 正常启动；gateway 长连接收到消息打审计日志。
 - 核验清单 12 项全部有结论；据结论修订设计文档相应小节与本计划工时。
 
 ## M1：私聊文本闭环（代码面已完成，待实机验收）
@@ -98,24 +98,28 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 验收剧本：越权写文件 → 手机批准 → 任务继续；（α）Web 先批 → 飞书卡片定格"已在别处决定"，或（β）绑定会话的审批只出现在飞书。
 
-## M4：可靠性与体验（进行中）
+## M4：可靠性与体验（代码面完成，待实机验收）
 
-**状态：前三项已实现：① `/ls` 编号快照默认 5 分钟过期（`listingTtlMs` 可配置）；②终态回复改为绿色结果卡，按完整 create-message envelope 的 24KB 软上限分片，卡片失败降级文本且保留 durable outbox 语义；③本地绝对路径 Markdown 链接在分片前改写为可读代码样式，网页链接保持不变。后续排期见 [HANDOFF.md](HANDOFF.md)。**
+**状态：已完成。** 已交付 `/ls` 5 分钟编号快照 TTL、24 KiB 完整 envelope 预检的绿色终态结果卡、本地路径展示改写、运行卡唯一“思考中……”尾标、旧 sequence 拒绝、同 callId 原位更新和 `✅` 成功标识。耗时导航按钮当前没有实际消费者，因此“受理/完成两段式 + 回写原卡”经适用性审计后不制造空入口。
 
-## M4：可靠性
+可靠性已落地：
 
-- 断线重连 + 状态机防回灌；发送重试/熔断/顺序保证；
-- 启动恢复扫描全链路落地（设计 §9 四步：pendingCards 失效、绑定校验、received/recovering 对账与命令 reconciliation、outbox pending 段续发）；
-- inboundEvents / outboundSegments TTL 与容量清理；received 超恢复期限转 rejected('interrupted')，pending 段超期放弃 + 审计；
-- HMR 处置测试：dispose 后 WS 关闭、waterfall 监听注销、domain closed、无残留 timer；
-- invariant companion：bindings 表中每个 active 绑定的 sessionId 存在于 session 存储。
+- 文本/卡片共享 per-chat FIFO、指数退避、尝试预算、熔断冷却与有界 dispose drain；
+- 启动按 pendingCards 失效、悬空 binding 校验、received/recovering 与命令 reconciliation、TTL/容量维护、pending outbox 续发的顺序恢复；
+- pending 发送尝试持久化，超期转 `abandoned` 并清正文；终态记录按 TTL/软容量清理，持久化 watermark 阻止清理后重放；
+- HMR 测试覆盖 WS 先关闭、已接收发送排空、桥 intake/监听器/timer/domain 回卷；
+- invariant companion 在启动和后续 domain 变更上强制 active binding 必须指向 live/persisted session；
+- stop / release / active binding 替换 / 审批点击均要求 `boundBy` 本人。
 
 验收剧本：任务运行中杀进程重启——绑定在、无重复消息；命令副作用不重复（reconciliation 覆盖 target 已落盘的中断；仅 target 回写前窄窗口可能残留孤儿 session，回帖提示核实）；未发文本段续发（"发送成功、sent 未落盘"窗口内的段允许重发一次）；旧审批卡定格失效；新消息正常入队。
 
-## M5：收尾
+## M5：收尾（完成）
 
-- README（含 Model Experience 章节：本插件不注入提示词/工具 schema；用户消息逐字入会话；审批决定走既有 approval 审计事件）；
-- 审计日志完善；配置文档；已验证 dsh 版本记录。
+- README 已补 Model Experience：不注入提示词/工具 schema；普通非命令用户消息逐字入会话；审批沿用既有 `approval/asked` / `approval/decided` 审计所有权；
+- README 与设计文档已列 gateway / bridge 全部配置键、默认值、可靠性参数、数据暴露边界和实机验收边界；
+- `feishu-audit` 覆盖入站、命令、binding、outbox、审批与保留清理，原始标识统一稳定哈希，错误只留 class/code，SDK `data` 字段及 `formatErrors` 重复响应体脱敏；
+- DSH 基线已记录：本地 clean checkout `0.1.0-rc.5`，commit `47f943859bef60e4160492346772ded9b24f765a`（2026-08-14）；
+- 自动化验证与最终提交证据见 [HANDOFF.md](HANDOFF.md)；飞书实机仍由部署者重启现有 `dsh web` 后执行。
 
 ## 全局测试策略
 

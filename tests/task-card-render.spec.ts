@@ -18,12 +18,13 @@ describe('renderTaskCard', () => {
     expect(json.split('思考中').length - 1).toBe(1)
   })
 
-  it('running with tools lists current tool names and drops the waiting hint', () => {
+  it('running with tools lists current tool names and appends one active thinking hint', () => {
     const card = renderTaskCard({ ...base, status: 'running', currentTools: ['Bash', 'Read'], toolCallCount: 3 })
     const json = JSON.stringify(card)
     expect(json).toContain('Bash')
     expect(json).toContain('Read')
-    expect(json).not.toContain('思考中')
+    expect(json.split('思考中').length - 1).toBe(1)
+    expect(card.elements[0]!.text.content.endsWith('思考中.....')).toBe(true)
   })
 
   it('completed card carries no duplicate completion body text', () => {
@@ -73,10 +74,17 @@ describe('renderTaskCard', () => {
       recentTools: ['Bash', 'Read'], toolCallCount: 3,
     })
     const json = JSON.stringify(card)
-    expect(json).toContain('✓ Bash')
-    expect(json).toContain('✓ Read')
+    expect(json).toContain('✅ Bash')
+    expect(json).toContain('✅ Read')
     expect(json).toContain('Write')
-    expect(json).not.toContain('思考中')
+    expect(json.split('思考中').length - 1).toBe(1)
+  })
+
+  it('terminal cards uniformly strip the active thinking hint', () => {
+    for (const status of ['completed', 'stopped', 'failed'] as const) {
+      const card = renderTaskCard({ ...base, status, currentTools: [], toolCallCount: 1 })
+      expect(JSON.stringify(card)).not.toContain('思考中')
+    }
   })
 
   it('deterministic: same snapshot → identical JSON', () => {

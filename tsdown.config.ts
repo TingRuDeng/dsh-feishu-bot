@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsdown'
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/gateway/index.ts', 'src/bridge/index.ts'],
+  entry: ['src/index.ts', 'src/gateway/index.ts', 'src/bridge/index.ts', 'src/invariant.ts'],
   format: 'esm',
   outDir: 'lib',
   dts: true,

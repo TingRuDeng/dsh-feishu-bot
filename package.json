@@ -27,6 +27,10 @@
       "types": "./lib/types/bridge/index.d.ts",
       "default": "./lib/bridge/index.js"
     },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -59,6 +63,7 @@
     "@larksuiteoapi/node-sdk": "^1.44.0",
     "zod": "^4.4.3",
     "@deepseek-ai/dsh-credentials": "link:../deepseek-harness/packages/credentials/credentials",
+    "@deepseek-ai/dsh-invariants": "link:../deepseek-harness/packages/runtime-diagnostics/invariants",
     "@deepseek-ai/dsh-user-approval": "link:../deepseek-harness/packages/interaction/user-approval"
   },
   "devDependencies": {

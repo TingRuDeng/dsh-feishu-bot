@@ -44,8 +44,9 @@
 │    per-chat 业务队列 → 白名单 → 状态机去重 → 命令 or inbox  │
 │    session/event 订阅 → 结果卡 + 任务卡投影                 │
 │    approval/request waterfall 答复者 → 审批卡               │
-│    feishu-bot storage domain（绑定/入站记录/待决卡）        │
+│    feishu-bot storage domain（绑定/入站/outbox/待决卡）     │
 │    host 同构 agent resolver（cold resume + ownership fence）│
+│  feishu-invariant（active binding → live/persisted session）│
 │                                                             │
 │  （既有）dsh-base + dsh-web-app：agents/sessions/tools/     │
 │   sandbox/approval/llm/host/client…                         │
@@ -56,15 +57,16 @@
 
 - 独立仓库 `dsh-feishu-bot`（建议 `~/Desktop/mycode/dsh-feishu-bot`），npm 包形态 profile bundle：`package.json` 声明 `dsh.bundle.patch: ./cordis.patch.yml`。
 - 安装 `dsh plugin --profile web add <dir>`；组合层变更需重启 profile 进程。
-- patch 插入两行：`feishu-gateway`、`feishu-bridge`。单包多入口，角色独立演化前不拆包。
+- patch 插入三行：`feishu-gateway`、`feishu-bridge`、`feishu-invariant`。单包多入口，角色独立演化前不拆包。
 - 锁定已验证 dsh 版本（当前 0.1.0-rc.5）；升级须重跑 Loader 组合回归。
 
 ### 3.2 插件职责边界
 
 | 插件 | 注入依赖 | 职责 | 明确不做 |
 |---|---|---|---|
-| `feishu-gateway` | logger, credentials | `ctx.feishu` 服务：长连接、收发、卡片、出站 FIFO 与限流重试 | 任何业务语义 |
-| `feishu-bridge` | feishu, agents, sessions, storageDomain, approval, logger（不注入 userQuestions） | 绑定、命令、入站路由、出站投影、审批答复 | 不持有飞书 SDK；不执行 shell；不解析工具参数 |
+| `feishu-gateway` | credentials | `ctx.feishu` 服务：长连接、收发、卡片、出站 FIFO 与限流重试 | 任何业务语义 |
+| `feishu-bridge` | feishu, agents, sessions, sessionPersistence, storageDomain（不注入 userQuestions） | 绑定、命令、入站路由、出站投影、审批答复 | 不持有飞书 SDK；不执行 shell；不解析工具参数 |
+| `feishu-invariant` | invariants, feishuBridgeReady（installer 内需 sessions、sessionPersistence、storageDomain） | bridge 恢复完成后及后续写入时校验 active binding 指向存在 session | 不修复状态；失败即报告不变量破坏 |
 
 ### 3.3 顺序保证的三层分工
 
@@ -238,7 +240,7 @@ im.message.receive_v1 回调 → 入 per-chat 业务队列，队内依次：
 
 对账判定链穷尽 6c–6f 之间每个崩溃点；"消息不重复消费"的承诺以此为准，而非仅查 `user/message`。`recovering` 是恢复程序的占用标记：恢复中途再崩溃，下次启动扫描将 `recovering` 视同 `received` 重新对账（对账本身幂等，重入安全）。
 
-消息来源标记：**默认 `{kind:'plugin', plugin:'feishu-bot'}`**——event↔message 关联已由 `InboundEventRecord.messageId` 持久化，不必为关联扩展公共消息 source。仅当 M0#4 证明 `MessageSourceMap` 合并扩展 kind 在 durable/replay/跨版本读取上完整可行、且确有超出关联的需要时，才启用 `feishu` 专用 kind（扩大 durable 格式面须有对等收益）。
+消息来源标记：**`{kind:'user', via:'feishu'}`**——人类输入在 Web transcript 中保持用户消息语义，`via` 记录前端来源；event↔message 关联仍由 `InboundEventRecord.messageId` 持久化，不扩展新的 source kind。
 
 **首期不做合并窗口与 `..`/`!!` 约定**：每条消息独立 `followup()`（next-turn 语义：turn 进行中排队至下一 turn，空闲即开新 turn）。不用 `steer()`/`inject()`。合并属体验优化，需先解决其 durable 与模型可见性设计（§10）。
 
@@ -254,7 +256,6 @@ im.message.receive_v1 回调 → 入 per-chat 业务队列，队内依次：
 | `/status` | 绑定、cwd、模型/档位、agent 状态 | allowlist |
 | `/stop` | `agent.cancel({kind:'user'}, {keepInbox: true})`：中止当前 turn，**保留已排队输入**（帮助文本注明） | boundBy |
 | `/release` | 解绑本窗口；对未绑定 chat 回"当前无绑定"视为成功 | boundBy |
-| `/model` | 只读显示当前会话模型与推理档位 | allowlist |
 | `/help` | 帮助 | allowlist |
 
 命令幂等策略（配合 §6.1 状态机）：
@@ -266,13 +267,13 @@ im.message.receive_v1 回调 → 入 per-chat 业务队列，队内依次：
     - `/use`：record 有 `target` 且绑定已指向它 ⇒ 补写 committed；绑定未变 ⇒ 重走 resolver→绑定（resolver 并发去重使重复 resume 安全）。
     - `/release`：当前绑定已不存在 ⇒ 已完成，补写 committed；仍存在 ⇒ 重执行解绑（幂等）。
   - **副作用不可识别（record 无 `target`，崩溃于目标回写前）**：`/new` 此窗口内 session 可能已创建但无从关联 ⇒ 标 rejected('interrupted')，回帖提示核实（孤儿 session 由 `/ls` 可见，用户可 `/use` 认领）。该窗口按实现收窄到"创建调用与 target 回写之间"，无法为零——**验收表述相应为：系统不自动重放中断命令；reconciliation 覆盖 target 已落盘的中断；仅目标回写前的窄窗口可能残留需人工核实的孤儿副作用**。
-- 天然幂等命令（`/ls` `/status` `/model` `/help`）无副作用，中断后用户重发即可。
+- 天然幂等命令（`/ls` `/status` `/help`）无副作用，中断后用户重发即可。
 - `/stop` 重复执行安全（对已中止 turn 的再次 cancel 是 no-op，不影响后续新 turn）。
 - 命令回帖先于 committed 写入发出时可能"回帖成功但记录丢失"，reconciliation 补写 committed 后重发回帖——用户至多多收一条相同回帖，不产生副作用。
 
 ### 6.3 出站投影
 
-**数据暴露立场（安全评审 2026-08 确认为设计行为）**：绑定即授权上传——assistant 回复发往飞书服务器（含模型输出的代码/文件内容/命令结果），命令回帖含本机绝对路径与会话 id。不做出站内容过滤；本地绝对路径 Markdown 链接只做展示改写（`[label](/path)` → ``label（`/path`）``），路径本身仍会上传。信任边界在**谁能绑定**（allowedOpenIds fail-closed）与**哪些会话可见**（allowedWorkspaces 约束 /ls、/use、/new 三个入口）。部署者不得把"不可离机"的工作区加入白名单。**边界精确含义**：allowedWorkspaces 约束的是飞书侧"哪些会话可绑定/列出/新建"，不约束绑定后 agent 的读取面——上游沙箱只围栏写入（fs-sandbox "every mode permits reading"；Seatbelt `(allow default)`+`(deny file-write*)`），任何会话都能读本 OS 用户可读的一切文件并在回复中复述。读隔离须靠独立 OS 用户，非本插件配置可达。桥自身日志与审计只落 id/hash，SDK 失败日志经脱敏 logger 剥离 config.data/response.data 正文。
+**数据暴露立场（安全评审 2026-08 确认为设计行为）**：绑定即授权上传——assistant 回复发往飞书服务器（含模型输出的代码/文件内容/命令结果），命令回帖含本机绝对路径与会话 id；任务/审批卡还会上送工作区 basename、任务/工具状态、工具名、审批 reason 与可用 token 事实（审批卡不放工具参数）。不做出站内容过滤；本地绝对路径 Markdown 链接只做展示改写（`[label](/path)` → ``label（`/path`）``），路径本身仍会上传。信任边界在**谁能绑定**（allowedOpenIds fail-closed）与**哪些会话可见**（allowedWorkspaces 约束 /ls、/use、/new 三个入口）。部署者不得把"不可离机"的工作区加入白名单。**边界精确含义**：allowedWorkspaces 约束的是飞书侧"哪些会话可绑定/列出/新建"，不约束绑定后 agent 的读取面——上游沙箱只围栏写入（fs-sandbox "every mode permits reading"；Seatbelt `(allow default)`+`(deny file-write*)`），任何会话都能读本 OS 用户可读的一切文件并在回复中复述。读隔离须靠独立 OS 用户，非本插件配置可达。桥自身日志与审计只落 id/hash，SDK 失败日志经脱敏 logger 剥离 config.data/response.data 以及 `formatErrors` 追加的重复响应体。
 
 1. **终态结果卡（经 outbox，§5 `outboundSegments`）**：仅投递**已提交**的 `assistant/message`；不投未提交流式 delta。流程：
    - 观察到绑定 session 的 `assistant/message` ⇒ 将本地绝对路径 Markdown 链接改写为可读代码样式（HTTP/相对链接保持不变）⇒ 按完整 create-message envelope 的 UTF-8 JSON 字节数做 24KB 软上限预检 ⇒ 整行优先装箱，单行仍超限时按 Unicode 码点二分切割 ⇒ 渲染绿色结果卡（标题 `工作区名 · 最终结果 · i/N`）；
@@ -316,8 +317,8 @@ bridge listener 收到 approval/request
  → 审批卡内容：toolName + reason 截断 500 字节 + 会话标题 + Web GUI 链接；
    不解析、不展示 tool/call 参数
  → 飞书用户点击 允许/拒绝：
-   校验 权限（§7.2）∧ 内存 registry 中该 approvalId 仍 pending ∧ 卡片所在 chat
-   当前仍 active 绑定该 session；通过 ⇒ resolve，卡片定格
+   校验 权限（§7.2）∧ 内存 registry 中该 approvalId 仍 pending ∧ 回调 chatId/messageId
+   与原审批卡一致 ∧ 该 chat 当前仍 active 绑定原 session；通过 ⇒ resolve，卡片定格
  → req.signal abort（asker 撤回）⇒ 卡片定格"已撤回"，清 registry 与 record
 ```
 
@@ -360,7 +361,7 @@ bridge listener 收到 approval/request
 ### 7.1 红线（不可协商）
 
 1. 飞书消息只进会话流（`followup` 用户消息）；任何路径不得直接执行 shell、写文件、改配置。
-2. 审批三重校验：权限（§7.2）+ 内存 registry pending 校验 + 卡片所在 chat 绑定校验；缺一即拒并审计。
+2. 审批校验链：权限（§7.2）+ 内存 registry pending + 回调 chat/message 与原卡一致 + chat 仍绑定原 session；缺一即拒并审计。
 3. 白名单 fail-closed：空名单拒绝一切；无自动授权逻辑。
 4. 凭据只经 credentials 服务；日志脱敏；审计记录入站元数据（不含正文全文）、命令、审批决定。
 5. 沙箱与权限档位不因飞书通道放宽；审批卡只是 answerer 换面，policy 不变。
@@ -371,7 +372,7 @@ bridge listener 收到 approval/request
 
 | 操作 | 需 allowlist | 需本 chat 有 active 绑定 | 需操作者 = boundBy |
 |---|---|---|---|
-| `/ls` `/status` `/model` `/help` | 是 | 否 | 否 |
+| `/ls` `/status` `/help` | 是 | 否 | 否 |
 | `/new` | 是 | 否 | 否 |
 | `/use`（空闲或 unavailable chat） | 是 | 否 | 否 |
 | `/use`（抢占 active 绑定） | 是 | — | 是，否则要求先 `/release` |
@@ -379,22 +380,29 @@ bridge listener 收到 approval/request
 | `/stop` `/release` | 是 | 是 | 是 |
 | 审批点击 | 是 | 是 | 是 |
 
-- 首期主场景为单人私聊，矩阵按最严格档：破坏性操作（stop/release/审批/抢占）一律 boundBy 本人；卡片跨 chat 转发后点击因绑定校验天然失效。
+- 首期主场景为单人私聊，矩阵按最严格档：破坏性操作（stop/release/审批/抢占）一律 boundBy 本人；跨 chat 转发或伪造 messageId 的卡片点击因原卡上下文校验失效。
 - allowlist 用户 ≠ 可控制所有已绑会话：控制权按 chat 绑定 + boundBy 收窄。
 
 ## 8. 配置面
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `appIdRef` / `appSecretRef` | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | credentials 引用 |
+| `appIdRef` / `appSecretRef` | bundle: `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | credentials 引用；schema 必填，bundle patch 提供引用名 |
 | `allowedOpenIds` | `[]` | 白名单（空=拒绝所有） |
 | `allowedWorkspaces` | `[]` | `/new` cwd 允许根（realpath 化祖先检查，§6.7）；空=拒绝一切 `/new` |
-| `defaultWorkspace` | — | `/new`/`/ls` 默认 cwd；须位于 allowedWorkspaces 内（load 校验）；缺省时 `/new` 要求显式 cwd |
+| `defaultWorkspace` | — | `/new` 默认 cwd；支持 `~`；须位于 allowedWorkspaces 内（load 校验）；缺省时 `/new` 要求显式 cwd |
 | `freshnessMs` | 600000 | 入站时效 |
 | `listingTtlMs` | 300000 | `/ls` 编号快照有效期；过期后 `/use <编号>` 要求重新 `/ls` |
 | `cardThrottleMs` | 1000 | 卡片节流 |
-| `sendRetryBudget` / `disposeDrainTimeoutMs` | 待定 | 出站队列重试与关闭排空上限 |
-| `provider` / `model` | 缺省 | `/new` 模型路由；缺省用 `agent-default-model` |
+| `sendRetryBaseMs` / `sendMaxAttempts` | 500 / 4 | 文本与卡片创建共享的指数退避基数和最大尝试次数 |
+| `sendCircuitCooldownMs` / `disposeDrainTimeoutMs` | 30000 / 5000 | 单 chat 熔断冷却与关闭排空上限 |
+| `recoveryTtlMs` | 86400000 | received/recovering 入站项可恢复期限 |
+| `inboundRetentionMs` / `inboundMaxRecords` | 604800000 / 50000 | 终态入站保留期与软容量；可恢复行不因容量被删 |
+| `outboundRetentionMs` / `outboundMaxRecords` | 604800000 / 10000 | 终态 outbox 保留期与软容量 |
+| `outboundPendingTtlMs` | 86400000 | pending 段超期后 abandoned 并清正文 |
+| `maintenanceIntervalMs` | 86400000 | 清理周期；0 仅关闭周期 timer，启动清理仍执行 |
+| `agentProvider` / `agentModel` | deepseek / deepseek-chat | `/new` 与 cold resume 的模型路由 |
+| `webUrl` | http://127.0.0.1:3080 | 审批卡 Web GUI 链接 |
 
 结果卡容量采用固定的 24KB 软上限（完整 create-message envelope），作为飞书协议安全余量，不暴露为部署配置。
 

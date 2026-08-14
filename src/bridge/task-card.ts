@@ -56,14 +56,19 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
   let startedAt: number | null = null
   let durationMs: number | null = null
   let toolCallCount = 0
+  let lastSequence = -1
   /** callId → tool name, insertion-ordered (Map preserves call order). */
   const open = new Map<string, string>()
+  /** A stable call id represents one timeline row even when progress is refreshed. */
+  const seenCalls = new Set<string>()
   const RECENT_CAP = 5
   const recent: string[] = []
 
   for (const event of events) {
     const data = event.data as { turn?: number }
     if (data?.turn !== turn) continue
+    if (event.seq <= lastSequence) continue
+    lastSequence = event.seq
     if (status !== 'running') continue // terminal folded: the card is frozen
     switch (event.type) {
       case 'turn/start':
@@ -77,7 +82,10 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
       case 'tool/call': {
         seen = true
         const call = event.data as { callId: string; name: string }
-        toolCallCount++
+        if (!seenCalls.has(call.callId)) {
+          seenCalls.add(call.callId)
+          toolCallCount++
+        }
         open.set(call.callId, call.name)
         break
       }
@@ -150,6 +158,21 @@ const STATUS_HEADER = {
   failed: { title: '任务失败', template: 'red' },
 } as const
 
+const ACTIVE_THINKING_INDICATOR = '思考中.....'
+
+/** Append the active marker once, preserving snapshot-style idempotence. */
+function appendActiveThinkingIndicator(body: string): string {
+  return body.endsWith(ACTIVE_THINKING_INDICATOR)
+    ? body
+    : `${body}${body.length > 0 ? '\n' : ''}${ACTIVE_THINKING_INDICATOR}`
+}
+
+/** Terminal cards must never retain a running-state marker. */
+function trimActiveThinkingIndicator(body: string): string {
+  if (!body.endsWith(ACTIVE_THINKING_INDICATOR)) return body
+  return body.slice(0, -ACTIVE_THINKING_INDICATOR.length).replace(/\n$/, '')
+}
+
 /** Card-facing token facts (design §6.3): count shown only when provider-anchored. */
 export interface TokenInfo {
   /** Current request-and-response pressure from tokenMeter. */
@@ -168,9 +191,10 @@ export interface TaskCardContext {
  * Render one snapshot as a Feishu interactive card.
  *
  * Body rules (docs/weclaw-lessons.md): while running with no tool activity
- * the body is exactly one `思考中.....` hint; tool activity replaces it with
- * a scrolling progress view — the last few completed tools (✓-prefixed)
- * above the currently running ones — plus the call count; a terminal card
+ * the body is exactly one `思考中.....` hint; tool activity is rendered as
+ * a scrolling progress view — the last few completed tools (✅-prefixed)
+ * above the currently running ones — plus the call count, and the active
+ * hint remains as an idempotent tail marker; a terminal card
  * never repeats the header state in the body — it keeps only the factual
  * summary (tool count, duration). The token line (design §6.3) shows the
  * count only for provider-anchored measurements, `未知` for estimates, and
@@ -185,10 +209,8 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   const { title, template } = STATUS_HEADER[snapshot.status]
   const lines: string[] = []
   if (snapshot.status === 'running') {
-    if (snapshot.currentTools.length === 0 && snapshot.toolCallCount === 0) {
-      lines.push('思考中.....')
-    } else {
-      for (const name of snapshot.recentTools) lines.push(`✓ ${name}`)
+    if (snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0) {
+      for (const name of snapshot.recentTools) lines.push(`✅ ${name}`)
       for (const name of snapshot.currentTools) lines.push(`▸ ${name} …`)
       lines.push(`已调用工具 ${snapshot.toolCallCount} 次`)
     }
@@ -200,10 +222,13 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   if (tokens !== undefined) {
     lines.push(tokens.anchored ? `token 用量：${tokens.totalTokens}` : 'token 用量：未知（provider 未上报）')
   }
+  const body = snapshot.status === 'running'
+    ? appendActiveThinkingIndicator(lines.join('\n'))
+    : trimActiveThinkingIndicator(lines.join('\n'))
   const name = context?.title ?? '任务'
   return {
     config: { wide_screen_mode: true },
     header: { title: { tag: 'plain_text', content: `${name} · ${title}` }, template },
-    elements: [{ tag: 'div', text: { tag: 'lark_md', content: lines.join('\n') } }],
+    elements: [{ tag: 'div', text: { tag: 'lark_md', content: body } }],
   }
 }

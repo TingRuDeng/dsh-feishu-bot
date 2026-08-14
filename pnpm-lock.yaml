@@ -20,6 +20,9 @@ importers:
       '@deepseek-ai/dsh-credentials':
         specifier: link:../deepseek-harness/packages/credentials/credentials
         version: link:../deepseek-harness/packages/credentials/credentials
+      '@deepseek-ai/dsh-invariants':
+        specifier: link:../deepseek-harness/packages/runtime-diagnostics/invariants
+        version: link:../deepseek-harness/packages/runtime-diagnostics/invariants
       '@deepseek-ai/dsh-llm':
         specifier: link:../deepseek-harness/packages/llm/llm
         version: link:../deepseek-harness/packages/llm/llm

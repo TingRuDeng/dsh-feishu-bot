@@ -76,6 +76,8 @@ export const inboundCommand = z.object({
   target: brandedString<'SessionIdString'>().optional(),
   /** Stored outcome text for idempotent re-delivery of committed commands. */
   result: z.string().optional(),
+  /** Restart/expiry reason when the command cannot be reconciled safely. */
+  reason: z.string().optional(),
 })
 
 export const inboundEvent = z.discriminatedUnion('kind', [inboundMessage, inboundCommand])
@@ -110,6 +112,8 @@ export const outboundSegment = z.object({
   segmentCount: z.number().int().positive(),
   text: z.string(),
   status: z.enum(['pending', 'sent', 'abandoned']),
+  /** Durable delivery attempts across process restarts. */
+  attempts: z.number().int().nonnegative().default(0),
   createdAt: z.number().int().nonnegative(),
 })
 export type OutboundSegment = z.infer<typeof outboundSegment>

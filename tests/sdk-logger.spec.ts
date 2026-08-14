@@ -45,4 +45,41 @@ describe('redactingSdkLogger', () => {
     expect(lines[0]).not.toContain('secret body')
     expect(lines[0]).toContain('502')
   })
+
+  it('contains circular SDK values without throwing or exposing their data body', () => {
+    const { ctx, lines } = capture()
+    const logger = redactingSdkLogger(ctx)
+    const circular: { data: string; self?: unknown } = { data: 'circular secret body' }
+    circular.self = circular
+    expect(() => logger.error(circular)).not.toThrow()
+    expect(lines.join('\n')).not.toContain('circular secret body')
+  })
+
+  it('redacts the duplicated response body emitted by the SDK formatErrors bundle', () => {
+    const { ctx, lines } = capture()
+    const logger = redactingSdkLogger(ctx)
+    logger.error([
+      {
+        message: 'Request failed with status code 400',
+        config: { data: 'outbound message secret', url: '/im/v1/messages', method: 'post' },
+        response: { data: 'response body secret', status: 400 },
+      },
+      'response body secret',
+    ])
+    logger.error([
+      {
+        message: 'Request failed with status code 400',
+        response: { data: { code: 230001, msg: 'object response secret' }, status: 400 },
+      },
+      { code: 230001, msg: 'object response secret' },
+    ])
+
+    const output = lines.join('\n')
+    expect(output).not.toContain('outbound message secret')
+    expect(output).not.toContain('response body secret')
+    expect(output).not.toContain('object response secret')
+    expect(output).toContain('/im/v1/messages')
+    expect(output).toContain('400')
+    expect(output).toContain('[redacted sdk response body]')
+  })
 })

@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { mkdtemp, mkdir, symlink, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { authorizeCwd } from '../src/bridge/workspace.ts'
+import { authorizeCwd, buildWorkspaceFilter, validateDefaultWorkspace } from '../src/bridge/workspace.ts'
 
 describe('authorizeCwd', () => {
   it('fail-closed: empty allowlist rejects everything', async () => {
@@ -84,10 +84,35 @@ describe('authorizeCwd', () => {
     await rm(base, { recursive: true, force: true })
   })
 
+  it('session visibility rejects a recorded cwd that is a symlink escape', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'ws-'))
+    const allowed = join(base, 'allowed')
+    const outside = join(base, 'outside')
+    await mkdir(allowed)
+    await mkdir(outside)
+    const link = join(allowed, 'escaped-session')
+    await symlink(outside, link)
+
+    const visible = await buildWorkspaceFilter([allowed])
+    await expect(visible(link)).resolves.toBe(false)
+    await rm(base, { recursive: true, force: true })
+  })
+
   it('~ expansion applies to allowlist roots', async () => {
     // The config uses ~/Desktop/mycode; the check must expand it.
     const { homedir } = await import('node:os')
     const result = await authorizeCwd(homedir(), ['~'])
     expect(result.ok).toBe(true)
+  })
+
+  it('~ expansion also applies to the requested cwd', async () => {
+    await expect(authorizeCwd('~', ['~'])).resolves.toMatchObject({ ok: true })
+  })
+
+  it('rejects plugin configuration whose defaultWorkspace is outside the allowlist', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ws-'))
+    await expect(validateDefaultWorkspace('/etc', [root]))
+      .rejects.toThrow('defaultWorkspace is invalid (outside-workspaces)')
+    await rm(root, { recursive: true, force: true })
   })
 })

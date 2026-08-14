@@ -1,7 +1,8 @@
 /**
  * Workspace authorization for session-creating commands (design §6.7):
  * `/new [cwd]` may only target directories inside the configured
- * `allowedWorkspaces` roots. Absolute paths only; symlinks are resolved
+ * `allowedWorkspaces` roots. Requested paths are absolute or `~`-prefixed;
+ * symlinks are resolved
  * through realpath BEFORE the ancestor check so a link cannot escape;
  * containment is segment-wise (`/a/bc` is not inside `/a/b`); an empty
  * allowlist rejects everything (fail-closed).
@@ -29,7 +30,7 @@ function contains(root: string, candidate: string): boolean {
 
 /**
  * Authorize a `/new` target directory against the workspace allowlist.
- * @param cwd - requested working directory; must be absolute.
+ * @param cwd - requested working directory; absolute or `~`-prefixed.
  * @param allowedWorkspaces - configured roots (may use a leading `~`).
  * @returns the canonical realpath on success, or a stable rejection reason.
  */
@@ -38,10 +39,11 @@ export async function authorizeCwd(
   allowedWorkspaces: readonly string[],
 ): Promise<CwdAuthorization> {
   if (allowedWorkspaces.length === 0) return { ok: false, reason: 'no-workspaces-configured' }
-  if (!isAbsolute(cwd)) return { ok: false, reason: 'not-absolute' }
+  const expandedCwd = expandHome(cwd)
+  if (!isAbsolute(expandedCwd)) return { ok: false, reason: 'not-absolute' }
   let canonical: string
   try {
-    canonical = await realpath(cwd)
+    canonical = await realpath(expandedCwd)
     const info = await stat(canonical)
     if (!info.isDirectory()) return { ok: false, reason: 'not-a-directory' }
   } catch {
@@ -63,21 +65,33 @@ export async function authorizeCwd(
   return { ok: false, reason: 'outside-workspaces' }
 }
 
+/** Fail plugin startup when a configured default cwd is not authorized. */
+export async function validateDefaultWorkspace(
+  defaultWorkspace: string | undefined,
+  allowedWorkspaces: readonly string[],
+): Promise<void> {
+  if (defaultWorkspace === undefined) return
+  const authorization = await authorizeCwd(defaultWorkspace, allowedWorkspaces)
+  if (!authorization.ok) {
+    throw new Error(`feishu-bridge: defaultWorkspace is invalid (${authorization.reason})`)
+  }
+}
+
 /**
  * Build a session-cwd workspace filter for `/ls` and `/use` (design §6.6:
  * only sessions under `allowedWorkspaces` are listable or bindable).
  *
- * Roots resolve through realpath ONCE at build time; the returned predicate
- * is synchronous and does not touch the filesystem, so a recorded session
- * cwd is compared as stored (canonical at creation via {@link authorizeCwd};
- * foreign sessions created by Web keep whatever the harness recorded).
- * A cwd-less header never passes. Fail-closed on an empty allowlist.
+ * Roots resolve through realpath once at build time; each recorded session
+ * cwd is also resolved before comparison. This is intentionally asynchronous:
+ * foreign sessions created by Web may retain a symlink spelling, which must
+ * not let `/ls` or `/use` escape an allowed root. A cwd-less, relative,
+ * missing, or unreadable header never passes. Fail-closed on an empty list.
  * @param allowedWorkspaces - configured roots (may use a leading `~`).
  * @returns a predicate over a session header's recorded cwd.
  */
 export async function buildWorkspaceFilter(
   allowedWorkspaces: readonly string[],
-): Promise<(cwd: string | undefined) => boolean> {
+): Promise<(cwd: string | undefined) => Promise<boolean>> {
   const roots: string[] = []
   for (const root of allowedWorkspaces) {
     const expanded = expandHome(root)
@@ -86,12 +100,15 @@ export async function buildWorkspaceFilter(
     } catch {
       // Nonexistent configured root: authorizes nothing, same as authorizeCwd.
     }
-    // Also accept the pre-realpath spelling: harness session headers may
-    // record the logical path (e.g. /Users/... vs /private/...) on macOS.
-    if (isAbsolute(expanded) && !roots.includes(expanded)) roots.push(expanded)
   }
-  return (cwd) => {
+  return async (cwd) => {
     if (cwd === undefined || !isAbsolute(cwd)) return false
-    return roots.some(root => contains(root, cwd))
+    let canonical: string
+    try {
+      canonical = await realpath(cwd)
+    } catch {
+      return false
+    }
+    return roots.some(root => contains(root, canonical))
   }
 }

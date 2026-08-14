@@ -111,6 +111,30 @@ describe('reduceTaskCard', () => {
     expect(withLate).toEqual(frozen)
   })
 
+  it('rejects an older sequence that arrives after a newer event', () => {
+    const events: Ev[] = [
+      { seq: 10, time: 1000, type: 'turn/start', data: { turn: 1 } },
+      { seq: 12, time: 1200, type: 'tool/call', data: { turn: 1, step: 1, callId: 'new', name: 'Read' } },
+      { seq: 11, time: 1100, type: 'tool/call', data: { turn: 1, step: 1, callId: 'old', name: 'Bash' } },
+    ]
+
+    const snap = reduceTaskCard(events, 1)!
+    expect(snap.currentTools).toEqual(['Read'])
+    expect(snap.toolCallCount).toBe(1)
+  })
+
+  it('updates progress with the same call id in place instead of appending it', () => {
+    const events: Ev[] = [
+      { seq: 1, time: 1000, type: 'turn/start', data: { turn: 1 } },
+      { seq: 2, time: 1100, type: 'tool/call', data: { turn: 1, step: 1, callId: 'same', name: 'Read' } },
+      { seq: 3, time: 1200, type: 'tool/call', data: { turn: 1, step: 1, callId: 'same', name: 'Read（重试）' } },
+    ]
+
+    const snap = reduceTaskCard(events, 1)!
+    expect(snap.currentTools).toEqual(['Read（重试）'])
+    expect(snap.toolCallCount).toBe(1)
+  })
+
   it('only the requested turn folds; other turns are invisible', () => {
     seq = 0
     const events = [

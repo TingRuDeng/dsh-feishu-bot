@@ -1,7 +1,8 @@
-# The dsh-feishu-bot bundle patch: two plugin rows inserted after the web-app
+# The dsh-feishu-bot bundle patch: three plugin rows inserted after the web-app
 # layer. feishu-gateway provides the `ctx.feishu` transport service;
 # feishu-bridge owns all business semantics (bindings, commands, inbound
-# dedup, outbound projection, approval answering).
+# dedup, outbound projection, approval answering); feishu-invariant enforces
+# active binding -> live/persisted session existence.
 #
 # Credentials are credential references resolved by the dsh credentials
 # service; no secrets live in this file or this repository.
@@ -34,3 +35,6 @@
         freshnessMs: 600000
         listingTtlMs: 300000
         cardThrottleMs: 1000
+
+    - id: feishu-invariant
+      name: 'dsh-feishu-bot/invariant'
