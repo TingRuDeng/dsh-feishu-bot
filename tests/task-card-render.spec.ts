@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest'
 import { renderTaskCard } from '../src/bridge/task-card.ts'
 
-const base = { turn: 1, toolCallCount: 0, durationMs: null, startedAt: 1000 }
+const base = { turn: 1, toolCallCount: 0, durationMs: null, startedAt: 1000, recentTools: [] }
 
 describe('renderTaskCard', () => {
   it('running with no tools shows the single waiting hint', () => {
@@ -57,6 +57,26 @@ describe('renderTaskCard', () => {
     // No measurement available at all: omit the line entirely.
     json = JSON.stringify(renderTaskCard(running))
     expect(json).not.toContain('token')
+  })
+
+  it('title uses the workspace name, never a round number (weclaw UX)', () => {
+    const card = renderTaskCard({ ...base, status: 'running', currentTools: [] }, undefined, { title: 'dsh-feishu-bot' })
+    const json = JSON.stringify(card)
+    expect(json).toContain('dsh-feishu-bot')
+    expect(json).not.toContain('第')
+    expect(json).not.toContain('轮')
+  })
+
+  it('recent completed tools scroll in the body as progress (weclaw UX)', () => {
+    const card = renderTaskCard({
+      ...base, status: 'running', currentTools: ['Write'],
+      recentTools: ['Bash', 'Read'], toolCallCount: 3,
+    })
+    const json = JSON.stringify(card)
+    expect(json).toContain('✓ Bash')
+    expect(json).toContain('✓ Read')
+    expect(json).toContain('Write')
+    expect(json).not.toContain('思考中')
   })
 
   it('deterministic: same snapshot → identical JSON', () => {

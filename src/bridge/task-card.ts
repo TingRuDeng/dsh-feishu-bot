@@ -18,6 +18,8 @@ export interface TaskCardSnapshot {
   status: 'running' | 'completed' | 'stopped' | 'failed'
   /** Names of tools called but not yet resolved, in call order. Never arguments. */
   currentTools: string[]
+  /** Names of the last few COMPLETED tools, oldest first (scrolling progress). */
+  recentTools: string[]
   /** Total tool calls observed in this turn. */
   toolCallCount: number
   /** turn/start → turn/end span; null while running. */
@@ -56,6 +58,8 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
   let toolCallCount = 0
   /** callId → tool name, insertion-ordered (Map preserves call order). */
   const open = new Map<string, string>()
+  const RECENT_CAP = 5
+  const recent: string[] = []
 
   for (const event of events) {
     const data = event.data as { turn?: number }
@@ -80,7 +84,14 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
       case 'tool/result': {
         seen = true
         const callId = resultCallId(event.data)
-        if (callId !== null) open.delete(callId)
+        if (callId !== null) {
+          const name = open.get(callId)
+          if (name !== undefined) {
+            recent.push(name)
+            if (recent.length > RECENT_CAP) recent.shift()
+          }
+          open.delete(callId)
+        }
         break
       }
       case 'turn/end': {
@@ -109,6 +120,7 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
     turn,
     status,
     currentTools: [...open.values()],
+    recentTools: recent,
     toolCallCount,
     durationMs,
     startedAt,
@@ -146,30 +158,38 @@ export interface TokenInfo {
   anchored: boolean
 }
 
+/** Card presentation context beyond the snapshot itself. */
+export interface TaskCardContext {
+  /** Card title (the session's workspace basename); falls back to 任务. */
+  title?: string
+}
+
 /**
  * Render one snapshot as a Feishu interactive card.
  *
  * Body rules (docs/weclaw-lessons.md): while running with no tool activity
  * the body is exactly one `思考中.....` hint; tool activity replaces it with
- * the current tool names and the running call count; a terminal card never
- * repeats the header state in the body — it keeps only the factual summary
- * (tool count, duration). The token line (design §6.3) shows the count only
- * for provider-anchored measurements, `未知` for estimates, and nothing when
- * no measurement was taken.
+ * a scrolling progress view — the last few completed tools (✓-prefixed)
+ * above the currently running ones — plus the call count; a terminal card
+ * never repeats the header state in the body — it keeps only the factual
+ * summary (tool count, duration). The token line (design §6.3) shows the
+ * count only for provider-anchored measurements, `未知` for estimates, and
+ * nothing when no measurement was taken. The header is the workspace name
+ * with the status; turn numbers are internal and never rendered.
  * @param snapshot - the reduced turn state.
  * @param tokens - optional tokenMeter facts for the session.
+ * @param context - optional presentation context (workspace title).
  * @returns the card JSON for msg_type `interactive`.
  */
-export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo): FeishuCard {
+export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, context?: TaskCardContext): FeishuCard {
   const { title, template } = STATUS_HEADER[snapshot.status]
   const lines: string[] = []
   if (snapshot.status === 'running') {
     if (snapshot.currentTools.length === 0 && snapshot.toolCallCount === 0) {
       lines.push('思考中.....')
     } else {
-      if (snapshot.currentTools.length > 0) {
-        lines.push(`当前工具：${snapshot.currentTools.join('、')}`)
-      }
+      for (const name of snapshot.recentTools) lines.push(`✓ ${name}`)
+      for (const name of snapshot.currentTools) lines.push(`▸ ${name} …`)
       lines.push(`已调用工具 ${snapshot.toolCallCount} 次`)
     }
   } else {
@@ -180,9 +200,10 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo): 
   if (tokens !== undefined) {
     lines.push(tokens.anchored ? `token 用量：${tokens.totalTokens}` : 'token 用量：未知（provider 未上报）')
   }
+  const name = context?.title ?? '任务'
   return {
     config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: `第 ${snapshot.turn} 轮 · ${title}` }, template },
+    header: { title: { tag: 'plain_text', content: `${name} · ${title}` }, template },
     elements: [{ tag: 'div', text: { tag: 'lark_md', content: lines.join('\n') } }],
   }
 }

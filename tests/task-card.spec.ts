@@ -124,6 +124,18 @@ describe('reduceTaskCard', () => {
     expect(two.currentTools).toEqual(['Write'])
   })
 
+  it('completed tools accumulate in recentTools, capped at the last 5', () => {
+    seq = 0
+    const events = [turnStart(), stepStart()]
+    for (let i = 1; i <= 7; i++) {
+      events.push(toolCall(`c${i}`, `Tool${i}`))
+      events.push(toolResult(`c${i}`))
+    }
+    const snap = reduceTaskCard(events, 1)!
+    expect(snap.recentTools).toEqual(['Tool3', 'Tool4', 'Tool5', 'Tool6', 'Tool7'])
+    expect(snap.toolCallCount).toBe(7)
+  })
+
   it('snapshots are deterministic: same input → deep-equal output', () => {
     seq = 0
     const events = [turnStart(), stepStart(), toolCall('c1', 'Bash')]

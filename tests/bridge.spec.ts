@@ -290,6 +290,49 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(toast?.toast).toBeDefined()
   })
 
+  it('parallel approvals collapse into one group card with per-item buttons (M3 UX)', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const first = ctx.approval.request({ agent, toolName: 'Bash', reason: '第一个' })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('审批请求'))) throw new Error('no card yet')
+    }, { timeout: 10_000, interval: 50 })
+    const second = ctx.approval.request({ agent, toolName: 'Write', reason: '第二个' })
+    await vi.waitFor(() => {
+      const last = feishu.cards.at(-1)
+      if (last === undefined || !JSON.stringify(last.card).includes('Write')) throw new Error('no second item yet')
+    }, { timeout: 10_000, interval: 50 })
+    // Both questions ride ONE message: every card update targets the same id.
+    const ids = new Set(feishu.cards.filter(c => JSON.stringify(c.card).includes('审批请求')).map(c => c.messageId))
+    expect(ids.size).toBe(1)
+    const grouped = feishu.cards.at(-1)!
+    const json = JSON.stringify(grouped.card)
+    expect(json).toContain('2/2 待处理')
+    const pids = [...new Set([...json.matchAll(/"pendingId":"(pc_[^"]+)"/g)].map(m => m[1]!))]
+    expect(pids.length).toBe(2)
+    // Decide them one by one on the same card.
+    const toast1 = await feishu.clickCard(OWNER, grouped.messageId, { pendingId: pids[0], action: 'allow' })
+    expect(toast1?.toast).toContain('已允许')
+    expect(await first).toBe('allowed-once')
+    await vi.waitFor(() => {
+      const j = JSON.stringify(feishu.cards.at(-1)!.card)
+      if (!j.includes('1/2 待处理')) throw new Error('not re-rendered yet')
+    }, { timeout: 10_000, interval: 50 })
+    const toast2 = await feishu.clickCard(OWNER, grouped.messageId, { pendingId: pids[1], action: 'reject' })
+    expect(toast2?.toast).toContain('已拒绝')
+    expect(await second).toBe('rejected')
+    await vi.waitFor(() => {
+      const j = JSON.stringify(feishu.cards.at(-1)!.card)
+      if (!j.includes('已处理')) throw new Error('not terminal yet')
+    }, { timeout: 10_000, interval: 50 })
+    const finalJson = JSON.stringify(feishu.cards.at(-1)!.card)
+    expect(finalJson).toContain('✅ 已允许（本次）')
+    expect(finalJson).toContain('❌ 已拒绝')
+    expect(finalJson).not.toContain('"allow"')
+  })
+
   it('approval with no bound chat delegates to the rest of the chain (M3)', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })

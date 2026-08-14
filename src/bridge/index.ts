@@ -28,7 +28,7 @@ import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
 import { reconcileMessage } from './inbound.ts'
 import { segmentText } from './outbound.ts'
 import { reduceTaskCard, renderTaskCard, type TokenInfo } from './task-card.ts'
-import { pairApprovalId, renderApprovalCard, renderApprovalCardFrozen, type ApprovalCardSpec } from './approval.ts'
+import { pairApprovalId, renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-approval'
 
@@ -189,7 +189,9 @@ async function mount(ctx: Context, config: Config): Promise<void> {
         tokens = { totalTokens: measured.totalTokens, anchored: measured.baseline.kind === 'usage' }
       }
     } catch { /* measurement failure degrades to no token line; card facts stay valid */ }
-    const card = renderTaskCard(snapshot, tokens)
+    const cwd = session.header.cwd
+    const title = cwd === undefined ? undefined : cwd.split('/').filter(Boolean).at(-1)
+    const card = renderTaskCard(snapshot, tokens, title === undefined ? undefined : { title })
     tracker.updating = true
     void (async () => {
       try {
@@ -266,9 +268,26 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     spec: ApprovalCardSpec
     resolve: (outcome: ApprovalOutcome) => void
     settled: boolean
-    cardMessageId?: string
   }
   const pendingApprovals = new Map<string, PendingApproval>()
+
+  /**
+   * Per-chat approval group: every live approval question of a chat rides
+   * ONE card (weclaw: parallel approvals collapse instead of stacking).
+   * Settled items stay on the card with their outcome; once no pending
+   * item remains the group leaves this map, so the next question starts a
+   * fresh card. `chain` serializes send/patch per group (send must precede
+   * every patch; renders are derived from current state, last write wins).
+   */
+  interface ApprovalGroup {
+    chatId: string
+    messageId?: string
+    items: Map<string, { spec: ApprovalCardSpec; state: ApprovalItemState }>
+    chain: Promise<void>
+  }
+  const approvalGroups = new Map<string, ApprovalGroup>()
+  /** pendingId -> its group, surviving group rotation (for late settles). */
+  const groupOf = new Map<string, ApprovalGroup>()
 
   /** approvalIds held by this channel; feeds the pairing scan's claimed set. */
   const claimedApprovalIds = (): Set<string> => {
@@ -277,12 +296,31 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     return ids
   }
 
-  const freezeCard = (entry: PendingApproval, state: Parameters<typeof renderApprovalCardFrozen>[1]): void => {
-    if (entry.cardMessageId === undefined) return
-    void ctx.feishu.patchCard(entry.cardMessageId, renderApprovalCardFrozen(entry.spec, state))
-      .catch((error: unknown) => {
-        ctx.logger.warn('feishu-bridge approval card freeze failed: %s', String(error))
-      })
+  const pushGroup = (group: ApprovalGroup): Promise<void> => {
+    group.chain = group.chain.then(async () => {
+      const card = renderApprovalGroupCard([...group.items.values()])
+      if (group.messageId === undefined) {
+        group.messageId = await ctx.feishu.sendCard(group.chatId, card)
+      } else {
+        await ctx.feishu.patchCard(group.messageId, card)
+      }
+    }).catch((error: unknown) => {
+      ctx.logger.warn('feishu-bridge approval card update failed: %s', String(error))
+    })
+    return group.chain
+  }
+
+  /** Flip one item's state, rotate the group out when nothing stays pending, re-render. */
+  const settleItem = (pendingId: string, state: Exclude<ApprovalItemState, 'pending'>): void => {
+    const group = groupOf.get(pendingId)
+    if (group === undefined) return
+    const item = group.items.get(pendingId)
+    if (item === undefined || item.state !== 'pending') return
+    item.state = state
+    groupOf.delete(pendingId)
+    const anyPending = [...group.items.values()].some(i => i.state === 'pending')
+    if (!anyPending && approvalGroups.get(group.chatId) === group) approvalGroups.delete(group.chatId)
+    void pushGroup(group)
   }
 
   ctx.on('approval/request', async (req, next) => {
@@ -300,11 +338,12 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     if (approvalId === undefined) return next()
 
     const pendingId = `pc_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+    const cwd = req.agent.session.header.cwd
     const spec: ApprovalCardSpec = {
       pendingId,
       toolName: req.toolName,
       ...req.reason === undefined ? {} : { reason: req.reason },
-      sessionTitle: String(req.agent.session.id),
+      sessionTitle: cwd?.split('/').filter(Boolean).at(-1) ?? String(req.agent.session.id),
       webUrl: config.webUrl,
     }
     let entry: PendingApproval
@@ -336,28 +375,36 @@ async function mount(ctx: Context, config: Config): Promise<void> {
       ctx.logger.error('feishu-bridge approval record write failed: %s', String(error))
       return next()
     }
-    let cardMessageId: string
-    try {
-      cardMessageId = await ctx.feishu.sendCard(boundChatId, renderApprovalCard(spec))
-    } catch (error: unknown) {
+    // Join the chat's live group, or open a fresh card.
+    let group = approvalGroups.get(boundChatId)
+    if (group === undefined) {
+      group = { chatId: boundChatId, items: new Map(), chain: Promise.resolve() }
+      approvalGroups.set(boundChatId, group)
+    }
+    group.items.set(pendingId, { spec, state: 'pending' })
+    groupOf.set(pendingId, group)
+    await pushGroup(group)
+    if (group.messageId === undefined) {
+      // Send failed: unwind this item and delegate.
+      group.items.delete(pendingId)
+      groupOf.delete(pendingId)
+      if (group.items.size === 0 && approvalGroups.get(boundChatId) === group) approvalGroups.delete(boundChatId)
       pendingApprovals.delete(pendingId)
       void pendingCards.delete(pendingId as never).catch(() => undefined)
-      ctx.logger.error('feishu-bridge approval card send failed: %s', String(error))
       return next()
     }
-    entry!.cardMessageId = cardMessageId
     try {
-      await pendingCards.update(pendingId as never, { cardMessageId } as never)
+      await pendingCards.update(pendingId as never, { cardMessageId: group.messageId } as never)
     } catch { /* backfill miss only widens the restart sweep's invalidation to this card */ }
 
-    // Withdrawal: the asker aborted — freeze and release without deciding.
+    // Withdrawal: the asker aborted — settle the item and release without deciding.
     const onAbort = (): void => {
       const live = pendingApprovals.get(pendingId)
       if (live === undefined || live.settled) return
       live.settled = true
       pendingApprovals.delete(pendingId)
       void pendingCards.delete(pendingId as never).catch(() => undefined)
-      freezeCard(live, 'withdrawn')
+      settleItem(pendingId, 'withdrawn')
     }
     req.signal?.addEventListener('abort', onAbort, { once: true })
 
@@ -369,21 +416,21 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     const web = next()
     const webDecision = web.then((outcome): Promise<ApprovalOutcome> | ApprovalOutcome => {
       if (outcome === 'unavailable') return new Promise<ApprovalOutcome>(() => {})
-      // Web decided first: freeze our card.
+      // Web decided first: mark our item decided-elsewhere.
       const live = pendingApprovals.get(pendingId)
       if (live !== undefined && !live.settled) {
         live.settled = true
         pendingApprovals.delete(pendingId)
         void pendingCards.delete(pendingId as never).catch(() => undefined)
         req.signal?.removeEventListener('abort', onAbort)
-        freezeCard(live, 'elsewhere')
+        settleItem(pendingId, 'elsewhere')
       }
       return outcome
     }, (): Promise<ApprovalOutcome> => new Promise<ApprovalOutcome>(() => {}))
     return Promise.race([feishuAnswer, webDecision])
   }, { prepend: true })
 
-  /** Card button clicks: validate, resolve the pending entry, freeze the card. */
+  /** Card button clicks: validate, resolve the pending entry, update the group card. */
   ctx.feishu.handleCardActions(async (action) => {
     // Feishu delivers button values as an object OR as a JSON string
     // depending on client/schema version; accept both. An unrecognized
@@ -416,7 +463,7 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     }
     const outcome: ApprovalOutcome = verb === 'allow' ? 'allowed-once' : 'rejected'
     entry.resolve(outcome)
-    freezeCard(entry, verb === 'allow' ? 'decided-allow' : 'decided-reject')
+    settleItem(pendingId, verb === 'allow' ? 'allowed' : 'rejected')
     return { toast: verb === 'allow' ? '已允许（本次）' : '已拒绝' }
   })
 
@@ -674,11 +721,14 @@ async function mount(ctx: Context, config: Config): Promise<void> {
 
   /**
    * Restart sweep (design §6.4): every persisted pending approval card is
-   * from a dead process. With a cardMessageId, freeze it as invalidated;
-   * without one (crashed before exposure), just delete. Never write
-   * approval/decided — card invalidation is not a decision.
+   * from a dead process. Records sharing one cardMessageId were items of
+   * one GROUP card — patch each message once with all its items
+   * invalidated (per-record patches would overwrite each other). Records
+   * without a messageId (crashed before exposure) are just deleted. Never
+   * write approval/decided — card invalidation is not a decision.
    */
   async function sweepPendingCards(): Promise<void> {
+    const byMessage = new Map<string, ApprovalCardSpec[]>()
     for (const [key, record] of pendingCards.entries()) {
       if (record.cardMessageId !== undefined) {
         const spec: ApprovalCardSpec = {
@@ -686,13 +736,18 @@ async function mount(ctx: Context, config: Config): Promise<void> {
           ...record.reason === undefined ? {} : { reason: record.reason },
           sessionTitle: record.sessionTitle, webUrl: config.webUrl,
         }
-        void ctx.feishu.patchCard(record.cardMessageId as string, renderApprovalCardFrozen(spec, 'invalidated'))
-          .catch((error: unknown) => {
-            ctx.logger.warn('feishu-bridge stale approval card freeze failed: %s', String(error))
-          })
+        const specs = byMessage.get(record.cardMessageId as string) ?? []
+        specs.push(spec)
+        byMessage.set(record.cardMessageId as string, specs)
         ctx.logger.info('feishu-bridge: invalidated stale approval card %s', record.pendingId)
       }
       await pendingCards.delete(key)
+    }
+    for (const [messageId, specs] of byMessage) {
+      void ctx.feishu.patchCard(messageId, renderApprovalGroupCard(specs.map(spec => ({ spec, state: 'invalidated' }))))
+        .catch((error: unknown) => {
+          ctx.logger.warn('feishu-bridge stale approval card freeze failed: %s', String(error))
+        })
     }
   }
 

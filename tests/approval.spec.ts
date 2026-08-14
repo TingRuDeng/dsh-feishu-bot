@@ -7,7 +7,7 @@
  * Mirrors the upstream apiproxy scan; verified against its source.
  */
 import { describe, expect, it } from 'vitest'
-import { pairApprovalId, renderApprovalCard, renderApprovalCardFrozen } from '../src/bridge/approval.ts'
+import { pairApprovalId, renderApprovalGroupCard } from '../src/bridge/approval.ts'
 
 type Ev = { seq: number; time: number; type: string; data: unknown }
 let seq = 0
@@ -16,44 +16,64 @@ const asked = (id: string, callId?: string): Ev =>
 const decided = (id: string): Ev =>
   ({ seq: ++seq, time: 0, type: 'approval/decided', data: { id, outcome: 'allowed-once' } })
 
-describe('renderApprovalCard', () => {
-  const spec = {
-    pendingId: 'pc_1',
-    toolName: 'Bash',
-    reason: '需要执行 rm -rf 之外的一条命令',
+describe('renderApprovalGroupCard', () => {
+  const spec = (id: string, tool = 'Bash') => ({
+    pendingId: id,
+    toolName: tool,
+    reason: '需要执行一条命令',
     sessionTitle: '重构任务',
     webUrl: 'http://127.0.0.1:3080',
-  }
+  })
 
-  it('carries tool name, reason, title, web link, and two action buttons', () => {
-    const json = JSON.stringify(renderApprovalCard(spec))
+  it('a single pending item carries facts, web link, and two action buttons', () => {
+    const json = JSON.stringify(renderApprovalGroupCard([{ spec: spec('pc_1'), state: 'pending' }]))
     expect(json).toContain('Bash')
     expect(json).toContain('需要执行')
-    expect(json).toContain('重构任务')
     expect(json).toContain('http://127.0.0.1:3080')
     expect(json).toContain('"allow"')
     expect(json).toContain('"reject"')
     expect(json).toContain('pc_1')
   })
 
-  it('truncates the reason at 500 bytes (UTF-8 safe)', () => {
-    const long = '长'.repeat(400) // 1200 UTF-8 bytes
-    const json = JSON.stringify(renderApprovalCard({ ...spec, reason: long }))
-    const rendered = /长+/u.exec(json)![0]
-    expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(500)
-    expect(json).toContain('…')
+  it('multiple pending items collapse into one card, each with its own buttons', () => {
+    const json = JSON.stringify(renderApprovalGroupCard([
+      { spec: spec('pc_1', 'Bash'), state: 'pending' },
+      { spec: spec('pc_2', 'Write'), state: 'pending' },
+    ]))
+    expect(json).toContain('pc_1')
+    expect(json).toContain('pc_2')
+    expect(json).toContain('Bash')
+    expect(json).toContain('Write')
+    expect((json.match(/"allow"/g) ?? []).length).toBe(2)
   })
 
-  it('frozen variants render terminal copy without buttons', () => {
+  it('settled items show their outcome inline and keep no buttons', () => {
+    const json = JSON.stringify(renderApprovalGroupCard([
+      { spec: spec('pc_1', 'Bash'), state: 'allowed' },
+      { spec: spec('pc_2', 'Write'), state: 'pending' },
+    ]))
+    expect(json).toContain('已允许')
+    expect((json.match(/"allow"/g) ?? []).length).toBe(1)  // only pc_2's
+  })
+
+  it('all-settled card renders terminal header and zero buttons', () => {
     for (const [state, copy] of [
-      ['decided-allow', '已允许'], ['decided-reject', '已拒绝'],
+      ['allowed', '已允许'], ['rejected', '已拒绝'],
       ['elsewhere', '已在别处决定'], ['withdrawn', '已撤回'], ['invalidated', '已失效'],
     ] as const) {
-      const json = JSON.stringify(renderApprovalCardFrozen(spec, state))
+      const json = JSON.stringify(renderApprovalGroupCard([{ spec: spec('pc_1'), state }]))
       expect(json).toContain(copy)
       expect(json).not.toContain('"allow"')
       expect(json).not.toContain('"reject"')
     }
+  })
+
+  it('truncates a reason at 500 bytes (UTF-8 safe)', () => {
+    const long = '长'.repeat(400)
+    const json = JSON.stringify(renderApprovalGroupCard([{ spec: { ...spec('pc_1'), reason: long }, state: 'pending' }]))
+    const rendered = /长+/u.exec(json)![0]
+    expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(500)
+    expect(json).toContain('…')
   })
 })
 

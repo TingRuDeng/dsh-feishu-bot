@@ -41,7 +41,7 @@ export function pairApprovalId(
   return undefined
 }
 
-/** What the approval card presents; never tool arguments (design §6.4). */
+/** What an approval card item presents; never tool arguments (design §6.4). */
 export interface ApprovalCardSpec {
   /** Durable pending-card id; the button payload's routing key. */
   pendingId: string
@@ -75,76 +75,87 @@ export interface FeishuActionCard {
 
 const REASON_BYTE_BUDGET = 500
 
-function approvalBody(spec: ApprovalCardSpec): unknown[] {
-  const lines = [
+/** Lifecycle state of one approval item on a group card. */
+export type ApprovalItemState = 'pending' | 'allowed' | 'rejected' | 'elsewhere' | 'withdrawn' | 'invalidated'
+
+/** One approval question on a group card: its facts plus where it stands. */
+export interface ApprovalGroupItem {
+  spec: ApprovalCardSpec
+  state: ApprovalItemState
+}
+
+const ITEM_STATE_COPY: Record<Exclude<ApprovalItemState, 'pending'>, string> = {
+  allowed: '✅ 已允许（本次）',
+  rejected: '❌ 已拒绝',
+  elsewhere: '已在别处决定',
+  withdrawn: '已撤回',
+  invalidated: '已失效（进程重启）',
+}
+
+/** The item's facts as lark_md lines; never tool arguments. */
+function itemLines(spec: ApprovalCardSpec): string {
+  return [
     `**工具**：${spec.toolName}`,
     ...spec.reason === undefined ? [] : [`**原因**：${truncateBytes(spec.reason, REASON_BYTE_BUDGET)}`],
     `**会话**：${spec.sessionTitle}`,
-  ]
-  return [
-    { tag: 'div', text: { tag: 'lark_md', content: lines.join('\n') } },
-    { tag: 'div', text: { tag: 'lark_md', content: `[在 Web GUI 中查看](${spec.webUrl})` } },
-  ]
+  ].join('\n')
 }
 
 /**
- * Render the pending approval card: facts plus 允许/拒绝 buttons whose
- * payloads carry the durable pendingId and the action verb — the callback
- * needs no other routing state.
- * @param spec - presented facts and routing key.
- * @returns the card JSON for msg_type `interactive`.
+ * Render every approval question of one chat as ONE card (weclaw: parallel
+ * approvals collapse into a single scrolling card instead of stacking
+ * messages). Pending items carry their own 允许/拒绝 buttons (payload:
+ * pendingId + action verb — the callback needs no other routing state);
+ * settled items show their outcome inline with no buttons. The header
+ * counts open items while any remain and turns terminal grey once all are
+ * settled. One Web GUI link serves the whole card.
+ * @param items - the group's items in arrival order.
+ * @returns the card JSON for msg_type `interactive` (send and patch alike).
  */
-export function renderApprovalCard(spec: ApprovalCardSpec): FeishuActionCard {
-  return {
-    config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: '审批请求' }, template: 'orange' },
-    elements: [
-      ...approvalBody(spec),
-      {
+export function renderApprovalGroupCard(items: readonly ApprovalGroupItem[]): FeishuActionCard {
+  const pending = items.filter(item => item.state === 'pending').length
+  const header = pending > 0
+    ? {
+        title: {
+          tag: 'plain_text' as const,
+          content: items.length > 1 ? `审批请求（${pending}/${items.length} 待处理）` : '审批请求',
+        },
+        template: 'orange',
+      }
+    : { title: { tag: 'plain_text' as const, content: '审批请求 · 已处理' }, template: 'grey' }
+  const elements: unknown[] = []
+  items.forEach((item, index) => {
+    if (index > 0) elements.push({ tag: 'hr' })
+    elements.push({ tag: 'div', text: { tag: 'lark_md', content: itemLines(item.spec) } })
+    if (item.state === 'pending') {
+      elements.push({
         tag: 'action',
         actions: [
           {
             tag: 'button',
             text: { tag: 'plain_text', content: '允许一次' },
             type: 'primary',
-            value: { pendingId: spec.pendingId, action: 'allow' },
+            value: { pendingId: item.spec.pendingId, action: 'allow' },
           },
           {
             tag: 'button',
             text: { tag: 'plain_text', content: '拒绝' },
             type: 'danger',
-            value: { pendingId: spec.pendingId, action: 'reject' },
+            value: { pendingId: item.spec.pendingId, action: 'reject' },
           },
         ],
-      },
-    ],
+      })
+    } else {
+      elements.push({ tag: 'div', text: { tag: 'lark_md', content: ITEM_STATE_COPY[item.state] } })
+    }
+  })
+  const webUrl = items[0]?.spec.webUrl
+  if (webUrl !== undefined) {
+    elements.push({ tag: 'div', text: { tag: 'lark_md', content: `[在 Web GUI 中查看](${webUrl})` } })
   }
-}
-
-/** Terminal states an approval card freezes into (design §6.4). */
-export type ApprovalCardFrozenState =
-  | 'decided-allow' | 'decided-reject' | 'elsewhere' | 'withdrawn' | 'invalidated'
-
-const FROZEN_COPY: Record<ApprovalCardFrozenState, { title: string; template: string }> = {
-  'decided-allow': { title: '已允许（本次）', template: 'green' },
-  'decided-reject': { title: '已拒绝', template: 'red' },
-  elsewhere: { title: '已在别处决定', template: 'grey' },
-  withdrawn: { title: '已撤回', template: 'grey' },
-  invalidated: { title: '已失效（进程重启）', template: 'grey' },
-}
-
-/**
- * Render the frozen replacement card: same facts, terminal header, no
- * buttons (a patched-away button cannot be clicked twice).
- * @param spec - the original card's facts.
- * @param state - which terminal the card froze into.
- * @returns the card JSON for message.patch.
- */
-export function renderApprovalCardFrozen(spec: ApprovalCardSpec, state: ApprovalCardFrozenState): FeishuActionCard {
-  const { title, template } = FROZEN_COPY[state]
   return {
     config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: `审批请求 · ${title}` }, template },
-    elements: approvalBody(spec),
+    header,
+    elements,
   }
 }
