@@ -6,7 +6,7 @@
 
 - 本轮接手基线：`1363093`（`docs: M4 handoff for successor session`）。
 - M0–M3 + 三项 UX 改进（进度滚动、审批组卡、工作区名标题）代码面全部完成。
-- M4 第一项 `/ls` 快照 TTL 已按 TDD 实现；回归测试只伪造 `Date`（全量 fake timers 会冻结 `drain()` 的真实 `setTimeout`，别改回去）。
+- M4 前两项已按 TDD 实现：`/ls` 快照 TTL，以及终态结果卡 + 24KB 完整 envelope 容量预检分片。
 
 ## M4 第一项已完成：/ls 快照 TTL
 
@@ -19,9 +19,15 @@
 3. 新 Config 字段 `listingTtlMs: z.natural().default(300_000)`（部署可变项必须进 Config，不许硬编码——上游 AGENTS.md 约定）。
 4. 回归测试覆盖快照超过 5 分钟后拒绝编号绑定；交付门禁为 `pnpm vitest run` + `pnpm run typecheck` + `pnpm run build`。
 
+## M4 第二项已完成：终态结果卡 + 容量预检
+
+1. 最终结果使用绿头卡，标题为 `工作区名 · 最终结果 · i/N`。
+2. gateway 与预检共享同一个 create-message envelope 构造函数；按 UTF-8 JSON 字节计数，软上限 24KB。
+3. 整行优先装箱；单行仍超限时按 Unicode 码点二分最大可装前缀。
+4. `outbound_segments` 仍按确定性四元组 durable-first；结果卡创建失败降级同段纯文本，成功后才写 `sent` 并清正文。
+
 ## M4 剩余排期（顺序已与用户确认；规格全在 lessons 二次深读 A 节）
 
-2. **终态答复卡片化 + 容量预检分片**（A#1+A#8）：最终结果绿头卡，标题"工作区名 · 最终结果 · i/N"；发送前本地构造完整 create-message envelope 测 JSON 尺寸（24KB 软上限），按行分片、超长行二分切。替换现在 projectAndSend 的纯文本路径时**必须保留 outbound_segments 的持久化投递语义**（卡片发送失败降级纯文本，绝不吞结果）。
 3. **本地路径链接改写**（A#2）：`[label](/local/path)` → label（`/path`）代码样式，发卡前统一改写。
 4. **"思考中"指示器纪律**（A#3）：运行中正文尾部幂等追加、终态统一剥离。
 5. **时间线 reducer 补两规则**（A#4）：旧 sequence 拒绝；同 ID 进度原地更新不追加。
@@ -45,7 +51,7 @@
 - **审批 race 语义**：委托链的 fail-closed `'unavailable'` **不是决定**——空链条时飞书卡必须保持有效等待（bridge 里 webDecision 的 never-resolve 分支就是干这个的）。
 - **配对扫描**与上游 apiproxy 同构（`src/bridge/approval.ts` pairApprovalId）：最新、未决、未被占用、callId 对称；歧义即 `next()` 让路。
 - **重启扫描**：pendingCards 逐 messageId 聚组一次 patch（逐条 patch 互相覆盖）；绝不补写 `approval/decided`。
-- **进度卡可丢**（无 outbox）；终态文本走 outbound_segments 可靠通道。卡片状态进程内，重启不重建旧卡。
+- **进度卡可丢**（无 outbox）；终态结果卡走 outbound_segments 可靠通道，卡片创建失败降级纯文本。卡片状态进程内，重启不重建旧卡。
 - 组卡 send/patch 按 chat 串行（ApprovalGroup.chain）；全部 settled 后组退休，下个审批开新卡。
 - `agent.status !== 'running'` 判空闲（`ctx.agents.get` 空闲时也返回实例）。
 - tokenMeter 走 `ctx.get()` 不进 inject（缺服务优雅降级）。

@@ -42,7 +42,7 @@
 │         │ 入站事件               ▲ 出站调用                 │
 │  feishu-bridge（业务桥）                                    │
 │    per-chat 业务队列 → 白名单 → 状态机去重 → 命令 or inbox  │
-│    session/event 订阅 → 文本回帖 + 任务卡投影               │
+│    session/event 订阅 → 结果卡 + 任务卡投影                 │
 │    approval/request waterfall 答复者 → 审批卡               │
 │    feishu-bot storage domain（绑定/入站记录/待决卡）        │
 │    host 同构 agent resolver（cold resume + ownership fence）│
@@ -274,10 +274,10 @@ im.message.receive_v1 回调 → 入 per-chat 业务队列，队内依次：
 
 **数据暴露立场（安全评审 2026-08 确认为设计行为）**：绑定即授权上传——assistant 回复原样发往飞书服务器（含模型输出的代码/文件内容/命令结果），命令回帖含本机绝对路径与会话 id。不做出站内容过滤（过滤会静默破坏正文完整性且给出虚假安全感）；信任边界在**谁能绑定**（allowedOpenIds fail-closed）与**哪些会话可见**（allowedWorkspaces 约束 /ls、/use、/new 三个入口）。部署者不得把"不可离机"的工作区加入白名单。**边界精确含义**：allowedWorkspaces 约束的是飞书侧"哪些会话可绑定/列出/新建"，不约束绑定后 agent 的读取面——上游沙箱只围栏写入（fs-sandbox "every mode permits reading"；Seatbelt `(allow default)`+`(deny file-write*)`），任何会话都能读本 OS 用户可读的一切文件并在回复中复述。读隔离须靠独立 OS 用户，非本插件配置可达。桥自身日志与审计只落 id/hash，SDK 失败日志经脱敏 logger 剥离 config.data/response.data 正文。
 
-1. **文本回帖（经 outbox，§5 `outboundSegments`）**：仅投递**已提交**的 `assistant/message`；不投未提交流式 delta。流程：
-   - 观察到绑定 session 的 `assistant/message` ⇒ Markdown 保守子集转换 ⇒ 分段（前缀 `(i/n)` 参与收敛计算）⇒ **对每个绑定 chat 全部段以 `pending` 批量写入 outbox**（主键为 `chatId+sessionId+sourceEventSeq+segmentIndex` 的确定性编码：同一事件对同一 chat 重复投影命中已有记录不重复入库；多 chat 绑定同一 session 各有独立记录，见 §5）；
-   - 发送器按 chat FIFO 逐段发送，成功一段写一段 `sent`；失败退避重试（`attempts` 递增），超预算该 chat 熔断，段保持 `pending`；
-   - **重启恢复**：启动扫描 `pending` 段按 (chat, sourceEventSeq, segmentIndex) 排序续发。**发送成功与 `sent` 写入之间崩溃的窗口无法消除**（飞书发消息 API 无幂等键），该窗口内的段重启后会重发一次——接受为已知限制，段带 `(i/n)` 前缀使重复肉眼可辨；超恢复期限（24h）的 pending 段放弃 + 审计，不再补发。
+1. **终态结果卡（经 outbox，§5 `outboundSegments`）**：仅投递**已提交**的 `assistant/message`；不投未提交流式 delta。流程：
+   - 观察到绑定 session 的 `assistant/message` ⇒ 按完整 create-message envelope 的 UTF-8 JSON 字节数做 24KB 软上限预检 ⇒ 整行优先装箱，单行仍超限时按 Unicode 码点二分切割 ⇒ 渲染绿色结果卡（标题 `工作区名 · 最终结果 · i/N`）；
+   - 每段以 `pending` 写入 outbox 后才发送（主键为 `chatId+sessionId+sourceEventSeq+segmentIndex` 的确定性编码）；结果卡创建失败显式降级同段纯文本，任一发送路径成功后才清正文并写 `sent`，两条路径都失败则保留 `pending`；
+   - **重启恢复**：启动扫描 `pending` 段按 (chat, sourceEventSeq, segmentIndex) 排序续发。**发送成功与 `sent` 写入之间崩溃的窗口无法消除**（飞书发消息 API 无幂等键），该窗口内的段重启后会重发一次——接受为已知限制，卡片标题带 `i/N` 使重复肉眼可辨；超恢复期限（24h）的 pending 段放弃 + 审计，不再补发。
 2. **任务卡**：每 turn 一张，展示状态 / 当前工具 / token / 耗时。
    - **状态与当前工具**：从 `session/event` 以纯函数折叠 `tool/call`、`tool/result`、turn 边界事件重建；"当前工具"只显示已 call 未 result 的调用；折叠函数输入为事件序列，可从 log 重放（进程重启后旧卡定格，不重建；卡片更新不经 outbox——非终态展示可丢弃）。
    - **token 字段**：来源 `ctx.tokenMeter.measure(session)`——M0 已确认 token-meter 在 base 层组合中必在（base patch :281），直接注入。**provider 未上报 usage 时显示"未知"，不显示估算值**；计数口径随 tokenMeter，在卡片注明。token 缺失不构成功能缺陷。
@@ -393,9 +393,10 @@ bridge listener 收到 approval/request
 | `freshnessMs` | 600000 | 入站时效 |
 | `listingTtlMs` | 300000 | `/ls` 编号快照有效期；过期后 `/use <编号>` 要求重新 `/ls` |
 | `cardThrottleMs` | 1000 | 卡片节流 |
-| `maxSegmentBytes` | 依飞书上限 | 文本分段 |
 | `sendRetryBudget` / `disposeDrainTimeoutMs` | 待定 | 出站队列重试与关闭排空上限 |
 | `provider` / `model` | 缺省 | `/new` 模型路由；缺省用 `agent-default-model` |
+
+结果卡容量采用固定的 24KB 软上限（完整 create-message envelope），作为飞书协议安全余量，不暴露为部署配置。
 
 ## 9. 可靠性
 
@@ -429,7 +430,7 @@ bridge listener 收到 approval/request
 - **入站幂等以 MessageId 对账，不以 user/message 存在性对账**：`followup()` 成功只保证消息 durable 进入 inbox（`agent/inbox/spliced`），`user/message` 要等 loop claim；对账链必须覆盖 inbox 投影与取消丢弃（§6.1），否则"followup 后、claim 前"崩溃会导致重复入队。启动主动扫描 `received` 记录——飞书重连不保证历史事件重发，等待重投会留下永久悬置。
 - **enqueued 是接受终态，不是执行承诺**：消息进入 inbox 后的消费/丢弃由 session log 表达，不回写入站表——两套账各记各的，避免双写一致性问题。
 - **命令中断按副作用可识别性分档恢复**：target 已落盘的中断走 reconciliation（据 record 判定副作用是否完成，补写或安全重执行）；target 回写前的窄窗口无法与创建调用构成单一事务，标 interrupted 交人工核实——自动重放在该窗口必然冒重复副作用风险，诚实收窄优于虚假承诺。
-- **文本回帖经 durable outbox**：出站队列若只在内存，重启即丢失"已投影未发送"的段，与恢复承诺矛盾；outbox 主键为 `chatId+sessionId+sourceEventSeq+segmentIndex` 的确定性编码（含 chatId：多 chat 绑定同一 session 各有独立发送状态，不互相误判已发送），投影重复不重复入库。飞书发送 API 无幂等键，"发送成功但 sent 未落盘"窗口的单段重发一次是接受的已知限制。
+- **终态结果经 durable outbox**：出站队列若只在内存，重启即丢失"已投影未发送"的段，与恢复承诺矛盾；outbox 主键为 `chatId+sessionId+sourceEventSeq+segmentIndex` 的确定性编码（含 chatId：多 chat 绑定同一 session 各有独立发送状态，不互相误判已发送），投影重复不重复入库。飞书发送 API 无幂等键，"发送成功但 sent 未落盘"窗口的单段重发一次是接受的已知限制。
 - **审批配对靠扫描 `approval/asked`**：`ApprovalRequest` 不携带 id 是上游现状，与 apiproxy 同构配对（含 callId 对称匹配与 pending 占用排除）；点击有效性以内存 pending registry 为准，durable 记录只服务重启失效。
 - **审批卡先持久化后发送**：pendingCards 主键用 bridge 自有 `PendingCardId`（卡片 id 发送后才存在），先写 record 再发卡、失败按未暴露/已暴露分档补偿——避免用户看到无法工作的孤儿审批卡。
 - **重启不恢复待决审批、不补写审计对**：approval 待决态活在 promise 链里；未配对 asked 属 crash-tail，归上游修复机制，bridge 补写可能违反 turn-enclosure。

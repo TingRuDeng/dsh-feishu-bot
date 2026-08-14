@@ -14,6 +14,7 @@ import z from '@deepseek-ai/schemastery'
 import * as Lark from '@larksuiteoapi/node-sdk'
 // Declaration-merge import: dsh-credentials contributes ctx.credentials.
 import type {} from '@deepseek-ai/dsh-credentials'
+import { createCardMessageEnvelope } from './envelope.ts'
 
 /** Gateway configuration: credential references only, no secrets. */
 export interface Config {
@@ -232,10 +233,7 @@ export class FeishuGateway extends Service {
     const run = async (): Promise<string> => {
       const client = this.client
       if (client === undefined || this.disposed) throw new Error('feishu-gateway: disposed')
-      const response = await client.im.v1.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-      })
+      const response = await client.im.v1.message.create(createCardMessageEnvelope(chatId, card))
       const messageId = response?.data?.message_id
       if (messageId === undefined) throw new Error(`card send returned no message_id (code ${String(response?.code)})`)
       return messageId

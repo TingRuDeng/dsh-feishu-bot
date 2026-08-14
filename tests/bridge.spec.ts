@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import UserApproval from '@deepseek-ai/dsh-user-approval'
 import SessionStore from '@deepseek-ai/dsh-session'
@@ -25,11 +25,14 @@ import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 import * as bridge from '../src/bridge/index.ts'
 import type { FeishuInboundMessage } from '../src/gateway/index.ts'
+import { resultCardEnvelopeBytes } from '../src/bridge/result-card.ts'
 
 /** Stub transport: records sends, never talks to Feishu. */
 class StubFeishu extends Service {
   sent: { chatId: string; text: string }[] = []
   cards: { messageId: string; card: object }[] = []
+  resultCardAttempts: object[] = []
+  failResultCards = false
   constructor(ctx: Context) {
     super(ctx, 'feishu')
   }
@@ -40,6 +43,10 @@ class StubFeishu extends Service {
   }
 
   async sendCard(_chatId: string, card: object): Promise<string> {
+    if (JSON.stringify(card).includes('最终结果')) {
+      this.resultCardAttempts.push(card)
+      if (this.failResultCards) throw new Error('simulated result-card failure')
+    }
     const messageId = `card_${this.cards.length + 1}`
     this.cards.push({ messageId, card })
     return messageId
@@ -101,7 +108,6 @@ async function mountBridge(adapter: MockAdapter, configOverrides: object = {}): 
     defaultWorkspace: root,
     freshnessMs: 600_000,
     cardThrottleMs: 1_000,
-    segmentMaxChars: 2_000,
     agentProvider: 'mock',
     agentModel: 'm',
     ...configOverrides,
@@ -126,13 +132,14 @@ async function mountBridge(adapter: MockAdapter, configOverrides: object = {}): 
     await drain()
   }
   const drain = async (): Promise<void> => {
-    // Chat queues are internal; settle when the send count stays stable
+    // Chat queues are internal; settle when the outbound count stays stable
     // across two consecutive checks (bounded at 4s).
     let last = -1
     for (let i = 0; i < 40; i++) {
       await new Promise(resolve => setTimeout(resolve, 100))
-      if (feishu.sent.length === last) return
-      last = feishu.sent.length
+      const count = feishu.sent.length + feishu.cards.length
+      if (count === last) return
+      last = count
     }
   }
   return { ctx, feishu, root, deliver, drain }
@@ -181,14 +188,61 @@ describe('assembled bridge (M1 acceptance)', () => {
   })
 
   it('full loop: /new binds, text reaches the model, reply reaches the chat', { timeout: 20_000 }, async () => {
-    const { feishu, deliver } = await mountBridge(new MockAdapter([textResponse('模型的回答')]))
+    const { feishu, root, deliver } = await mountBridge(new MockAdapter([textResponse('模型的回答')]))
     await deliver({ text: '/new' })
     expect(feishu.sent).toHaveLength(1)
     expect(feishu.sent[0]!.text).toContain('已创建并绑定')
 
     await deliver({ text: '请帮我做一件事' })
-    const texts = feishu.sent.map(s => s.text)
-    expect(texts.some(t => t.includes('模型的回答'))).toBe(true)
+    const result = feishu.cards.find(c => JSON.stringify(c.card).includes('最终结果'))
+    expect(result).toBeDefined()
+    const card = result!.card as {
+      header: { title: { content: string }; template: string }
+      elements: { text: { content: string } }[]
+    }
+    expect(card.header).toEqual({
+      title: { tag: 'plain_text', content: `${basename(root)} · 最终结果 · 1/1` },
+      template: 'green',
+    })
+    expect(card.elements[0]!.text.content).toBe('模型的回答')
+  })
+
+  it('result-card creation failure falls back to text without losing the answer', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter([textResponse('不能丢失的回答')]))
+    await deliver({ text: '/new' })
+    feishu.failResultCards = true
+
+    await deliver({ text: '请给出结果' })
+
+    expect(feishu.resultCardAttempts).toHaveLength(1)
+    expect(feishu.sent.some(message => message.text === '不能丢失的回答')).toBe(true)
+    const domain = ctx.storageDomain.get('feishu_bot')
+    const rows = [...domain!.table('outbound_segments').entries()]
+      .map(([, row]) => row as { status: string; text: string; segmentCount: number })
+    expect(rows).toEqual([{
+      chatId: 'oc_chat_1',
+      sessionId: expect.any(String),
+      sourceEventSeq: expect.any(Number),
+      segmentIndex: 0,
+      segmentCount: 1,
+      text: '',
+      status: 'sent',
+      createdAt: expect.any(Number),
+    }])
+  })
+
+  it('terminal projection uses byte-preflight result-card segments', { timeout: 20_000 }, async () => {
+    const answer = 'x'.repeat(30_000)
+    const { feishu, deliver } = await mountBridge(new MockAdapter([textResponse(answer)]))
+    await deliver({ text: '/new' })
+
+    await deliver({ text: '请返回长结果' })
+
+    const resultCards = feishu.cards.filter(card => JSON.stringify(card.card).includes('最终结果'))
+    expect(resultCards).toHaveLength(2)
+    for (const result of resultCards) {
+      expect(resultCardEnvelopeBytes('oc_chat_1', result.card as never)).toBeLessThanOrEqual(24 * 1_024)
+    }
   })
 
   it('task card projects turn progress and freezes at completion (M2)', { timeout: 20_000 }, async () => {
@@ -197,8 +251,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     await deliver({ text: '跑个任务' })
     // The turn produced a card (turn/start schedules, turn/end freezes).
     expect(feishu.cards.length).toBeGreaterThan(0)
-    const last = JSON.stringify(feishu.cards.at(-1)!.card)
-    expect(last).toContain('已完成')
+    expect(feishu.cards.some(card => JSON.stringify(card.card).includes('已完成'))).toBe(true)
   })
 
   it('/stop without a running task reports idle; without a binding reports unbound (M2)', async () => {

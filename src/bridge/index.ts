@@ -26,8 +26,8 @@ import { parseCommand } from './commands.ts'
 import { authorizeCwd, buildWorkspaceFilter } from './workspace.ts'
 import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
 import { reconcileMessage } from './inbound.ts'
-import { segmentText } from './outbound.ts'
 import { reduceTaskCard, renderTaskCard, type TokenInfo } from './task-card.ts'
+import { segmentResultCards } from './result-card.ts'
 import { pairApprovalId, renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-approval'
@@ -46,8 +46,6 @@ export interface Config {
   listingTtlMs: number
   /** Minimum interval between task-card updates in milliseconds (M2). */
   cardThrottleMs: number
-  /** Per-segment character budget for outbound text. */
-  segmentMaxChars: number
   /** LLM provider for sessions the bridge resumes or creates. */
   agentProvider: string
   /** LLM model for sessions the bridge resumes or creates. */
@@ -63,7 +61,6 @@ export const Config: z<Config> = z.object({
   freshnessMs: z.natural().default(600_000),
   listingTtlMs: z.natural().default(300_000),
   cardThrottleMs: z.natural().default(1_000),
-  segmentMaxChars: z.natural().default(2_000),
   agentProvider: z.string().default('deepseek'),
   agentModel: z.string().default('deepseek-chat'),
   webUrl: z.string().default('http://127.0.0.1:3080'),
@@ -126,20 +123,27 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     return next
   }
 
-  /** Outbound: project one assistant message into durable segments, then send. */
+  /** Outbound: project one assistant message into durable result-card segments. */
   const projectAndSend = async (
     chatId: FeishuChatId, sessionId: SessionIdString, sourceEventSeq: number, text: string,
   ): Promise<void> => {
-    const segments = segmentText(text, config.segmentMaxChars)
+    const cwd = await sessionCwd(sessionId)
+    const workspaceName = cwd?.split('/').filter(Boolean).at(-1) ?? String(sessionId)
+    const segments = segmentResultCards(chatId, workspaceName, text)
     for (const [index, segment] of segments.entries()) {
       const key = outboundSegmentId(chatId, sessionId, sourceEventSeq, index)
       if (outboundSegments.get(key)?.status === 'sent') continue
       await outboundSegments.put(key, {
         chatId, sessionId, sourceEventSeq,
         segmentIndex: index, segmentCount: segments.length,
-        text: segment, status: 'pending', createdAt: Date.now(),
+        text: segment.text, status: 'pending', createdAt: Date.now(),
       })
-      await ctx.feishu.sendText(chatId, segment)
+      try {
+        await ctx.feishu.sendCard(chatId, segment.card)
+      } catch (error: unknown) {
+        ctx.logger.warn('feishu-bridge result card send failed for %s; falling back to text: %s', chatId, String(error))
+        await ctx.feishu.sendText(chatId, segment.text)
+      }
       const row = outboundSegments.get(key)
       if (row !== undefined) await outboundSegments.put(key, { ...row, status: 'sent', text: '' })
     }

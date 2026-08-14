@@ -56,7 +56,7 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 - `/new` `/ls` `/use` `/status` `/release` `/help`（含 §6.2 命令幂等：committed 结果重发、target 回写、中断 reconciliation）；
 - **cwd 目录授权（§6.7）**：`allowedWorkspaces` realpath 化祖先检查、空配置 fail-closed、defaultWorkspace 归属校验（load 时 fail loud）；
 - 普通文本 → 状态机去重与对账（§6.1）→ resolver → `followup()`；
-- `assistant/message` → 分段 → **outbox（`outboundSegments`，确定性四元组主键）** → FIFO 发送与 sent 落盘（§6.3）；
+- `assistant/message` → 24KB envelope 预检结果卡分段 → **outbox（`outboundSegments`，确定性四元组主键）** → FIFO 发送与 sent 落盘，卡片失败降级文本（§6.3）；
 - Web/飞书共享同一 live/cold session（含 detached resume）；
 - 不做：群聊、合并窗口、审批、问答、任务卡。
 
@@ -100,7 +100,7 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 ## M4：可靠性与体验（进行中）
 
-**状态：第一项（`/ls` 快照 TTL）已实现：编号快照记录生成时间，默认 5 分钟后 `/use <编号>` 拒绝绑定并要求重新 `/ls`，TTL 可通过 `listingTtlMs` 配置。后续排期见 [HANDOFF.md](HANDOFF.md)，需求清单见 [weclaw-lessons.md](weclaw-lessons.md) 二次深读 A 节（8 项采纳，顺序已与用户确认）。**
+**状态：前两项已实现：① `/ls` 编号快照默认 5 分钟过期（`listingTtlMs` 可配置）；②终态回复改为绿色结果卡，按完整 create-message envelope 的 24KB 软上限分片，卡片失败降级文本且保留 durable outbox 语义。后续排期见 [HANDOFF.md](HANDOFF.md)，需求清单见 [weclaw-lessons.md](weclaw-lessons.md) 二次深读 A 节。**
 
 ## M4：可靠性
 

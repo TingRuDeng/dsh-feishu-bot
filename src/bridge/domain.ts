@@ -100,7 +100,7 @@ export const pendingCard = z.object({
 })
 export type PendingCard = z.infer<typeof pendingCard>
 
-/** One outbound text segment; key is the deterministic four-tuple (design §6.3). */
+/** One durable result segment; key is the deterministic four-tuple (design §6.3). */
 export const outboundSegment = z.object({
   chatId: brandedString<'FeishuChatId'>(),
   sessionId: brandedString<'SessionIdString'>(),
