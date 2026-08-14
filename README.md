@@ -21,6 +21,8 @@ dsh --profile web --dump-config   # expect a "# == dsh-feishu-bot" layer with tw
 
 Credentials: set `FEISHU_APP_ID` / `FEISHU_APP_SECRET` where the dsh credentials service reads them. No secrets in this repository.
 
+Feishu console prerequisites (long-connection mode): subscribe the `im.message.receive_v1` event with `im:message.p2p_msg:readonly`, and for approval cards enable the `card.action.trigger` callback; publish an app version after each change.
+
 Verified against deepseek-harness 0.1.0-rc.5.
 
 ## Data exposure model
