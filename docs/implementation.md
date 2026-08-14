@@ -76,6 +76,8 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 ## M2：进度与取消
 
+**状态：代码面已完成（commit 33b78ba，84 测试绿），待实机验收。**已落地：task-card reducer（纯函数折叠，callId 精确配对，三态终态 completed/stopped/failed）、飞书卡渲染（思考中等待态/终态不重复文案，weclaw 规则）、桥内节流投影（cardThrottleMs 合并，turn/end 直发定格，patch 失败即弃——进度可丢，正文走 outbox）、/stop（cancel user + keepInbox，空闲/未绑定如实回帖）、gateway sendCard/patchCard。token 字段暂缓：tokenMeter 注入留待实机验证后接入（占位注记）。
+
 - 任务卡：`session/event` 纯函数折叠 turn 状态（状态/当前工具/token/耗时）；节流合并 patch；turn 终态定格；
 - token 按 M0#8 结论接入；来源缺失显示"未知"（产品契约，§6.3）；
 - `/stop` = `cancel({kind:'user'}, {keepInbox: true})`，完成反馈以该 turn 终态事件为准（不用 `whenIdle()`）；
