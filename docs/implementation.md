@@ -87,6 +87,8 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 ## M3：审批
 
+**状态：代码面已完成（commit 15477a8，96 测试绿），待实机验收。**方案 α 落地，机制层 5 断言 + 装配级 3 剧本（点击允许全链路、越权点击不消耗、无绑定让路 fail-closed）均绿。实现要点：配对扫描与 apiproxy 同构（approval.ts 纯函数）；durable-first 三段补偿全做；**race 修正——链条的 fail-closed 'unavailable' 不算决定**，空链条时飞书卡保持有效（装配测试暴露，α 语义比设计稿更精确）；重启扫描 freeze+delete、绝不补写 approval/decided。待实机验证项保持：Web UI 先决/后决时卡片表现、同 approvalId 双登记审计。
+
 前置：真实 web profile 组合中验证方案 α（prepend + next() 并行 race，§6.4；机制层 5 断言已过）——重点为 Web listener late-resolve 的 UI 表现与同 approvalId 双登记审计；不通过则定档 β（prepend + 按绑定切换通道）。问答已于 M0#1 整体裁剪，不在本里程碑。
 
 - 审批：按定档方案实现 listener、`approval/asked` 扫描配对（M0#3 结论落地）、内存 pending registry + durable pendingCards 双层（**主键 PendingCardId；先写 record 再发卡，发送成功回填 cardMessageId**）、审批卡（toolName+reason+标题+Web 链接，无参数）、三重校验、signal 撤回定格、失败补偿分档（record 写失败 ⇒ 撤登记 next()；发卡失败 ⇒ 删 record 撤登记 next()；发卡成功后崩溃 ⇒ 重启失效扫描兜底）；
