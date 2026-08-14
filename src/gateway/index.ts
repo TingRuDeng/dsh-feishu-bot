@@ -99,6 +99,12 @@ export class FeishuGateway extends Service {
         context?: { open_message_id?: string }
       }) => {
         if (this.disposed) return {}
+        // Receipt log first: live diagnosis needs to distinguish "click
+        // never arrived" (console callback not enabled) from "handler
+        // rejected the payload".
+        this.ctx.logger.info('feishu-gateway: card action received (operator %s, message %s)',
+          data.operator?.open_id ?? data.event?.operator?.open_id ?? '?',
+          data.context?.open_message_id ?? '?')
         const handler = this.cardActionHandler
         if (handler === undefined) return {}
         const operatorOpenId = data.operator?.open_id ?? data.event?.operator?.open_id ?? ''

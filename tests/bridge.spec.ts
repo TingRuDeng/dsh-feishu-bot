@@ -266,6 +266,30 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(await outcome).toBe('rejected')
   })
 
+  it('approval: a JSON-string button value decides the same as an object (M3 fix)', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const outcome = ctx.approval.request({ agent, toolName: 'Bash', reason: 'x' })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('审批请求'))) throw new Error('no card yet')
+    }, { timeout: 10_000, interval: 50 })
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('审批请求'))!
+    const value = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]!
+    // Some Feishu clients deliver the button value as a JSON STRING.
+    const toast = await feishu.clickCard(OWNER, sent.messageId, JSON.stringify({ pendingId: value, action: 'allow' }))
+    expect(toast?.toast).toContain('已允许')
+    expect(await outcome).toBe('allowed-once')
+  })
+
+  it('approval: an unrecognized click payload replies with a visible toast, never silence (M3 fix)', { timeout: 20_000 }, async () => {
+    const { feishu, deliver } = await mountBridge(new MockAdapter([]))
+    await deliver({ text: '/new' })
+    const toast = await feishu.clickCard(OWNER, 'card_x', 'not-json-at-all')
+    expect(toast?.toast).toBeDefined()
+  })
+
   it('approval with no bound chat delegates to the rest of the chain (M3)', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })

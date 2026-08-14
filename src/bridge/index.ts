@@ -385,10 +385,22 @@ async function mount(ctx: Context, config: Config): Promise<void> {
 
   /** Card button clicks: validate, resolve the pending entry, freeze the card. */
   ctx.feishu.handleCardActions(async (action) => {
-    const value = action.value as { pendingId?: string; action?: string } | undefined
+    // Feishu delivers button values as an object OR as a JSON string
+    // depending on client/schema version; accept both. An unrecognized
+    // payload gets a visible toast — silent {} looked like a dead button
+    // in live acceptance.
+    let raw = action.value
+    if (typeof raw === 'string') {
+      try { raw = JSON.parse(raw) } catch { raw = undefined }
+    }
+    const value = raw as { pendingId?: string; action?: string } | undefined
     const pendingId = value?.pendingId
     const verb = value?.action
-    if (pendingId === undefined || (verb !== 'allow' && verb !== 'reject')) return {}
+    if (pendingId === undefined || (verb !== 'allow' && verb !== 'reject')) {
+      ctx.logger.warn('feishu-bridge: unrecognized card click payload (keys: %s)',
+        value === undefined ? typeof action.value : Object.keys(value).join(','))
+      return { toast: '无法识别的按钮数据，请查看日志' }
+    }
     // Permission: allowlist member (§7.2). Empty operator id fails closed.
     if (!config.allowedOpenIds.includes(action.operatorOpenId)) {
       return { toast: '你没有权限操作此审批' }
