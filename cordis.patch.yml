@@ -1,0 +1,25 @@
+# The dsh-feishu-bot bundle patch: two plugin rows inserted after the web-app
+# layer. feishu-gateway provides the `ctx.feishu` transport service;
+# feishu-bridge owns all business semantics (bindings, commands, inbound
+# dedup, outbound projection, approval answering).
+#
+# Credentials are credential references resolved by the dsh credentials
+# service; no secrets live in this file or this repository.
+
+- insert:
+    - id: feishu-gateway
+      name: 'dsh-feishu-bot/gateway'
+      config:
+        appIdRef: FEISHU_APP_ID
+        appSecretRef: FEISHU_APP_SECRET
+
+    - id: feishu-bridge
+      name: 'dsh-feishu-bot/bridge'
+      config:
+        allowedOpenIds:
+          - on_efb6c1f5bbcbfcc86ef910ac03b56ea6
+        allowedWorkspaces:
+          - ~/Desktop/mycode
+        defaultWorkspace: ~/Desktop/mycode
+        freshnessMs: 600000
+        cardThrottleMs: 1000
