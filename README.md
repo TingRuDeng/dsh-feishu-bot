@@ -2,7 +2,15 @@
 
 Feishu (Lark) private-chat frontend for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): drive, monitor, and approve local agents from Feishu, sharing live and cold sessions with the Web GUI in the same process.
 
-Status: M0 skeleton. Design and milestone plan currently live in the author's harness checkout (`dsh-feishu-bot-design.md`, `dsh-feishu-bot-implementation.md`, `dsh-feishu-bot-m0-record.md`); they move here before M1 completes.
+Status: M1 code-complete (60 tests), pending live acceptance. Docs: [design](docs/design.md) · [milestone plan](docs/implementation.md) · [M0 verification record](docs/m0-record.md) · [weclaw lessons](docs/weclaw-lessons.md).
+
+## Commands (private chat)
+
+- `/new [cwd]` — create a session under an allowed workspace and bind it
+- `/ls` — numbered session list grouped by workspace; `/use <n>` binds by number
+- `/use <sessionId|n>` — bind an existing session
+- `/status` / `/release` / `/help`
+- Plain text goes to the bound session; replies come back segmented.
 
 ## Install (into an existing web profile)
 

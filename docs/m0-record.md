@@ -1,6 +1,6 @@
 # dsh-feishu-bot M0 核验记录
 
-配套：[设计](dsh-feishu-bot-design.md) · [实施计划](dsh-feishu-bot-implementation.md)
+配套：[设计](design.md) · [实施计划](implementation.md)
 上游版本：deepseek-harness 0.1.0-rc.5（本地 checkout）。核验方式：本会话直读源码（原计划的并行子代理因平台故障弃用）。
 状态：☑ 已有源码结论 ◐ 源码结论 + 待运行时实验确认 ☐ 未完成。
 

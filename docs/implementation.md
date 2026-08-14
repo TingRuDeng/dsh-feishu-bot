@@ -1,6 +1,6 @@
 # dsh-feishu-bot 实施计划
 
-配套设计文档：[dsh-feishu-bot-design.md](dsh-feishu-bot-design.md)
+配套设计文档：[design.md](design.md)
 M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0 完成后按核验结果修订各阶段估计。
 
 ## M0：扩展点与生命周期核验（强制门）
