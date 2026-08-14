@@ -391,6 +391,7 @@ bridge listener 收到 approval/request
 | `allowedWorkspaces` | `[]` | `/new` cwd 允许根（realpath 化祖先检查，§6.7）；空=拒绝一切 `/new` |
 | `defaultWorkspace` | — | `/new`/`/ls` 默认 cwd；须位于 allowedWorkspaces 内（load 校验）；缺省时 `/new` 要求显式 cwd |
 | `freshnessMs` | 600000 | 入站时效 |
+| `listingTtlMs` | 300000 | `/ls` 编号快照有效期；过期后 `/use <编号>` 要求重新 `/ls` |
 | `cardThrottleMs` | 1000 | 卡片节流 |
 | `maxSegmentBytes` | 依飞书上限 | 文本分段 |
 | `sendRetryBudget` / `disposeDrainTimeoutMs` | 待定 | 出站队列重试与关闭排空上限 |

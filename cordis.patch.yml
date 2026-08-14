@@ -32,4 +32,5 @@
         allowedOpenIds: []
         allowedWorkspaces: []
         freshnessMs: 600000
+        listingTtlMs: 300000
         cardThrottleMs: 1000

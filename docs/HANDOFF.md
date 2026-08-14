@@ -1,23 +1,23 @@
-# 交接文档：M4 进行中（新会话从这里接手）
+# 交接文档：M4 进行中
 
 **先读**：[design.md](design.md)（架构与决策）、[implementation.md](implementation.md)（里程碑状态）、[weclaw-lessons.md](weclaw-lessons.md)（交互设计参考清单，尤其"二次深读"一节——M4 的需求来源）。
 
 ## 状态快照
 
-- 远端 master：`b93b2d6`，该提交处 104 测试全绿，`lib/` 构建物与源码同步。
+- 本轮接手基线：`1363093`（`docs: M4 handoff for successor session`）。
 - M0–M3 + 三项 UX 改进（进度滚动、审批组卡、工作区名标题）代码面全部完成。
-- **工作树有一处未提交改动**：`tests/bridge.spec.ts` 新增了 M4 第一项的 RED 测试（`/use by ordinal rejects a stale listing snapshot (M4: TTL)`），已按正确写法修好（`vi.useFakeTimers({ toFake: ['Date'] })` + `vi.setSystemTime`——全量 fake timers 会冻结 drain() 的真实 setTimeout 导致超时，别改回去）。功能实现尚未开始，测试当前 RED 是预期。
+- M4 第一项 `/ls` 快照 TTL 已按 TDD 实现；回归测试只伪造 `Date`（全量 fake timers 会冻结 `drain()` 的真实 `setTimeout`，别改回去）。
 
-## 立即接手的工作：M4 第一项（/ls 快照 TTL）
+## M4 第一项已完成：/ls 快照 TTL
 
 隐患：`/use <编号>` 从进程内 `listings` 快照解析，但快照永不过期——陈年列表的编号会静默绑定错会话（weclaw 用 5 分钟 TTL 消除了这一事故类，见 lessons "二次深读 A#7"）。
 
-实现方案（TDD，测试已就位）：
+已落地：
 
 1. `src/bridge/index.ts` 里 `const listings = new Map<string, string[]>()` 改为 `Map<string, { ordered: string[]; at: number }>`。
 2. `/ls` 写入时记 `at: Date.now()`；`case 'use'` 的数字分支在取编号前检查 `Date.now() - entry.at > config.listingTtlMs` → 走已有的"编号无效或列表已过期"回复分支（文案已存在，无需新增）。
 3. 新 Config 字段 `listingTtlMs: z.natural().default(300_000)`（部署可变项必须进 Config，不许硬编码——上游 AGENTS.md 约定）。
-4. 全绿后：`pnpm vitest run` + `pnpm run typecheck` + `pnpm run build`，提交推送。
+4. 回归测试覆盖快照超过 5 分钟后拒绝编号绑定；交付门禁为 `pnpm vitest run` + `pnpm run typecheck` + `pnpm run build`。
 
 ## M4 剩余排期（顺序已与用户确认；规格全在 lessons 二次深读 A 节）
 

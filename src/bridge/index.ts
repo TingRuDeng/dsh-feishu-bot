@@ -42,6 +42,8 @@ export interface Config {
   defaultWorkspace?: string
   /** Inbound event freshness window in milliseconds. */
   freshnessMs: number
+  /** Lifetime of the most recent `/ls` ordinal snapshot per chat. */
+  listingTtlMs: number
   /** Minimum interval between task-card updates in milliseconds (M2). */
   cardThrottleMs: number
   /** Per-segment character budget for outbound text. */
@@ -59,6 +61,7 @@ export const Config: z<Config> = z.object({
   allowedWorkspaces: z.array(z.string()).default([]),
   defaultWorkspace: z.string(),
   freshnessMs: z.natural().default(600_000),
+  listingTtlMs: z.natural().default(300_000),
   cardThrottleMs: z.natural().default(1_000),
   segmentMaxChars: z.natural().default(2_000),
   agentProvider: z.string().default('deepseek'),
@@ -109,8 +112,8 @@ async function mount(ctx: Context, config: Config): Promise<void> {
     return header?.cwd
   }
 
-  /** Last /ls numbering per chat: ordinal → sessionId (process-local). */
-  const listings = new Map<string, string[]>()
+  /** Last /ls numbering per chat: ordered session ids plus snapshot time. */
+  const listings = new Map<string, { ordered: string[]; at: number }>()
 
   /** Serial work queue per chat; recovery and fresh events share it. */
   const chatTails = new Map<string, Promise<void>>()
@@ -563,7 +566,7 @@ async function mount(ctx: Context, config: Config): Promise<void> {
             lines.push(`  [${ordered.length}] ${short}${when}`)
           }
         }
-        listings.set(chatId, ordered)
+        listings.set(chatId, { ordered, at: Date.now() })
         lines.push('回复 /use <编号> 绑定。')
         await commit(lines.join('\n'))
         return
@@ -604,8 +607,10 @@ async function mount(ctx: Context, config: Config): Promise<void> {
       case 'use': {
         let targetId = command.sessionId
         if (/^\d+$/u.test(targetId)) {
-          const ordered = listings.get(chatId)
-          const picked = ordered?.[Number(targetId) - 1]
+          const listing = listings.get(chatId)
+          const picked = listing === undefined || Date.now() - listing.at > config.listingTtlMs
+            ? undefined
+            : listing.ordered[Number(targetId) - 1]
           if (picked === undefined) {
             await commit('编号无效或列表已过期。请先发送 /ls 获取最新编号。')
             return

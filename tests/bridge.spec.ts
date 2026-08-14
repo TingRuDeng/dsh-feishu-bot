@@ -345,6 +345,24 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(feishu.cards.some(c => JSON.stringify(c.card).includes('审批请求'))).toBe(false)
   })
 
+  it('/use by ordinal rejects a stale listing snapshot (M4: TTL)', { timeout: 20_000 }, async () => {
+    // Fake only Date: drain() and the per-chat queues need real timers.
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      const { feishu, deliver } = await mountBridge(new MockAdapter([]))
+      await deliver({ text: '/new' })
+      await deliver({ text: '/release' })
+      await deliver({ text: '/ls' })
+      expect(feishu.sent.at(-1)!.text).toContain('[1]')
+      // Past the snapshot TTL the ordinal must not silently bind.
+      vi.setSystemTime(Date.now() + 6 * 60_000)
+      await deliver({ text: '/use 1' })
+      expect(feishu.sent.at(-1)!.text).toContain('列表已过期')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('/status and /release reflect and clear the binding', { timeout: 20_000 }, async () => {
     const { feishu, deliver } = await mountBridge(new MockAdapter([]))
     await deliver({ text: '/status' })
