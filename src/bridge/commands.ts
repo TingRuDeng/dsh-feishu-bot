@@ -25,6 +25,9 @@ export function parseCommand(text: string): ParsedCommand | undefined {
   const trimmed = text.trim()
   if (!trimmed.startsWith('/')) return undefined
   const [head = '', ...rest] = trimmed.slice(1).split(/\s+/u)
+  // A leading token with a path separator is an absolute path, not a command
+  // (macOS/Linux paths like /Users/... arrive as ordinary conversation).
+  if (head.includes('/')) return undefined
   const remainder = trimmed.slice(1 + head.length).trim()
   switch (head) {
     case 'new':

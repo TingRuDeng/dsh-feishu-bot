@@ -86,6 +86,10 @@ export class FeishuGateway extends Service {
       'im.message.receive_v1': async (data) => {
         this.dispatchInbound(data)
       },
+      // Subscribed read-status events need explicit no-op handlers; an
+      // unhandled subscription makes the SDK log `not found handler` on
+      // every read receipt (weclaw production lesson).
+      'im.message.message_read_v1': async () => {},
     })
     this.wsClient.start({ eventDispatcher: dispatcher })
     this.ctx.logger.info('feishu-gateway: long connection started')

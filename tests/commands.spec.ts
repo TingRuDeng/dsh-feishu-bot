@@ -44,4 +44,14 @@ describe('parseCommand', () => {
     expect(parseCommand('  /ls  ')).toEqual({ kind: 'ls' })
     expect(parseCommand('/LS')).toEqual({ kind: 'unknown', name: 'LS' })
   })
+
+  it('absolute paths are conversation, not commands (weclaw 2026-04-28)', () => {
+    expect(parseCommand('/Users/dengtingru/a.ts 这个文件看一下')).toBeUndefined()
+    expect(parseCommand('/tmp/build.log')).toBeUndefined()
+    expect(parseCommand('/etc/hosts 里加一行')).toBeUndefined()
+  })
+
+  it('a bare unknown token without path separators stays an unknown command', () => {
+    expect(parseCommand('/frobnicate')).toEqual({ kind: 'unknown', name: 'frobnicate' })
+  })
 })
