@@ -8,13 +8,49 @@ importers:
 
   .:
     dependencies:
+      '@deepseek-ai/dsh-agent':
+        specifier: link:../deepseek-harness/packages/core/agent
+        version: link:../deepseek-harness/packages/core/agent
+      '@deepseek-ai/dsh-api-remotes':
+        specifier: link:../deepseek-harness/packages/api/remotes
+        version: link:../deepseek-harness/packages/api/remotes
+      '@deepseek-ai/dsh-brand':
+        specifier: link:../deepseek-harness/packages/util/brand
+        version: link:../deepseek-harness/packages/util/brand
+      '@deepseek-ai/dsh-llm':
+        specifier: link:../deepseek-harness/packages/llm/llm
+        version: link:../deepseek-harness/packages/llm/llm
+      '@deepseek-ai/dsh-session':
+        specifier: link:../deepseek-harness/packages/core/session
+        version: link:../deepseek-harness/packages/core/session
+      '@deepseek-ai/dsh-session-persistence':
+        specifier: link:../deepseek-harness/packages/session/session-persistence
+        version: link:../deepseek-harness/packages/session/session-persistence
+      '@deepseek-ai/dsh-storage-domain':
+        specifier: link:../deepseek-harness/packages/storage/storage-domain
+        version: link:../deepseek-harness/packages/storage/storage-domain
       '@larksuiteoapi/node-sdk':
         specifier: ^1.44.0
         version: 1.73.0
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: ^4.0.1
         version: 4.0.1
+      '@deepseek-ai/dsh-agent-loop':
+        specifier: link:../deepseek-harness/packages/core/agent-loop
+        version: link:../deepseek-harness/packages/core/agent-loop
+      '@deepseek-ai/dsh-session-persistence-jsonl':
+        specifier: link:../deepseek-harness/packages/session/session-persistence-jsonl
+        version: link:../deepseek-harness/packages/session/session-persistence-jsonl
+      '@deepseek-ai/dsh-system-prompt':
+        specifier: link:../deepseek-harness/packages/core/system-prompt
+        version: link:../deepseek-harness/packages/core/system-prompt
+      '@deepseek-ai/dsh-tools':
+        specifier: link:../deepseek-harness/packages/core/tools
+        version: link:../deepseek-harness/packages/core/tools
       '@deepseek-ai/schemastery':
         specifier: ^3.18.1
         version: 3.18.1
@@ -1274,6 +1310,9 @@ packages:
       utf-8-validate:
         optional: true
 
+  zod@4.4.3:
+    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+
 snapshots:
 
   '@babel/generator@7.29.8':
@@ -2350,3 +2389,5 @@ snapshots:
       stackback: 0.0.2
 
   ws@8.21.3: {}
+
+  zod@4.4.3: {}
