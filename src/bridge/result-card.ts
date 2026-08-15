@@ -38,7 +38,8 @@ export function renderResultCard(
 
 /** Measure the exact create-message envelope for a rendered result card. */
 export function resultCardEnvelopeBytes(chatId: string, card: FeishuCard): number {
-  return jsonUtf8Bytes(createCardMessageEnvelope(chatId, card))
+  // Canonical result cards always carry a 32-character deterministic UUID.
+  return jsonUtf8Bytes(createCardMessageEnvelope(chatId, card, '0'.repeat(32)))
 }
 
 /** Split one line into maximal Unicode-safe prefixes that fit the card budget. */

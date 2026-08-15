@@ -10,7 +10,7 @@
  * cannot drift from the Host resolver's.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
   ApiRemoteSessionNotFound,
@@ -44,7 +44,7 @@ export type ResolveResult =
 export function createBridgeAgentResolver(
   ctx: Context,
   agentOptions?: () => AgentOptions,
-): (sessionId: SessionId) => Promise<ResolveResult> {
+): (sessionId: SessionId, setup?: AgentSetup) => Promise<ResolveResult> {
   const resumes = new Map<SessionId, Promise<ResolveResult>>()
 
   const fencedLive = (sessionId: SessionId): ResolveResult | undefined => {
@@ -56,7 +56,7 @@ export function createBridgeAgentResolver(
     return { agent: live, ownership: 'existing' }
   }
 
-  return async (sessionId: SessionId): Promise<ResolveResult> => {
+  return async (sessionId: SessionId, setup?: AgentSetup): Promise<ResolveResult> => {
     const fenced = fencedLive(sessionId)
     if (fenced !== undefined) return fenced
     const attached = ctx.sessions.get(sessionId)
@@ -79,6 +79,7 @@ export function createBridgeAgentResolver(
         const handle = await ctx.agents.resume({
           resumeSessionId: sessionId,
           ...agentOptions === undefined ? {} : { agentOptions: agentOptions() },
+          ...setup === undefined ? {} : { setup },
         })
         return {
           agent: handle.agent,

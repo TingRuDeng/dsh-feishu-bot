@@ -33,18 +33,35 @@ async function setup(ready = true) {
   await ctx.plugin(InvariantRegistry)
   const domain = await ctx.storageDomain.open(feishuBotDomain)
   ctx.effect(() => () => domain.close())
-  if (ready) ctx.provide('feishuBridgeReady', { domainName: 'feishu_bot' })
+  if (ready) ctx.provide('feishu', { whenBridgeReady: () => Promise.resolve() } as never)
   return { ctx, domain }
 }
 
 describe('dsh-feishu-bot invariant companion', () => {
-  it('waits for the bridge readiness service before inspecting its domain', async () => {
+  it('waits for the gateway readiness promise before inspecting the bridge domain', async () => {
+    const { ctx } = await setup(false)
+    let markReady!: () => void
+    const ready = new Promise<void>(resolve => { markReady = resolve })
+    ctx.provide('feishu', { whenBridgeReady: () => ready } as never)
+    const fiber = ctx.plugin(FeishuInvariant)
+
+    try {
+      await new Promise(resolve => setTimeout(resolve, 10))
+      expect(fiber.state).not.toBe(2)
+    } finally {
+      markReady()
+      await fiber
+    }
+    expect(fiber.state).toBe(2)
+  })
+
+  it('waits for the gateway service before inspecting the bridge domain', async () => {
     const { ctx } = await setup(false)
     const fiber = ctx.plugin(FeishuInvariant)
-    await fiber
+    await new Promise(resolve => setTimeout(resolve, 10))
     expect(fiber.state).toBe(0)
 
-    ctx.provide('feishuBridgeReady', { domainName: 'feishu_bot' })
+    ctx.provide('feishu', { whenBridgeReady: () => Promise.resolve() } as never)
     await fiber
     expect(fiber.state).toBe(2)
   })

@@ -7,7 +7,15 @@
 import { describe, expect, it } from 'vitest'
 import { renderTaskCard } from '../src/bridge/task-card.ts'
 
-const base = { turn: 1, toolCallCount: 0, durationMs: null, startedAt: 1000, recentTools: [] }
+const base = {
+  turn: 1,
+  toolCallCount: 0,
+  durationMs: null,
+  startedAt: 1000,
+  recentTools: [],
+  failureCode: null,
+  retryCount: 0,
+}
 
 describe('renderTaskCard', () => {
   it('running with no tools shows the single waiting hint', () => {
@@ -44,6 +52,35 @@ describe('renderTaskCard', () => {
 
   it('failed renders failure state', () => {
     expect(JSON.stringify(renderTaskCard({ ...base, status: 'failed', currentTools: [] }))).toContain('失败')
+  })
+
+  it('failed card explains an allowlisted error code and retry count', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'failed',
+      currentTools: [],
+      failureCode: 'EMPTY_RESPONSE',
+      retryCount: 2,
+    })
+    const body = card.elements[0]!.text.content
+
+    expect(body).toContain('失败原因：模型未返回内容')
+    expect(body).toContain('EMPTY_RESPONSE')
+    expect(body).toContain('已重试 2 次')
+  })
+
+  it('failed card never renders an unrecognized provider error code', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'failed',
+      currentTools: [],
+      failureCode: 'LEAK_sensitive_provider_detail',
+      retryCount: 0,
+    })
+    const body = card.elements[0]!.text.content
+
+    expect(body).toContain('失败原因：未知错误')
+    expect(body).not.toContain('LEAK_sensitive_provider_detail')
   })
 
   it('token line: usage-anchored measurements show the count, others show 未知 (design §6.3)', () => {

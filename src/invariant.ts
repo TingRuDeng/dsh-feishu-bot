@@ -18,9 +18,10 @@ import { auditHash } from './audit.ts'
 const PACKAGE_NAME = 'dsh-feishu-bot'
 
 export const name = 'feishu-bot-invariant'
-export const inject = ['invariants', 'feishuBridgeReady']
+export const inject = ['invariants', 'feishu']
 
 const install: InvariantInstaller = Object.assign(async (ctx: Context, fail: InvariantFailure) => {
+  await ctx.feishu.whenBridgeReady()
   const known = new Set([
     ...ctx.sessions.list().map(session => String(session.id)),
     ...(await ctx.sessionPersistence.list()).map(header => String(header.id)),
@@ -42,7 +43,7 @@ const install: InvariantInstaller = Object.assign(async (ctx: Context, fail: Inv
     if (change.domain !== 'feishu_bot' || change.table !== 'bindings' || change.operation !== 'put') return
     requireValid(change.key, change.value as ChatBinding)
   }, { global: true })
-}, { inject: ['sessions', 'sessionPersistence', 'storageDomain'] })
+}, { inject: ['feishu', 'sessions', 'sessionPersistence', 'storageDomain'] })
 
 export const apply = (ctx: Context): Promise<() => void> =>
   Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
