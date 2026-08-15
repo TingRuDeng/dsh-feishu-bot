@@ -1,7 +1,7 @@
 {
   "name": "dsh-feishu-bot",
   "description": "Feishu (Lark) private-chat frontend for DeepSeek Harness: drive, monitor, and approve local agents from Feishu, sharing sessions with the Web GUI",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.4",
   "license": "MIT",
   "keywords": [
     "dsh-plugin",
@@ -13,22 +13,22 @@
   ],
   "type": "module",
   "main": "lib/index.js",
-  "types": "lib/types/index.d.ts",
+  "types": "lib/index.d.ts",
   "exports": {
     ".": {
-      "types": "./lib/types/index.d.ts",
+      "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
     "./gateway": {
-      "types": "./lib/types/gateway/index.d.ts",
+      "types": "./lib/gateway/index.d.ts",
       "default": "./lib/gateway/index.js"
     },
     "./bridge": {
-      "types": "./lib/types/bridge/index.d.ts",
+      "types": "./lib/bridge/index.d.ts",
       "default": "./lib/bridge/index.js"
     },
     "./invariant": {
-      "types": "./lib/types/invariant.d.ts",
+      "types": "./lib/invariant.d.ts",
       "default": "./lib/invariant.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
@@ -42,7 +42,8 @@
     "build": "tsdown",
     "prepare": "tsdown",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release:preview": "node scripts/release-preview.mjs"
   },
   "dsh": {
     "bundle": {
@@ -80,6 +81,7 @@
     "@deepseek-ai/dsh-storage": "link:../deepseek-harness/packages/storage/storage",
     "@deepseek-ai/dsh-storage-json": "link:../deepseek-harness/packages/storage/storage-json"
   },
+  "packageManager": "pnpm@11.18.0",
   "engines": {
     "node": "^22.19 || >=24"
   }

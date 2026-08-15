@@ -1,0 +1,37 @@
+name: Release preview gate
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+jobs:
+  release-preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dsh-feishu-bot
+      - uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 47f943859bef60e4160492346772ded9b24f765a
+          path: deepseek-harness
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: corepack prepare pnpm@11.18.0 --activate
+      - run: pnpm install --frozen-lockfile
+        working-directory: deepseek-harness
+      - run: pnpm build:lib:host
+        working-directory: deepseek-harness
+      - run: pnpm release:preview
+        working-directory: dsh-feishu-bot
+        env:
+          DSH_RELEASE_HARNESS_ROOT: ${{ github.workspace }}/deepseek-harness
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-feishu-bot-preview
+          path: |
+            dsh-feishu-bot/artifacts/*.tgz
+            dsh-feishu-bot/artifacts/SHA256SUMS
