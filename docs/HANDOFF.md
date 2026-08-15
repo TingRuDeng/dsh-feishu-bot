@@ -4,9 +4,9 @@
 
 ## 当前状态
 
-- M0–M3 代码面已完成，飞书实机验收仍由用户统一执行。
-- M4 体验与可靠性已在当前工作树完成；M5 README、配置参考、审计脱敏和 DSH 版本证据已完成。
-- 全量门禁、diff/敏感信息复核、提交、推送与远端 SHA 证明均已完成。不要重启用户正在运行的 `dsh web`；剩余仅是部署方飞书实机验收。
+- M0–M5 代码与文档已完成，飞书实机验收仍由用户统一执行。
+- 2026-08-15 修复了 Bundle 仅加载 invariant companion、未加载 `@deepseek-ai/dsh-invariants` registry 导致的启动失败；当前四行配置快照和 boot 冒烟均已通过。
+- 主交付已提交、推送并完成远端 SHA 证明；本次启动修复随本文件在同一提交交付，尚未推送。冒烟进程已主动停止，剩余为推送本次修复和部署方飞书实机验收。
 
 ## M4 已交付
 
@@ -44,6 +44,7 @@
 - `src/gateway/index.ts`：长连接、FIFO、重试/熔断与 drain。
 - `src/audit.ts`：稳定标识哈希与安全错误摘要。
 - `src/invariant.ts`：binding/session 不变量 companion。
+- `cordis.patch.yml`：gateway、bridge、invariants registry 与 invariant companion 的 Bundle 组合。
 - `tasks/todo.md`：本轮范围、验收项和最终验证记录。
 
 ## 飞书实机验收欠账
@@ -67,7 +68,7 @@
 
 ## 最终门禁
 
-2026-08-14 已执行并回填 `tasks/todo.md`：typecheck 通过，16 个测试文件 140/140 通过，build 通过且四个导出入口均可导入；主交付提交已推送并完成远端 SHA 复核。
+2026-08-15 本次启动修复已验证：typecheck 通过，16 个测试文件 140/140 通过，build 通过；真实 web Profile 快照包含四行，boot 持续运行 15 秒未再出现 pending entry，随后主动停止。主交付提交已推送，本次修复随本文件在同一提交交付、尚未推送。
 
 ```sh
 npm run typecheck

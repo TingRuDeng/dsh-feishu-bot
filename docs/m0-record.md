@@ -94,7 +94,7 @@
 
 ## 运行时实验（源码核验后执行）
 
-- ◐ 组合链路：骨架包 typecheck/build 通过；`pnpm dsh plugin --profile web add` 成功、`--dump-config` 出现 `# == dsh-feishu-bot` 层与两行插件（M0#12 实机验证过）。**余留：重启 `dsh web` 后确认两插件 mount 日志**（待与用户约定重启时机）
+- ☑ 组合链路：骨架期 `pnpm dsh plugin --profile web add` 与两行插件快照通过；M5 加入 invariant 后，2026-08-15 补齐 `invariants` registry，当前四行 `--dump-config` 与 `dsh web` boot 冒烟均通过。
 - ☑ approval race 机制实验（方案 α）：骨架仓库 `tests/waterfall-race.spec.ts` 在 npm cordis 4.0.1（与 vendored 同版）上 5/5 断言通过——注册序 = waterfall 序（outermost-first）；`prepend: true` 后注册者插到最外层；claim 不调 next() 即否决后链；**α 核心：prepend + next() 并行 race，飞书先决时挂起的 Web promise 不影响结果、late resolve 无效果；飞书静默时 Web 决议正常胜出**。余留到 M3 实机验证：真 apiproxy listener 的 late-resolve UI 表现、同 id 双登记审计
 - ☐ followup 后 claim 前中断的恢复对账实验
 - ☑ 飞书 SDK 长连接收发实验（scripts/feishu-smoke.mjs，双向通过；详见结论总表 #11）

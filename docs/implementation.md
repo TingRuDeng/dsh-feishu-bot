@@ -22,17 +22,17 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 | 9 | ☑ 已核验：`ctx.on('session/event', (session, event)=>…)` 全局可订阅；turn/start|end、step/start|end、tool/call、tool/result、assistant/message 全集确认 | 源码（M0 记录 #9） | — |
 | 10 | ☑ 已核验：`persistence.list()` 返回含 cwd 的 SessionHeader[]；subagent-owned 复用已导出的 `hasApiRemoteSubagentOwner`；最近活动排序 M1 实现时在 createdAt/revision 间定 | 源码（M0 记录 #10） | — |
 | 11 | ◐ 文本链路已真机验证（长连接收 `im.message.receive_v1` + 发文本，scripts/feishu-smoke.mjs；白名单以事件实测 `ou_` open_id 为准）。**余留（M3 前置）**：发卡/更新卡/`card.action.trigger` 回调/频控行为 | 真机实验 | M3 |
-| 12 | ◐ 源码/文档已核验：安装命令、dsh.bundle.patch 声明、层序（base → web-app → 追加 bundle → profile patch）。**余留**：实机 add + dump-config + boot 冒烟 | 文档（M0 记录 #12）+ 实机 | 全部 |
+| 12 | ☑ 已核验：安装命令、dsh.bundle.patch 声明、层序（base → web-app → 追加 bundle → profile patch）；实机 add、四行 `--dump-config` 与 boot 冒烟均通过 | 文档（M0 记录 #12）+ 实机 | — |
 
 ### 骨架任务
 
-- 建仓库 `~/Desktop/mycode/dsh-feishu-bot`：package.json（`dsh.bundle.patch`）、tsconfig、`cordis.patch.yml` 三行（gateway / bridge / invariant）、`src/gateway`、`src/bridge`、`src/invariant.ts`、vitest 骨架。
+- 建仓库 `~/Desktop/mycode/dsh-feishu-bot`：package.json（`dsh.bundle.patch`）、tsconfig、`cordis.patch.yml` 四行（gateway / bridge / invariants registry / invariant）、`src/gateway`、`src/bridge`、`src/invariant.ts`、vitest 骨架。
 - 飞书企业自建应用建号、开权限、拿 App ID/Secret 存入 credentials。
 - 白名单拿到本人 open_id。
 
 ### 验收
 
-- `--dump-config` 可见三行；web profile 正常启动；gateway 长连接收到消息打审计日志。
+- `--dump-config` 可见四行；web profile 正常启动；gateway 长连接收到消息打审计日志。
 - 核验清单 12 项全部有结论；据结论修订设计文档相应小节与本计划工时。
 
 ## M1：私聊文本闭环（代码面已完成，待实机验收）

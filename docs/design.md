@@ -46,7 +46,8 @@
 │    approval/request waterfall 答复者 → 审批卡               │
 │    feishu-bot storage domain（绑定/入站/outbox/待决卡）     │
 │    host 同构 agent resolver（cold resume + ownership fence）│
-│  feishu-invariant（active binding → live/persisted session）│
+│  invariants registry → feishu-invariant                     │
+│    （active binding → live/persisted session）               │
 │                                                             │
 │  （既有）dsh-base + dsh-web-app：agents/sessions/tools/     │
 │   sandbox/approval/llm/host/client…                         │
@@ -57,7 +58,7 @@
 
 - 独立仓库 `dsh-feishu-bot`（建议 `~/Desktop/mycode/dsh-feishu-bot`），npm 包形态 profile bundle：`package.json` 声明 `dsh.bundle.patch: ./cordis.patch.yml`。
 - 安装 `dsh plugin --profile web add <dir>`；组合层变更需重启 profile 进程。
-- patch 插入三行：`feishu-gateway`、`feishu-bridge`、`feishu-invariant`。单包多入口，角色独立演化前不拆包。
+- patch 插入四行：`feishu-gateway`、`feishu-bridge`、`invariants` registry、`feishu-invariant`。单包多入口，角色独立演化前不拆包。
 - 锁定已验证 dsh 版本（当前 0.1.0-rc.5）；升级须重跑 Loader 组合回归。
 
 ### 3.2 插件职责边界
@@ -66,6 +67,7 @@
 |---|---|---|---|
 | `feishu-gateway` | credentials | `ctx.feishu` 服务：长连接、收发、卡片、出站 FIFO 与限流重试 | 任何业务语义 |
 | `feishu-bridge` | feishu, agents, sessions, sessionPersistence, storageDomain（不注入 userQuestions） | 绑定、命令、入站路由、出站投影、审批答复 | 不持有飞书 SDK；不执行 shell；不解析工具参数 |
+| `invariants` registry | — | 提供 `ctx.invariants`，承载包级运行时不变量 companion | 不注册产品检查；不修复状态 |
 | `feishu-invariant` | invariants, feishuBridgeReady（installer 内需 sessions、sessionPersistence、storageDomain） | bridge 恢复完成后及后续写入时校验 active binding 指向存在 session | 不修复状态；失败即报告不变量破坏 |
 
 ### 3.3 顺序保证的三层分工

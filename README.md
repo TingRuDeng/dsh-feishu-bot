@@ -17,7 +17,7 @@ Status: M0–M5 code and documentation are complete; live Feishu acceptance rema
 
 ```sh
 dsh plugin --profile web add /path/to/dsh-feishu-bot
-dsh --profile web --dump-config   # expect gateway, bridge, and invariant rows
+dsh --profile web --dump-config   # expect gateway, bridge, registry, and invariant rows
 ```
 
 Credentials: set `FEISHU_APP_ID` / `FEISHU_APP_SECRET` where the dsh credentials service reads them. No secrets in this repository.
