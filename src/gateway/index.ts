@@ -3,15 +3,15 @@
  * inbound event dispatch, and per-chat FIFO text/card sending with retry.
  * Carries no business semantics — feishu-bridge owns those.
  *
- * Lifecycle: credentials resolve at init (fail-loud when unconfigured), the
- * WS client starts once, and dispose stops intake before the send queues
- * drain. Inbound events fan out through the `feishu/message` cordis event;
- * business listeners must treat delivery as at-least-once (Feishu redelivers
- * unacknowledged events).
+ * Lifecycle: credentials resolve at init (fail-loud when unconfigured), but
+ * WS intake starts only after the bridge registers its durable admission
+ * handler and explicitly calls `startIntake()`. The SDK callback awaits that
+ * handler; Feishu ACK therefore follows the bridge's durable commit point.
  */
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import * as Lark from '@larksuiteoapi/node-sdk'
+import { createHash } from 'node:crypto'
 // Declaration-merge import: dsh-credentials contributes ctx.credentials.
 import type {} from '@deepseek-ai/dsh-credentials'
 import { auditHash, safeErrorFact } from '../audit.ts'
@@ -63,6 +63,113 @@ export interface FeishuInboundMessage {
   text: string | undefined
 }
 
+/** Stable identity of one logical outbound segment across process restarts. */
+export interface FeishuDeliveryIdentity {
+  deliveryId: string
+  stage: string
+  segmentIndex: number
+}
+
+/** Whether another request shape may safely replace a failed Feishu call. */
+export type FeishuFailureKind = 'permanent' | 'retryable' | 'ambiguous'
+
+/** Structured transport failure with no response body or message content. */
+export class FeishuSendError extends Error {
+  readonly feishuFailureKind: FeishuFailureKind
+  readonly code: string | number | undefined
+  readonly status: number | undefined
+
+  constructor(
+    kind: FeishuFailureKind,
+    operation: string,
+    facts: { code?: string | number; status?: number; cause?: unknown } = {},
+  ) {
+    const suffix = [
+      facts.code === undefined ? undefined : `code=${String(facts.code)}`,
+      facts.status === undefined ? undefined : `status=${facts.status}`,
+    ].filter((value): value is string => value !== undefined).join(' ')
+    super(`feishu-gateway: ${operation}${suffix === '' ? '' : ` (${suffix})`}`, {
+      cause: facts.cause,
+    })
+    this.name = 'FeishuSendError'
+    this.feishuFailureKind = kind
+    this.code = facts.code
+    this.status = facts.status
+  }
+}
+
+const RETRYABLE_BUSINESS_CODES = new Set([99991400, 99991401, 99991402, 99991403])
+const AMBIGUOUS_ERROR_CODES = new Set([
+  'ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
+])
+const RETRYABLE_ERROR_CODES = new Set(['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'ENOTFOUND'])
+
+function errorFact(error: unknown, key: string): unknown {
+  try {
+    if (typeof error === 'object' && error !== null && key in error) {
+      return (error as Record<string, unknown>)[key]
+    }
+  } catch { /* hostile error object: classify as ambiguous below */ }
+  return undefined
+}
+
+function statusFact(error: unknown): number | undefined {
+  const direct = errorFact(error, 'status')
+  if (typeof direct === 'number') return direct
+  const response = errorFact(error, 'response')
+  const nested = errorFact(response, 'status')
+  return typeof nested === 'number' ? nested : undefined
+}
+
+/** Classify a thrown transport fact without reading/logging its body. */
+export function classifyFeishuFailure(error: unknown): FeishuFailureKind {
+  if (error instanceof FeishuSendError) return error.feishuFailureKind
+  const declared = errorFact(error, 'feishuFailureKind')
+  if (declared === 'permanent' || declared === 'retryable' || declared === 'ambiguous') return declared
+  const status = statusFact(error)
+  if (status === 429) return 'retryable'
+  if (status !== undefined && status >= 500) return 'ambiguous'
+  if (status !== undefined && status >= 400) return 'permanent'
+  const code = String(errorFact(error, 'code') ?? '')
+  if (AMBIGUOUS_ERROR_CODES.has(code)) return 'ambiguous'
+  if (RETRYABLE_ERROR_CODES.has(code)) return 'retryable'
+  return 'ambiguous'
+}
+
+/** True only when Feishu definitively rejected the original request shape. */
+export function isPermanentFeishuFailure(error: unknown): boolean {
+  return classifyFeishuFailure(error) === 'permanent'
+}
+
+function deliveryUuid(identity: FeishuDeliveryIdentity | undefined): string | undefined {
+  if (identity === undefined) return undefined
+  return createHash('sha256')
+    .update(JSON.stringify([identity.deliveryId, identity.stage, identity.segmentIndex]), 'utf8')
+    .digest('hex')
+    .slice(0, 32)
+}
+
+function assertBusinessSuccess(
+  operation: string, response: { code?: number | string } | undefined,
+): void {
+  const code = response?.code
+  if (code === undefined || code === 0 || code === '0') return
+  const numeric = Number(code)
+  const kind: FeishuFailureKind = Number.isFinite(numeric) && RETRYABLE_BUSINESS_CODES.has(numeric)
+    ? 'retryable'
+    : 'permanent'
+  throw new FeishuSendError(kind, `${operation} business failure`, { code })
+}
+
+/** Event dispatch must never let the SDK print inbound event payloads. */
+export const silentSdkLogger = Object.freeze({
+  error: (..._args: unknown[]): void => {},
+  warn: (..._args: unknown[]): void => {},
+  info: (..._args: unknown[]): void => {},
+  debug: (..._args: unknown[]): void => {},
+  trace: (..._args: unknown[]): void => {},
+})
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     feishu: FeishuGateway
@@ -77,6 +184,17 @@ declare module '@deepseek-ai/cordis' {
 export class FeishuGateway extends Service {
   private client: Lark.Client | undefined
   private wsClient: Lark.WSClient | undefined
+  private dispatcher: Lark.EventDispatcher | undefined
+  private wsOptions: {
+    appId: string
+    appSecret: string
+    loggerLevel: Lark.LoggerLevel
+    logger: ReturnType<typeof redactingSdkLogger>
+  } | undefined
+  /** Serializes start/stop so concurrent HMR transitions cannot cross. */
+  private intakeTail: Promise<void> = Promise.resolve()
+  private inboundMessageHandler: ((message: FeishuInboundMessage) => Promise<void>) | undefined
+  private inboundMessageGeneration = 0
   /** Tail promise per chat: sends within one chat are strictly FIFO. */
   private sendTails = new Map<string, Promise<void>>()
   /** Chat circuit opening timestamp after an exhausted retry budget. */
@@ -85,9 +203,38 @@ export class FeishuGateway extends Service {
   private sleepers = new Map<ReturnType<typeof setTimeout>, () => void>()
   private accepting = true
   private disposed = false
+  private bridgeReadinessSettled = false
+  private resolveBridgeReady!: () => void
+  private rejectBridgeReady!: (reason: unknown) => void
+  private readonly bridgeReady = new Promise<void>((resolve, reject) => {
+    this.resolveBridgeReady = resolve
+    this.rejectBridgeReady = reject
+  })
 
   constructor(ctx: Context, private config: Config) {
     super(ctx, 'feishu')
+    // A disabled invariant companion must not turn a Bridge startup failure
+    // into an unhandled rejection; consumers still observe the original.
+    void this.bridgeReady.catch(() => {})
+  }
+
+  /** Wait until the business bridge has finished local recovery and opened intake. */
+  whenBridgeReady(): Promise<void> {
+    return this.bridgeReady
+  }
+
+  /** Resolve the one-shot startup latch after Bridge readiness is durable. */
+  markBridgeReady(): void {
+    if (this.bridgeReadinessSettled) return
+    this.bridgeReadinessSettled = true
+    this.resolveBridgeReady()
+  }
+
+  /** Reject the startup latch with the same cause when Bridge mount fails. */
+  markBridgeFailed(error: unknown): void {
+    if (this.bridgeReadinessSettled) return
+    this.bridgeReadinessSettled = true
+    this.rejectBridgeReady(error)
   }
 
   protected async [Service.init](): Promise<void> {
@@ -98,10 +245,10 @@ export class FeishuGateway extends Service {
     // body-bearing fields before they reach the process log.
     const logger = redactingSdkLogger(this.ctx)
     this.client = new Lark.Client({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error, logger })
-    this.wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.error, logger })
-    const dispatcher = new Lark.EventDispatcher({}).register({
+    this.wsOptions = { appId, appSecret, loggerLevel: Lark.LoggerLevel.error, logger }
+    this.dispatcher = new Lark.EventDispatcher({ logger: silentSdkLogger }).register({
       'im.message.receive_v1': async (data) => {
-        this.dispatchInbound(data)
+        await this.dispatchInbound(data)
       },
       // Card button clicks. The handler slot is read at call time so the
       // business plugin can (re)register across HMR without a reconnect.
@@ -144,8 +291,6 @@ export class FeishuGateway extends Service {
       // every read receipt (weclaw production lesson).
       'im.message.message_read_v1': async () => {},
     })
-    this.wsClient.start({ eventDispatcher: dispatcher })
-    this.ctx.logger.info('feishu-gateway: long connection started')
     this.ctx.effect(() => () => this.shutdown(), 'feishu.connectionShutdown')
   }
 
@@ -157,11 +302,11 @@ export class FeishuGateway extends Service {
     return resolved.value
   }
 
-  private dispatchInbound(data: {
+  private async dispatchInbound(data: {
     event_id?: string
     message: { message_id: string; chat_id: string; chat_type: string; create_time: string; content: string; message_type: string }
     sender: { sender_id?: { open_id?: string } }
-  }): void {
+  }): Promise<void> {
     if (!this.accepting || this.disposed) return
     let text: string | undefined
     if (data.message.message_type === 'text') {
@@ -173,7 +318,7 @@ export class FeishuGateway extends Service {
         text = undefined
       }
     }
-    this.ctx.emit('feishu/message', {
+    const message: FeishuInboundMessage = {
       eventId: data.event_id ?? data.message.message_id,
       chatId: data.message.chat_id,
       senderOpenId: data.sender.sender_id?.open_id ?? '',
@@ -181,21 +326,89 @@ export class FeishuGateway extends Service {
       messageId: data.message.message_id,
       createTimeMs: Number(data.message.create_time),
       text,
+    }
+    const handler = this.inboundMessageHandler
+    if (handler === undefined) {
+      throw new Error('feishu-gateway: inbound admission handler is not registered')
+    }
+    await handler(message)
+  }
+
+  /** Register the single durable admission owner. Returns an HMR-safe unregister function. */
+  handleInboundMessages(handler: (message: FeishuInboundMessage) => Promise<void>): () => void {
+    if (this.inboundMessageHandler !== undefined && this.inboundMessageHandler !== handler) {
+      throw new Error('feishu-gateway: inbound admission handler is already registered')
+    }
+    const generation = ++this.inboundMessageGeneration
+    this.inboundMessageHandler = handler
+    return () => {
+      if (this.inboundMessageGeneration === generation) this.inboundMessageHandler = undefined
+    }
+  }
+
+  /** Queue one intake lifecycle transition; the internal tail always settles. */
+  private enqueueIntake(work: () => Promise<void>): Promise<void> {
+    const result = this.intakeTail.then(work, work)
+    this.intakeTail = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  /** Start the long connection after the bridge's admission boundary is ready. Idempotent. */
+  startIntake(): Promise<void> {
+    return this.enqueueIntake(async () => {
+      if (!this.accepting || this.disposed) throw new Error('feishu-gateway: disposed')
+      if (this.wsClient !== undefined) return
+      const options = this.wsOptions
+      const dispatcher = this.dispatcher
+      if (options === undefined || dispatcher === undefined) {
+        throw new Error('feishu-gateway: not initialized')
+      }
+      const client = new Lark.WSClient(options)
+      this.wsClient = client
+      try {
+        await Promise.resolve(client.start({ eventDispatcher: dispatcher }))
+        this.ctx.logger.info('feishu-gateway: long connection started')
+      } catch (error: unknown) {
+        if (this.wsClient === client) this.wsClient = undefined
+        try { client.close({ force: true }) } catch { /* failed start owns no usable connection */ }
+        throw error
+      }
+    })
+  }
+
+  /** Stop the current long connection without disabling outbound sends. Idempotent and restartable. */
+  stopIntake(): Promise<void> {
+    return this.enqueueIntake(async () => {
+      const client = this.wsClient
+      if (client === undefined) return
+      this.wsClient = undefined
+      try {
+        client.close({ force: true })
+        this.ctx.logger.info('feishu-gateway: long connection stopped')
+      } catch (error: unknown) {
+        this.ctx.logger.warn('feishu-gateway WS close failed: %s', safeErrorFact(error))
+      }
     })
   }
 
   private cardActionHandler: ((action: FeishuCardAction) => Promise<{ toast?: string } | undefined>) | undefined
+  private cardActionGeneration = 0
 
   /**
    * Register the card-button click handler (single slot; the business
    * plugin owns all card semantics). The returned effect unregisters.
    * @param handler - receives operator open_id, card message id, and the button's value payload; may return a toast.
    */
-  handleCardActions(handler: (action: FeishuCardAction) => Promise<{ toast?: string } | undefined>): void {
+  handleCardActions(
+    handler: (action: FeishuCardAction) => Promise<{ toast?: string } | undefined>,
+  ): () => void {
+    const generation = ++this.cardActionGeneration
     this.cardActionHandler = handler
-    this.ctx.effect(() => () => {
-      if (this.cardActionHandler === handler) this.cardActionHandler = undefined
-    }, 'feishu.cardActionHandler')
+    const unregister = (): void => {
+      if (this.cardActionGeneration === generation) this.cardActionHandler = undefined
+    }
+    this.ctx.effect(() => unregister, 'feishu.cardActionHandler')
+    return unregister
   }
 
   /** Managed delay whose timer can be released after a drain timeout. */
@@ -232,13 +445,27 @@ export class FeishuGateway extends Service {
         this.circuitOpenUntil.delete(chatId)
         return result
       } catch (error: unknown) {
-        lastError = error
+        const kind = classifyFeishuFailure(error)
+        const classified = error instanceof FeishuSendError
+          ? error
+          : new FeishuSendError(kind, 'send attempt failed', {
+              code: errorFact(error, 'code') as string | number | undefined,
+              status: statusFact(error),
+              cause: error,
+            })
+        if (kind === 'permanent') throw classified
+        lastError = classified
       }
     }
     this.circuitOpenUntil.set(chatId, Date.now() + this.config.sendCircuitCooldownMs)
     this.ctx.logger.warn('feishu-audit action=send-circuit-open chat=%s attempts=%d cooldownMs=%d',
       auditHash(chatId), maxAttempts, this.config.sendCircuitCooldownMs)
-    throw new Error(`feishu-gateway: send failed after ${maxAttempts} attempts (${safeErrorFact(lastError)})`)
+    const finalKind = classifyFeishuFailure(lastError)
+    throw new FeishuSendError(finalKind, `send failed after ${maxAttempts} attempts`, {
+      code: errorFact(lastError, 'code') as string | number | undefined,
+      status: statusFact(lastError),
+      cause: lastError,
+    })
   }
 
   /** Add one operation to the destination FIFO and remove idle tails. */
@@ -258,11 +485,7 @@ export class FeishuGateway extends Service {
   private async shutdown(): Promise<void> {
     if (this.disposed) return
     this.accepting = false
-    try {
-      this.wsClient?.close({ force: true })
-    } catch (error: unknown) {
-      this.ctx.logger.warn('feishu-gateway WS close failed: %s', safeErrorFact(error))
-    }
+    await this.stopIntake()
     const tails = [...this.sendTails.values()]
     if (tails.length > 0) {
       let timeout: ReturnType<typeof setTimeout> | undefined
@@ -278,8 +501,11 @@ export class FeishuGateway extends Service {
     for (const finish of [...this.sleepers.values()]) finish()
     this.sendTails.clear()
     this.circuitOpenUntil.clear()
+    this.inboundMessageHandler = undefined
     this.cardActionHandler = undefined
     this.wsClient = undefined
+    this.dispatcher = undefined
+    this.wsOptions = undefined
     this.client = undefined
   }
 
@@ -289,17 +515,30 @@ export class FeishuGateway extends Service {
    * @param text - message text.
    * @returns the sent Feishu message id.
    */
-  async sendText(chatId: string, text: string): Promise<string> {
+  async sendText(
+    chatId: string, text: string, delivery?: FeishuDeliveryIdentity,
+  ): Promise<string> {
+    const uuid = deliveryUuid(delivery)
     const run = async (): Promise<string> => {
       const client = this.client
       if (client === undefined || this.disposed) throw new Error('feishu-gateway: disposed')
       return this.retrySend(chatId, async () => {
           const response = await client.im.v1.message.create({
             params: { receive_id_type: 'chat_id' },
-            data: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text }) },
+            data: {
+              receive_id: chatId,
+              msg_type: 'text',
+              content: JSON.stringify({ text }),
+              ...(uuid === undefined ? {} : { uuid }),
+            },
           })
+          assertBusinessSuccess('text create', response)
           const messageId = response?.data?.message_id
-          if (messageId === undefined) throw new Error(`send returned no message_id (code ${String(response?.code)})`)
+          if (messageId === undefined) {
+            throw new FeishuSendError('ambiguous', 'text create returned no message_id', {
+              code: response?.code,
+            })
+          }
           return messageId
       })
     }
@@ -312,14 +551,22 @@ export class FeishuGateway extends Service {
    * @param card - the card JSON (msg_type `interactive` content).
    * @returns the sent Feishu message id (needed for later patches).
    */
-  async sendCard(chatId: string, card: object): Promise<string> {
+  async sendCard(
+    chatId: string, card: object, delivery?: FeishuDeliveryIdentity,
+  ): Promise<string> {
+    const uuid = deliveryUuid(delivery)
     const run = async (): Promise<string> => {
       const client = this.client
       if (client === undefined || this.disposed) throw new Error('feishu-gateway: disposed')
       return this.retrySend(chatId, async () => {
-        const response = await client.im.v1.message.create(createCardMessageEnvelope(chatId, card))
+        const response = await client.im.v1.message.create(createCardMessageEnvelope(chatId, card, uuid))
+        assertBusinessSuccess('card create', response)
         const messageId = response?.data?.message_id
-        if (messageId === undefined) throw new Error(`card send returned no message_id (code ${String(response?.code)})`)
+        if (messageId === undefined) {
+          throw new FeishuSendError('ambiguous', 'card create returned no message_id', {
+            code: response?.code,
+          })
+        }
         return messageId
       })
     }
@@ -327,19 +574,23 @@ export class FeishuGateway extends Service {
   }
 
   /**
-   * Replace a sent card's content in place. Progress updates are droppable
-   * (design §6.3: non-terminal card state is disposable), so no retry and
-   * no queueing — a failed patch surfaces to the caller, who decides.
+   * Replace a sent card's content in place. A patch is serialized per card
+   * and participates in shutdown draining. Progress updates remain
+   * droppable (no retry); a failed patch surfaces to the caller, who decides.
    * @param messageId - the card message id returned by {@link sendCard}.
    * @param card - the full replacement card JSON.
    */
   async patchCard(messageId: string, card: object): Promise<void> {
-    const client = this.client
-    if (client === undefined || !this.accepting || this.disposed) throw new Error('feishu-gateway: disposed')
-    await client.im.v1.message.patch({
-      path: { message_id: messageId },
-      data: { content: JSON.stringify(card) },
-    })
+    const run = async (): Promise<void> => {
+      const client = this.client
+      if (client === undefined || this.disposed) throw new Error('feishu-gateway: disposed')
+      const response = await client.im.v1.message.patch({
+        path: { message_id: messageId },
+        data: { content: JSON.stringify(card) },
+      })
+      assertBusinessSuccess('card patch', response)
+    }
+    return this.enqueueSend(`card:${messageId}`, run)
   }
 }
 
