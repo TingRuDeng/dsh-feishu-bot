@@ -11,7 +11,7 @@
 | 1 | userQuestions + 问答可观察性 | ☑ | 单 provider 确认；**ask() 全程无 durable session 事件 ⇒ 首期不做问答通知，裁剪 question-notice** |
 | 2 | approval waterfall 组合方式 | ☑ | listener 按注册序 outermost-first；**bundle 层在 web-app 之后 ⇒ bridge 注册晚于 Web ⇒ Web 不 next() 时飞书永远收不到 ⇒ 方案 α 需 prepend 注册，β 形态见详录** |
 | 3 | approval id 配对与重启审计 | ◐ | 配对算法同构可行（req.agent.session.events 可达）；错配分析见详录；orphan asked 属 log-only 审计事件，load 不校验配对 ⇒ 不补写成立 |
-| 4 | 入站幂等对账 | ☑ | inbox 折叠可行（spliced 事件自足）；**source 自定义 kind 运行时校验仅要求 kind 为非空 string ⇒ 兼容，但维持默认 plugin kind 决策** |
+| 4 | 入站幂等对账 | ☑ | inbox 折叠可行（spliced 事件自足）；source 自定义 kind 运行时校验仅要求 kind 非空。**本行是 M0 结论；M1 实装后来改为 `{kind:'user', via:'feishu'}` 以保持 Web 的人类输入展示语义。** |
 | 5 | bridge 专用 resolver | ☑ | 上游 resolver 从包导出可 import 但结果无 ownership；**`ctx.agents.resume()` 返回 AgentHandle 且对任意插件可用 ⇒ 同构实现可行（方案①成立）** |
 | 6 | storage domain | ☑ | defineDomain/domainTable/descriptorOf 均导出；**web-app patch 第 59 行已载 storage-domain** ⇒ 直接注入 |
 | 7 | createUserMessage 构造 | ☑ | 调用方持有 id；`{kind:'plugin', plugin:'feishu-bot'}` 类型合法（form 可省略） |
@@ -51,7 +51,7 @@
 
 - `agent/inbox/spliced`（core/agent/src/types.ts:19-34）：payload 含 `target/start/removedCount/inserted/outcome`，**自足可折叠**——从空列表按序重放 splice 即得当前 inbox；`outcome: 'canceled'` 标记取消丢弃，被移除消息 = 重放至前一事件的列表中 `[start, start+removedCount)` 区间（内容可推出，含 MessageId）。
 - `user/message` 事件 data 即 `UserMessage`（core/session/src/types.ts:264）含 `id` ⇒ "已 claim"判定 = 倒扫 user/message 匹配 id。
-- source 运行时校验（core/session/src/index.ts:320-325）：user/message 的 source 仅要求 `kind` 为非空 string——**自定义 kind 'feishu' 通过 load 校验**；但设计维持"默认 plugin kind"决策（关联已在表内，无须扩大 durable 面）。
+- source 运行时校验（core/session/src/index.ts:320-325）：user/message 的 source 仅要求 `kind` 为非空 string——自定义 kind `feishu` 通过 load 校验。**后续 M1 组合测试发现 plugin kind 会被 Web 折叠为上下文注入，最终实现改用 `{kind:'user', via:'feishu'}`；这是对本 M0 初始决策的有证据修订。**
 - `createUserMessage`（llm/src/message.ts:192）：`createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'feishu-bot' } })`——ContextFormed 的 `form?: never` 分支允许省略 form，类型合法；id 由 `createMessage` 内 `randomUUID()` 生成后返回值携带 ⇒ bridge 先 create 再持久化 id 再 followup 的顺序成立。
 
 ### 5. bridge 专用 resolver

@@ -1,8 +1,9 @@
 /**
  * M0#11 standalone smoke: Feishu long-connection receive + text send,
  * independent of dsh. Reads credential references from ~/.dsh/.credentials.yaml
- * (plain `KEY: value` lines), starts a WSClient, logs every private message
- * event (chat_id / open_id / text), and echoes a reply.
+ * (plain `KEY: value` lines), starts a WSClient, logs only a truncated chat
+ * id plus text length, and sends a fixed acknowledgement. It never prints or
+ * echoes the received body, sender id, or credential.
  *
  * Run: node scripts/feishu-smoke.mjs   (Ctrl-C to stop)
  */
@@ -24,10 +25,18 @@ const appId = credential('FEISHU_APP_ID')
 const appSecret = credential('FEISHU_APP_SECRET')
 console.log(`[smoke] appId=${appId.slice(0, 8)}… starting long connection`)
 
-const client = new Lark.Client({ appId, appSecret })
-const wsClient = new Lark.WSClient({ appId, appSecret, loggerLevel: Lark.LoggerLevel.info })
+// The SDK's default error formatter can include request/response bodies.
+// Connectivity smoke reports its own fixed metadata, so SDK logs stay silent.
+const silentSdkLogger = {
+  error() {}, warn() {}, info() {}, debug() {}, trace() {},
+}
+const sdkOptions = {
+  appId, appSecret, loggerLevel: Lark.LoggerLevel.error, logger: silentSdkLogger,
+}
+const client = new Lark.Client(sdkOptions)
+const wsClient = new Lark.WSClient(sdkOptions)
 
-const dispatcher = new Lark.EventDispatcher({}).register({
+const dispatcher = new Lark.EventDispatcher({ logger: silentSdkLogger }).register({
   'im.message.receive_v1': async (data) => {
     const chatId = data.message.chat_id
     const chatType = data.message.chat_type

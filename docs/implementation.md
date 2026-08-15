@@ -1,7 +1,8 @@
-# dsh-feishu-bot 实施计划
+# dsh-feishu-bot 里程碑与验证记录
 
 配套设计文档：[design.md](design.md)
-M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0 完成后按核验结果修订各阶段估计。
+
+M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加固。前述里程碑中的旧 outbox、软容量和“卡片失败即文本降级”描述仅是当时基线，当前行为以 M6、[design.md](design.md) 和源码为准。真实飞书故障矩阵与正式远程发布仍未完成。
 
 ## M0：扩展点与生命周期核验（强制门）
 
@@ -14,7 +15,7 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 | 1 | ☑ 已核验：单 provider 确认；ask() 无 durable 事件 ⇒ 问答（含只读通知）首期彻底不做，schema 已裁剪 | 源码（M0 记录 #1） | — |
 | 2 | ◐ 源码已核验：注册序决定 waterfall 序、prepend 可插队、apiproxy pending 私有不可复用 ⇒ α 定形为 "prepend + next() 并行 race"（§6.4）。**余留运行时实验**：race 行为、Web late-resolve UI 表现、同 id 双登记审计正确性；不通过降级 β（prepend + 按绑定切换通道） | 源码（M0 记录 #2）+ 组合实验 | M3（定档） |
 | 3 | ◐ 源码已核验：配对输入可达、算法同构、orphan asked 属 log-only 不阻碍 load ⇒ 不补写 decided 成立。**余留运行时实验**：并行 approval 无错配实测 | 源码（M0 记录 #3）+ 组合实验 | M3 |
-| 4 | ◐ 源码已核验：spliced 事件自足可折叠、user/message 携 id、source 校验仅要求 kind 非空（维持默认 plugin kind）。**余留运行时实验**：followup 后 claim 前中断的恢复对账实测 | 源码（M0 记录 #4）+ 崩溃恢复实验 | M1 |
+| 4 | ☑ 源码与组合测试已核验：spliced 事件自足可折叠、user/message 携 id；实际消息使用 `{kind:'user', via:'feishu'}`，followup 前后崩溃点均有 inbox/log 对账测试 | 源码（M0 记录 #4）+ 组合/故障注入测试 | — |
 | 5 | ☑ 已定档：同构 resolver 可行——`ctx.agents.resume()` 对插件公开返回 AgentHandle，api/remotes 三工具已导出，ownership 结果类型成立（§6.6） | 源码（M0 记录 #5） | — |
 | 6 | ☑ 已核验：符号全导出；web-app patch :51-60 已载 storage/storage-json/storage-domain ⇒ 直接注入 | 源码（M0 记录 #6） | — |
 | 7 | ☑ 已核验：`createUserMessage({content:[{type:'text',text}], source:{kind:'plugin',plugin:'feishu-bot'}})` 类型合法；id 于返回值携带，先持久化再 followup 成立 | 源码（M0 记录 #4/#7） | — |
@@ -35,9 +36,9 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 - `--dump-config` 可见四行；web profile 正常启动；gateway 长连接收到消息打审计日志。
 - 核验清单 12 项全部有结论；据结论修订设计文档相应小节与本计划工时。
 
-## M1：私聊文本闭环（代码面已完成，待实机验收）
+## M1：私聊文本闭环（历史交付，实机验收并入 M6）
 
-进度（55/55 测试绿，typecheck/build/纯 Node lib 导入冒烟通过）：
+原始进度（55/55 测试绿，typecheck/build/纯 Node lib 导入冒烟通过；可靠性语义已由 M6 替代）：
 - ☑ 四表 domain（名称约束 `[a-z][a-z0-9_]*`：`feishu_bot` / `inbound_events` 等）
 - ☑ 崩溃对账门禁实验（layer1 判定表 7 + layer2 真组合 5；含"claim 快于 cancel"组合发现）
 - ☑ 同构 resolver（ownership + 并发去重单一 dispose 权，6 组合测试）
@@ -56,7 +57,7 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 - `/new` `/ls` `/use` `/status` `/release` `/help`（含 §6.2 命令幂等：committed 结果重发、target 回写、中断 reconciliation）；
 - **cwd 目录授权（§6.7）**：`allowedWorkspaces` realpath 化祖先检查、空配置 fail-closed、defaultWorkspace 归属校验（load 时 fail loud）；
 - 普通文本 → 状态机去重与对账（§6.1）→ resolver → `followup()`；
-- `assistant/message` → 24KB envelope 预检结果卡分段 → **outbox（`outboundSegments`，确定性四元组主键）** → FIFO 发送与 sent 落盘，卡片失败降级文本（§6.3）；
+- **M1 历史路径**：`assistant/message` → 24KB envelope 分段 → `outboundSegments` → FIFO；M6 已替换为 session-log catch-up + canonical delivery/cursor，并把文本 fallback 收紧为仅确定性卡片拒绝。
 - Web/飞书共享同一 live/cold session（含 detached resume）；
 - 不做：群聊、合并窗口、审批、问答、任务卡。
 
@@ -65,7 +66,7 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 - 单元：命令解析、Markdown 转换与分段（中文/emoji 多字节边界）、状态机各态迁移与对账判定链；
 - **幂等与崩溃恢复**（M0#4 结论落地）：重复 event；received 中途崩溃；messageId 已写、followup 前崩溃；followup 后、claim 前崩溃（inbox 投影对账）；已 claim 成 user/message 后崩溃；canceled splice 丢弃路径；**text 隐私规则（转入终态的写入即清除暂存文本）**；启动扫描 received/recovering 记录主动对账，且与新入站事件同队列不并发重复处理；恢复中途再崩溃的重入；
 - **命令 reconciliation**（§6.2）：committed 后重投（重发结果不重执行）；`/new` target 已写、绑定已提交 ⇒ 补 committed；`/new` target 已写、绑定未提交 ⇒ 幂等补绑定；`/new` target 未写（窄窗口）⇒ interrupted + 孤儿提示；`/use` 各分支同构；`/release` 已完成判定；
-- **outbox**（§6.3）：确定性主键去重（同一 assistant 事件对同一 chat 重复投影不重复入库）；**多 chat 绑定同一 session 各自独立发送状态（第二个 chat 不被误判已发送）**；逐段 sent 落盘；失败退避与熔断段保持 pending；重启续发排序正确；"发送成功、sent 未落盘"窗口重发一次的已知限制以测试固化文档化；**sent 清理水位与重复投影判定一致（清理后不重新入库重发）**；pending 超期放弃 + 审计；
+- **M1 历史 outbox 测试**（§6.3）：覆盖确定性段键、多 chat 独立状态、逐段 sent、重启续发、水位与 pending 超期；M6 保留旧 pending 续发兼容，但新结果改走稳定 UUID 的 canonical delivery，不再以该旧窗口描述当前语义。
 - **cwd 授权拒绝路径**（§6.7）：相对路径拒绝；`..` 越界拒绝；symlink 指向允许根外拒绝（realpath 后检查）；允许根前缀相似但不同目录（`/a/bc` vs `/a/b`）拒绝；空 `allowedWorkspaces` 全拒；defaultWorkspace 不在允许根内 load 失败；
 - **资源补偿**（§6.6，按 M0#5 定档方案）：`/new` 创建成功但绑定写失败 ⇒ `created-here` dispose、无泄漏；`/use` cold resume 成功但绑定写失败 ⇒ 释放本次 handle；`ownership: 'existing'` 时绑定写失败 ⇒ 不 dispose；并发合流仅首发起者标 created-here（无双 dispose）；绑定成功但回帖失败 ⇒ 重复 event 只重发结果；（兜底方案落地时本组降级为孤儿审计断言）；
 - **顺序**：同 chat 命令与普通消息交错、`/release` 与在途消息交错、`/stop` 与后续消息交错——全部经 per-chat 队列串行断言；
@@ -76,9 +77,9 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 ## M2：进度与取消
 
-**状态：代码面已完成（commit 33b78ba，84 测试绿），待实机验收。**已落地：task-card reducer（纯函数折叠，callId 精确配对，三态终态 completed/stopped/failed）、飞书卡渲染（思考中等待态/终态不重复文案，weclaw 规则）、桥内节流投影（cardThrottleMs 合并，turn/end 直发定格，patch 失败即弃——进度可丢，正文走 outbox）、/stop（cancel user + keepInbox，空闲/未绑定如实回帖）、gateway sendCard/patchCard。token 字段暂缓：tokenMeter 注入留待实机验证后接入（占位注记）。
+**状态：代码面已完成（commit 33b78ba，84 测试绿），实机验收并入 M6。**已落地：task-card reducer（纯函数折叠，callId 精确配对，三态终态 completed/stopped/failed）、飞书卡渲染（思考中等待态/终态不重复文案，weclaw 规则）、桥内节流投影、`/stop`（cancel user + keepInbox，空闲/未绑定如实回帖）和 gateway sendCard/patchCard；任务卡竞争与终态正文路径后来由 M6 加固。
 
-- 任务卡：`session/event` 纯函数折叠 turn 状态（状态/当前工具/token/耗时）；节流合并 patch；turn 终态定格；
+- 任务卡：M2 最初按 turn 折叠；阶段 6.1 已提升为绑定会话的 Web/飞书直接用户任务级折叠，同一任务的 subagent report/settled continuation 复用原卡，任务级 settled 后定格；
 - token 按 M0#8 结论接入；来源缺失显示"未知"（产品契约，§6.3）；
 - `/stop` = `cancel({kind:'user'}, {keepInbox: true})`，完成反馈以该 turn 终态事件为准（不用 `whenIdle()`）；
 - gateway 出站队列顺序与 dispose quiescence 的测试落地。
@@ -87,7 +88,7 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 ## M3：审批
 
-**状态：代码面已完成（commit 15477a8，96 测试绿），待实机验收。**方案 α 落地，机制层 5 断言 + 装配级 3 剧本（点击允许全链路、越权点击不消耗、无绑定让路 fail-closed）均绿。实现要点：配对扫描与 apiproxy 同构（approval.ts 纯函数）；durable-first 三段补偿全做；**race 修正——链条的 fail-closed 'unavailable' 不算决定**，空链条时飞书卡保持有效（装配测试暴露，α 语义比设计稿更精确）；重启扫描 freeze+delete、绝不补写 approval/decided。待实机验证项保持：Web UI 先决/后决时卡片表现、同 approvalId 双登记审计。
+**状态：代码面已完成（commit 15477a8，96 测试绿），实机验收并入 M6。**方案 α 落地，机制层 5 断言 + 装配级 3 剧本（点击允许全链路、越权点击不消耗、无绑定让路 fail-closed）均绿。实现要点：配对扫描与 apiproxy 同构（approval.ts 纯函数）；durable-first 三段补偿；**race 修正——链条的 fail-closed 'unavailable' 不算决定**。审批可见性与组卡 fallback 后来由 M6 加固。
 
 前置：真实 web profile 组合中验证方案 α（prepend + next() 并行 race，§6.4；机制层 5 断言已过）——重点为 Web listener late-resolve 的 UI 表现与同 approvalId 双登记审计；不通过则定档 β（prepend + 按绑定切换通道）。问答已于 M0#1 整体裁剪，不在本里程碑。
 
@@ -98,28 +99,38 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 
 验收剧本：越权写文件 → 手机批准 → 任务继续；（α）Web 先批 → 飞书卡片定格"已在别处决定"，或（β）绑定会话的审批只出现在飞书。
 
-## M4：可靠性与体验（代码面完成，待实机验收）
+## M4：可靠性与体验（历史交付，可靠性语义已由 M6 加固）
 
-**状态：已完成。** 已交付 `/ls` 5 分钟编号快照 TTL、24 KiB 完整 envelope 预检的绿色终态结果卡、本地路径展示改写、运行卡唯一“思考中……”尾标、旧 sequence 拒绝、同 callId 原位更新和 `✅` 成功标识。耗时导航按钮当前没有实际消费者，因此“受理/完成两段式 + 回写原卡”经适用性审计后不制造空入口。
+**状态：已完成并追加 `/ls` 两级导航卡。** 已交付 `/ls` 5 分钟工作空间/会话快照、CardKit 2.0 原卡导航、按需真实标题加载、两级稳定分页、单会话直绑、多会话标题选择、归档会话过滤（含点击后和完整 id 绑定拦截），以及 24 KiB 完整 envelope 预检的绿色终态结果卡、本地路径展示改写、运行卡唯一“思考中……”尾标、旧 sequence 拒绝、同 callId 原位更新和 `✅` 成功标识。`/ls` 动作快速返回 toast，耗时 projection、patch 与绑定进入 chat FIFO；终态或导航 patch 失败发送文本回执。
 
-可靠性已落地：
+该阶段建立了 per-chat FIFO、恢复扫描、旧 outbox/watermark、HMR 回卷、不变量与 `boundBy` 权限基线。其“旧分段 outbox + watermark、软容量、发送成功但 sent 未落盘可能重发”的模型已由 M6 的 canonical delivery/cursor、稳定 UUID、硬容量和有界写入闸门替代；旧表只保留升级续发兼容。
 
-- 文本/卡片共享 per-chat FIFO、指数退避、尝试预算、熔断冷却与有界 dispose drain；
-- 启动按 pendingCards 失效、悬空 binding 校验、received/recovering 与命令 reconciliation、TTL/容量维护、pending outbox 续发的顺序恢复；
-- pending 发送尝试持久化，超期转 `abandoned` 并清正文；终态记录按 TTL/软容量清理，持久化 watermark 阻止清理后重放；
-- HMR 测试覆盖 WS 先关闭、已接收发送排空、桥 intake/监听器/timer/domain 回卷；
-- invariant companion 在启动和后续 domain 变更上强制 active binding 必须指向 live/persisted session；
-- stop / release / active binding 替换 / 审批点击均要求 `boundBy` 本人。
-
-验收剧本：任务运行中杀进程重启——绑定在、无重复消息；命令副作用不重复（reconciliation 覆盖 target 已落盘的中断；仅 target 回写前窄窗口可能残留孤儿 session，回帖提示核实）；未发文本段续发（"发送成功、sent 未落盘"窗口内的段允许重发一次）；旧审批卡定格失效；新消息正常入队。
+原验收剧本仍有效，但“无重复消息”应改读为可测量目标而非先验承诺：专用飞书 chat 中记录进程中止前后的消息数量、UUID 去重结果和最终状态，再决定是否满足发布门槛。
 
 ## M5：收尾（完成）
 
 - README 已补 Model Experience：不注入提示词/工具 schema；普通非命令用户消息逐字入会话；审批沿用既有 `approval/asked` / `approval/decided` 审计所有权；
-- README 与设计文档已列 gateway / bridge 全部配置键、默认值、可靠性参数、数据暴露边界和实机验收边界；
+- README 与设计文档已按当前 schema 列出 gateway / bridge 配置键、默认值、可靠性参数、数据暴露边界和实机验收边界；
 - `feishu-audit` 覆盖入站、命令、binding、outbox、审批与保留清理，原始标识统一稳定哈希，错误只留 class/code，SDK `data` 字段及 `formatErrors` 重复响应体脱敏；
 - DSH 基线已记录：本地 clean checkout `0.1.0-rc.5`，commit `47f943859bef60e4160492346772ded9b24f765a`（2026-08-14）；
 - 自动化验证与最终提交证据见 [HANDOFF.md](HANDOFF.md)；飞书实机仍由部署者重启现有 `dsh web` 后执行。
+
+## M6：发布前可靠性加固（自动化完成，实机待验）
+
+本阶段以 [tasks/todo.md](../tasks/todo.md) 中的五个 P1、三个 P2 为门槛，参考 WeClaw 的故障模型和关闭顺序独立实现；没有复制 AGPL 代码。
+
+- **启动/ACK**：Gateway 构造与 WS 启动拆分；Bridge 打开两个 domain，完成本地对账/维护并把恢复发送按 chat FIFO 排队后，注册 Promise admission 再启动 intake。排队的网络 I/O 不阻塞 ready，同 chat 新工作仍排在其后。入站以飞书 `message_id` 为主键，`event_id` 仅作别名；SDK 回调等待 durable `received`，业务继续异步进入 per-chat 队列。
+- **终态投影/发送**：新增 `feishu_bot_delivery` v1；session log 是权威来源，阶段 6.1 以绑定会话中 `via=feishu|web` 的直接用户 `user/message` 锚定任务，过滤含 `tool-call` 的过程文本并等待直接子代理 settled，只物化一份最新合格终态结果；`/release` 移除 binding 后不再投影。完整 canonical delivery 先落盘再推进到任务末尾 cursor。分段在发送时确定性派生，`deliveryId + stage + segmentIndex` 生成稳定 32-hex UUID。错误区分 permanent/retryable/ambiguous；只有确定性卡片拒绝允许文本 fallback，create/patch 均校验业务码。
+- **审批/绑定**：审批使用 `staged | visible | uncertain`；组卡 patch 失败撤销未展示 item 并发送独立卡，只有 card ID 成功回填后才等待。`/use`、`/new` 共用 binding switch，按 `existing | created-here` 所有权、after-image 条件和独立 cleanup timeout 补偿。
+- **卡片/关闭**：绑定会话中每条 Web/飞书直接用户消息拥有一个任务卡 actor 与 timer；内部 continuation turn 只更新原卡，任务级 settled 才拒绝迟到 running 更新。Bridge 先停 admission/intake，再有界排空 chat/card/approval/projection/maintenance；超时后关闭存储写入，durable pending 由重启恢复。Gateway 的 create/patch 也纳入关闭 drain。
+- **容量/隐私**：inbound、旧 outbox/dead-letter、canonical delivery、approval、cursor 都有 TTL/retention 与硬容量；recoverable/active/pending/protective 事实不为容量压力删除。EventDispatcher 与 smoke logger 静默，Client/WS 递归脱敏，自有审计只留固定字段和 hash。
+- **兼容**：旧 `feishu_bot` v1、旧 cursor 和 pending segment 可读/可续发；新 delivery 使用独立 v1 domain，未做不可逆迁移。
+
+2026-08-15 阶段 6.1 rc.4 最终自动化证据：19 个测试文件、229/229；`tsc --noEmit`、普通 build、release build、`git diff --check`、tarball manifest/路径审计、隔离安装、四入口与干净 DSH Profile smoke 均通过。该证据覆盖本地状态机、故障注入、绑定会话的 Web/飞书单任务卡片/结果收口与 `/ls` 两级 CardKit 交互契约，不替代飞书平台的实际 ACK、UUID 去重、迟到完成、业务错误码和 Web/飞书 UI race。
+
+同日用户在重启后的真实飞书客户端确认 `/ls` 两级 CardKit 验收通过，包括工作空间选择、真实标题选择、返回/分页和单会话直绑。该用户验收关闭 `/ls` 交互门禁，不扩展为重复事件、断连、进程中止、审批 fallback 或 HMR 故障矩阵证据。
+
+待完成：专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain）以及无本机 `link:` 的正式 tarball 门禁。未完成前不发布、不声明端到端 exactly-once。
 
 ## 全局测试策略
 
@@ -138,11 +149,11 @@ M0 为强制前置核验门，未清零不进 M1。工时不做精确承诺：M0
 | 风险 | 等级 | 缓解 |
 |---|---|---|
 | 上游 rc API 漂移 | 高 | 锁版本；升级重跑 Loader 回归；README 记录已验证版本 |
-| 方案 α（prepend + race）运行时实验不通过 | 中 | β 保底可用（prepend + 按绑定切换通道），产品文案如实描述 |
-| `approval/asked` 扫描配对在并行场景错配 | 中 | M0#3 早决；歧义保守 `next()`；错配路径测试全覆盖 |
-| inbox 投影对账实现复杂度（M0#4） | 中 | 对账链判定表驱动实现 + 崩溃点逐一测试；不可行则降级为"重启后 received 态一律人工核实"（同命令中断语义） |
-| resolver 复用不可行或缺"本次新建"所有权标记（M0#5） | 中 | 已确认上游接口不含所有权，方案定档为同构实现 + ownership 结果类型；同构不可行落兜底（放弃自动 dispose，孤儿交 Host 生命周期，记已知限制），不阻塞 M1 |
-| 飞书卡片频控 | 低 | 节流+熔断；极端降级纯文本里程碑消息 |
+| 平台 UUID 去重窗口/迟到 create 未实测 | 高 | 专用 chat 做 timeout、断连、进程中止与重启计数；模糊失败不跨形态 fallback |
+| 方案 α 的 Web/飞书真实 UI race 未验收 | 中 | 真实审批双端先后决定；`unavailable` 不算决定，失败可让路 Web |
+| 真实组卡 patch 错误码与独立卡 fallback 未验收 | 中 | 故障注入已绿；实机记录 code、数量与最终可见状态，不保存正文/完整 ID |
+| 硬容量背压在部署默认值下缺长时运行证据 | 中 | 运维监控 `retention-backpressure` / `*-backpressure` 固定审计事件，先压测再发布 |
+| 飞书卡片频控 | 低 | 任务卡节流、per-target 串行、重试/熔断；终态使用 durable delivery |
 
 ## 已定决策（2026-08，M0 前）
 

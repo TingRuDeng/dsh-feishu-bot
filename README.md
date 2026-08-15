@@ -2,23 +2,27 @@
 
 Feishu (Lark) private-chat frontend for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): drive, monitor, and approve local agents from Feishu, sharing live and cold sessions with the Web GUI in the same process.
 
-Status: M0–M5 code and documentation are complete; live Feishu acceptance remains deployment-owner work. Docs: [design](docs/design.md) · [milestone record](docs/implementation.md) · [handoff](docs/HANDOFF.md) · [M0 verification record](docs/m0-record.md) · [weclaw lessons](docs/weclaw-lessons.md).
+Status: M0–M5 product work and the M6 reliability implementation are covered by automated tests. The stage-6 preview gate builds a self-contained `0.1.0-rc.4` tarball (Cordis remains a host peer), audits its manifest/files, installs it outside the checkout, imports all four entry points, and composes it in a clean DSH profile. A tarball-backed live Profile has passed boot and HTTP smoke; the remaining real Feishu fault matrix and any remote release are still pending. Source `link:` dependencies remain intentionally available for local debugging and are removed from the packed manifest. Docs: [中文使用指南](docs/usage.zh.md) · [design](docs/design.md) · [milestone record](docs/implementation.md) · [handoff](docs/HANDOFF.md) · [M0 verification record](docs/m0-record.md) · [weclaw lessons](docs/weclaw-lessons.md).
 
 ## Commands (private chat)
 
 - `/new [cwd]` — create a session under an allowed workspace and bind it
-- `/ls` — numbered session list grouped by workspace; `/use <n>` binds by number
-- `/use <sessionId|n>` — bind an existing session
+- `/ls` — two-level card of unarchived sessions: choose a workspace, then tap a real session title to bind
+- `/use <sessionId|n>` — bind an existing session; retained as the text fallback for `/ls`
 - `/stop` — cancel the running turn while retaining queued follow-ups
 - `/status` / `/release` / `/help`
-- Plain text goes to the bound session; progress is patched into a task card and committed replies return as durable green result cards.
+- Plain text goes to the bound session. While a Feishu chat remains bound, each direct human task started from either Feishu or Web owns one task card and one task-wide durable result in Feishu; `/release` stops that synchronization. Subagent continuation turns patch the original card instead of creating new messages, and tool-calling commentary is not projected as a result. Failed task cards show an allowlisted stable error code and retry count, never an arbitrary provider error message.
 
 ## Install (into an existing web profile)
+
+For Feishu-console setup, credentials, allowlists, startup, commands, and troubleshooting, see the [中文使用指南](docs/usage.zh.md).
 
 ```sh
 dsh plugin --profile web add /path/to/dsh-feishu-bot
 dsh --profile web --dump-config   # expect gateway, bridge, registry, and invariant rows
 ```
+
+For a prebuilt local preview, run `pnpm release:preview` from a clean checkout. The single release gate runs frozen install, tests, typecheck, build, tarball/manifest audit, isolated install, four-entry import, clean-profile composition, and checksum generation. Install the resulting `artifacts/dsh-feishu-bot-0.1.0-rc.4.tgz` with `dsh plugin --profile web add /absolute/path/to/the.tgz`; verify `artifacts/SHA256SUMS` before use. This does not publish a tag, GitHub Release, or registry package.
 
 Credentials: set `FEISHU_APP_ID` / `FEISHU_APP_SECRET` where the dsh credentials service reads them. No secrets in this repository.
 
@@ -52,24 +56,34 @@ Bridge options:
 | `allowedWorkspaces` | `[]` | Canonical roots visible to `/ls`, `/use`, and `/new`; empty authorizes none |
 | `defaultWorkspace` | unset | Default `/new` cwd; `~` is supported and load fails if the resolved directory is outside the allowed roots |
 | `freshnessMs` | `600000` | Maximum age of a newly delivered Feishu event |
-| `listingTtlMs` | `300000` | Lifetime of the latest numbered `/ls` snapshot |
+| `listingTtlMs` | `300000` | Lifetime of the latest `/ls` card and ordinal snapshot |
 | `cardThrottleMs` | `1000` | Minimum interval between non-terminal task-card patches |
 | `recoveryTtlMs` | `86400000` | Maximum age of interrupted inbound work eligible for restart recovery |
-| `inboundRetentionMs` / `inboundMaxRecords` | `604800000` / `50000` | Terminal inbound retention and soft capacity; recoverable rows are protected |
-| `outboundRetentionMs` / `outboundMaxRecords` | `604800000` / `10000` | Terminal outbox retention and soft capacity |
-| `outboundPendingTtlMs` | `86400000` | Age at which an unsent segment is abandoned and its body cleared |
+| `bindingCleanupTimeoutMs` | `5000` | Independent timeout for disposing a newly-created session after a failed binding switch |
+| `disposeDrainTimeoutMs` | `5000` | Bridge deadline for admitted chat/card/approval/projection work before storage is closed |
+| `inboundRetentionMs` / `inboundMaxRecords` | `604800000` / `50000` | Terminal inbound retention and hard capacity; protected recoverable rows cause backpressure instead of eviction |
+| `outboundRetentionMs` / `outboundMaxRecords` | `604800000` / `10000` | Legacy outbox/dead-letter retention and hard capacity |
+| `outboundPendingTtlMs` | `86400000` | Age at which a legacy unsent segment is abandoned and its body cleared |
+| `deliveryRetentionMs` / `deliveryMaxRecords` | `604800000` / `10000` | Canonical result-delivery retention and hard capacity |
+| `deliveryPendingTtlMs` | `86400000` | Age at which an unsent canonical result is abandoned and its body cleared |
+| `approvalPendingTtlMs` / `approvalMaxRecords` | `86400000` / `1000` | Inactive approval recovery-fact TTL and hard capacity; active/fresh ambiguous rows are protected |
+| `projectionCursorRetentionMs` / `projectionCursorMaxRecords` | `604800000` / `10000` | Unbound cursor retention and hard capacity; active or pending-delivery cursors are protected |
 | `maintenanceIntervalMs` | `86400000` | Retention sweep interval; `0` disables the periodic timer while startup cleanup still runs |
-| `agentProvider` / `agentModel` | `deepseek` / `deepseek-chat` | Model route used for sessions created or cold-resumed by the bridge |
+| `agentProvider` / `agentModel` | unset | Optional paired override; when omitted, new and cold-resumed sessions follow Harness `agent-default-model` |
 | `webUrl` | `http://127.0.0.1:3080` | Web GUI link placed on approval cards |
 
 Result-card segmentation uses a fixed 24 KiB soft limit over the complete Feishu create-message envelope; it is intentionally not a deployment setting.
 
 ## Reliability and audit
 
-- Inbound events and commands are durable and idempotent. Startup reconciles interrupted work, invalidates dangling bindings, abandons expired pending output, and resumes valid pending output in deterministic order.
-- Text and card creates share one FIFO and retry/circuit budget per chat. HMR stops intake first, closes the long connection, and drains already accepted sends up to the configured deadline.
+- Gateway construction does not start the long connection. The bridge first opens both storage domains, completes local reconciliation/retention, and queues legacy output, canonical output, and session-log catch-up in per-chat FIFO order. It then registers a Promise-returning admission handler and starts intake. Queued recovery I/O may continue after readiness, so one hung Feishu request cannot block plugin activation; fresh work for the same chat remains ordered behind recovery.
+- An inbound SDK callback completes only after a `received` row keyed by Feishu `message_id` is durable. `event_id` remains a legacy/audit alias. Business handling then proceeds asynchronously in the per-chat queue; this is an admission commit point, not a claim that the model has already consumed the message.
+- Committed assistant results are re-read from the session log. The bridge writes one complete canonical delivery before advancing its `(chat, session)` cursor, derives deterministic segments at send time, and reuses a stable 32-hex Feishu `uuid` for each logical shape. A cursor means “durably materialized”, not “delivered”.
+- Transport failures are classified as permanent, retryable, or ambiguous. Only a definite card-shape rejection may fall back to text; timeout, disconnect, and 5xx-class ambiguity keep the original shape and UUID. Platform-side UUID deduplication still requires real Feishu acceptance before an exactly-once claim can be made.
+- Text/card create and card patch operations are serialized and drained. HMR stops admission and intake, drains admitted chat/card/approval/projection work up to the configured deadlines, then closes storage. If the bridge deadline expires, writes are fenced; durable pending work remains for restart recovery.
+- Retention limits are hard ceilings. Terminal rows are evicted first; live approvals, recoverable inbound rows, pending deliveries, and active/protective cursors are not sacrificed to satisfy capacity, so admission can fail with explicit backpressure.
 - The invariant companion rejects an active binding whose session is absent from both live and persisted session stores.
-- `feishu-audit` events contain action names, enum outcomes, counters, and stable hashes of identifiers. They contain no message/command body, credential, or full filesystem path. Transport errors are reduced to error class and safe code; the SDK logger redacts request/response `data` fields and the response-body copy appended by `formatErrors`.
+- `feishu-audit` events contain action names, enum outcomes, counters, and stable hashes of identifiers. They contain no message/command body, credential, or full filesystem path. Transport errors are reduced to error class and safe code; Client/WS logs are recursively redacted and EventDispatcher logs are fully silent.
 
 ## Verified DeepSeek Harness baseline
 
@@ -77,7 +91,7 @@ Verified on 2026-08-14 against a clean local `../deepseek-harness` checkout: pac
 
 ## Data exposure model
 
-Binding a chat uploads that session's conversation to Feishu **by design**: assistant replies — including any source code, file contents, command output, or secrets the model chooses to print — are sent to ByteDance-operated Feishu servers, and command replies include absolute local paths and session ids. Task and approval cards additionally send the workspace basename, task/tool status, tool name, approval reason, and available token-usage facts; tool arguments are not placed on approval cards. There is no outbound content filter; absolute local Markdown links receive only a presentation rewrite (`[label](/path)` → ``label（`/path`）``), and the path itself is still uploaded. The trust boundary is **who may bind**, enforced fail-closed by `allowedOpenIds` (empty rejects everyone) and `allowedWorkspaces` (`/ls`/`/use`/`/new` are all scoped to the configured roots). Do not allowlist a workspace whose sessions must not leave the machine. Note the boundary's exact meaning: `allowedWorkspaces` controls which sessions Feishu can bind, list, or create — it does not confine what a bound session's agent can read. The harness sandbox fences writes only (reads are OS-user-wide in every mode), so an agent asked to read a file outside its workspace and repeat it will, and that reply uploads like any other. Read isolation requires OS-level separation (a dedicated user account), not this plugin's configuration. Message bodies never enter the plugin's own logs or audit records (ids and hashes only), and the Feishu SDK's failure logs are routed through a redactor that strips request/response bodies.
+Binding a chat uploads that session's conversation to Feishu **by design**: assistant replies — including any source code, file contents, command output, or secrets the model chooses to print — are sent to ByteDance-operated Feishu servers. The first `/ls` card sends workspace basenames and session counts; entering one workspace then sends that workspace's session titles. It does not send full workspace paths or session ids in card payloads. Other command replies may include absolute local paths and full session ids. Task and approval cards additionally send the workspace basename, task/tool status, tool name, approval reason, and available token-usage facts; tool arguments are not placed on approval cards. There is no outbound content filter; absolute local Markdown links receive only a presentation rewrite (`[label](/path)` → ``label（`/path`）``), and the path itself is still uploaded. The trust boundary is **who may bind**, enforced fail-closed by `allowedOpenIds` (empty rejects everyone) and `allowedWorkspaces` (`/ls`/`/use`/`/new` are all scoped to the configured roots). Do not allowlist a workspace whose sessions must not leave the machine. Note the boundary's exact meaning: `allowedWorkspaces` controls which sessions Feishu can bind, list, or create — it does not confine what a bound session's agent can read. The harness sandbox fences writes only (reads are OS-user-wide in every mode), so an agent asked to read a file outside its workspace and repeat it will, and that reply uploads like any other. Read isolation requires OS-level separation (a dedicated user account), not this plugin's configuration. Message bodies never enter the plugin's own logs or audit records (ids and hashes only); Client/WS SDK failures pass through a recursive redactor, while the event dispatcher is silent so arbitrary inbound payloads cannot be printed.
 
 ## License
 

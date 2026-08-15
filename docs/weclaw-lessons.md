@@ -79,8 +79,7 @@ weclaw（`~/Desktop/mycode/weclaw`，AGPL-3.0）在真实飞书使用中迭代�
   "失败"。→ M2 卡片状态设计时落实三态（完成/失败/已停止）。
 - **状态命令区分作用域**（2026-07-18）：当前绑定的真实状态 vs 新会话默认值必须
   分开表述，空字段用占位文案说明默认语义。
-- **诊断按 TraceID 串联**（2026-07-19）：入站事件 id 即我们的关联键，已贯穿
-  inbound_events/outbound_segments；日志排障时按 eventId 检索全链路。
+- **诊断关联键后续修订**：新入站以飞书 `message_id` 为去重主键，`event_id` 保留为审计/旧键别名；终态新路径使用 canonical delivery/cursor，旧 `outbound_segments` 仅作兼容续发。日志只检索 hash 后标识，不记录完整 ID。
 
 
 ## 追补（实机验收反馈，2026-08）
@@ -96,13 +95,13 @@ weclaw（`~/Desktop/mycode/weclaw`，AGPL-3.0）在真实飞书使用中迭代�
 
 ### A. 决定采纳（M4/M5 排期）
 
-1. **终态答复卡片化 + 30KB 容量预检分片**（result_card.go，M4 已落地）：最终结果用绿头卡而非纯文本，标题 `工作区名 · 最终结果 · i/N`；发送前本地构造完整 create-message envelope 测 JSON 尺寸（软上限 24KB），按行分片、超长行二分切割；卡片失败降级纯文本，durable outbox 不变。
+1. **终态答复卡片化 + 30KB 容量预检分片**（result_card.go，M4 已落地，M6 加固）：最终结果用绿头卡而非纯文本，标题 `工作区名 · 最终结果 · i/N`；发送前本地构造完整 create-message envelope 测 JSON 尺寸（软上限 24KB），按行分片、超长行二分切割。M6 后只有确定性卡片拒绝才降级文本；timeout/断连/5xx 保持原形态与稳定 UUID，终态正文改由 canonical delivery/cursor 恢复。
 2. **本地路径链接改写**（result_card.go rewriteFeishuLocalMarkdownLinks，M4 已落地）：`[label](/local/path)` 在飞书里是死链接，正则改写成 ``label（`/local/path`）`` 代码样式；网页链接保持不变，路径内反引号替换为 `ˋ`，避免破坏代码片段。
 3. **思考中指示器追加/剥离规范**（progress_render.go append/trimActiveThinkingIndicator）：运行中卡片正文尾部统一追加"思考中"指示器，进入终态时统一剥离——幂等操作（HasSuffix 判重）。我们目前是整体替换正文，可借鉴其"终态绝不残留进行时指示"的收口。
 4. **进度时间线 reducer 的三条规则**（task_view_reducer.go + task_progress_timeline.go）：①旧 sequence 拒绝（防乱序回写）；②终态后进展拒绝（closed 即冻结）；③同 ID 进度原地更新而非追加（工具重试/plan 更新不刷屏）。我们的 reduceTaskCard 已有 ②，①③ 值得补——尤其未来接入 plan/todo 进度时。
 5. **卡片受理≠完成两段式**（choice_status_card.go）：按钮点击先受理（蓝色"已受理：X / 正在处理中"），业务完成后再补终态 patch（绿色"已完成"）。我们审批点击是同步 resolve、可以一步到位；但 M4 计划的会话切换按钮（耗时操作）必须用这个两段式。
 6. **命令结果回写原卡**（deferred_card_result.go）：卡片按钮触发的命令，结果 patch 回原卡而非另发消息；原卡不可更新时显式降级为普通消息（绝不吞结果）。M4 导航卡片直接照抄该策略。
-7. **列表快照 + 翻页**（feishu_navigation_snapshot.go + feishu_choice_pagination.go）：/ls 结果存 5 分钟 TTL 快照（token 定位），翻页/按编号选择时用快照顺序，不重查目录——消除"列表刷新导致编号漂移选错会话"这一真实事故类。我们 /use <编号> 现在就有这个隐患（两次 /ls 之间会话列表可能变化），M4 必修。
+7. **列表快照 + 翻页**（feishu_navigation_snapshot.go + feishu_choice_pagination.go，已落地并扩展）：`/ls` 使用 5 分钟 token 快照，工作空间/会话两级均在原卡翻页；`/use <编号>` 只引用当前打开工作空间的冻结顺序。首层延迟读取 title，避免为未进入的工作空间加载全部 projection。
 8. **软上限预检而非事后重试**（result_card.go + stream.go feishuCardJSONSoftLimitBytes）：所有卡片 patch 前本地测尺寸，超限先裁剪（preview 模式）再发送，不靠飞书 400 报错兜底。
 
 ### B. 已对齐（本轮或更早已实现，记录出处）
@@ -112,7 +111,7 @@ weclaw（`~/Desktop/mycode/weclaw`，AGPL-3.0）在真实飞书使用中迭代�
 - 审批收纳面板 approval_panel（多审批一张卡逐项按钮）——本轮 renderApprovalGroupCard 已实现。
 - 时间线 ✅/❌/○/• 状态标记（taskProgressMarker）——我们的 ✓/▸ 同旨（飞书 lark_md 下 emoji 更醒目，可考虑换成 ✅）。
 - 点击后按钮消失/卡片定格（buildChoiceHandledCard）——我们的组卡 settled 项内联定格。
-- 卡片创建失败降级普通消息（renderCardCreationFallback）——我们的 next() 让路 + 文本回执同旨。
+- 卡片创建的**确定性形态拒绝**降级普通消息（renderCardCreationFallback）——M6 已收紧：模糊失败不得跨形态；审批 create 模糊时写 `uncertain` 并 `next()` 让路。
 - SDK 日志脱敏（sdk_logger.go）——我们的 redactingSdkLogger 已做。
 - 消息新鲜度窗口（message_freshness.go）——我们的 freshnessMs 已做。
 - 同窗口顺序派发（dispatch_order.go）——我们的 per-chat FIFO 队列已做。
