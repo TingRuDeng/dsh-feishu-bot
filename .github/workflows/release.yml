@@ -339,6 +339,12 @@ jobs:
             echo 'release workflow reruns are not allowed; create a new RC tag' >&2
             exit 1
           fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: release-source
+          fetch-depth: 1
+          persist-credentials: false
       - name: Download the attested payload
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -439,14 +445,15 @@ jobs:
             --title "$TAG" \
             --notes "Release candidate $TAG"
           verify_release_tag
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/staged-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --paginate \
+            --slurp > "$RUNNER_TEMP/staged-releases.json"
           node --input-type=module <<'NODE'
           import { appendFileSync, readFileSync } from 'node:fs'
+          import { selectStagedDraftRelease } from './release-source/scripts/release-preview-lib.mjs'
 
-          const release = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/staged-release.json`, 'utf8'))
-          if (release.draft !== true || release.prerelease !== true || release.tag_name !== process.env.TAG) {
-            throw new Error('staged GitHub release state mismatch')
-          }
+          const pages = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/staged-releases.json`, 'utf8'))
+          const release = selectStagedDraftRelease(pages, process.env.TAG)
           const expected = new Map([
             [process.env.TARBALL, process.env.TARBALL_SHA256],
             [process.env.CHECKSUMS, process.env.CHECKSUMS_SHA256],

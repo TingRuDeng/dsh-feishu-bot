@@ -587,9 +587,9 @@
 - [x] 确认 bootstrap 方案：在受保护 GitHub Environment 中临时保存最小权限、短有效期 npm token，仅允许固定 commit 的首次 RC publish job 使用；成功后立即删除 secret、撤销 token并配置 Trusted Publisher。任何 token 不写入源码、产物、日志或任务文档。
 - [x] 确认 tag 创建后自动构建、attest、暂存 GitHub draft、以 npm `next` 发布同一 tarball，再把 draft 转为 prerelease；任一步失败时保留 tag、失败 run 与已有远程审计事实，不自动删除或覆盖。
 - [x] 确认可新增 release job 的 `id-token: write`、`attestations: write`，以及仅 GitHub 发布步骤持有的 `contents: write`；bootstrap token 仅对 npm publish step 可见，后续 OIDC job 不再配置 npm token。
-- [ ] 确认后另行授权把仓库远程策略 `sha_pinning_required` 从 `false` 改为 `true`，以阻止未来 workflow 重新使用可移动 Action tag；该设置可回滚为 `false`。
-- [ ] 首次真实 tag 前另行授权并启用匹配 `v*-rc.*` 的 tag rules，禁止发布等待窗口内移动或删除既有 RC tag；workflow 会在 draft 前后、npm publish 前和 Release finalize 前 peel 远端 tag 并比对 `GITHUB_SHA`，但最终检查与远端写入之间的窄窗口只能由 tag rules 原子封闭。
-- [ ] 首次真实 Release 前另行授权启用 GitHub Immutable Releases，防止已发布 Prerelease 的 tag 和六个 asset 在事后被改写；该策略不替代发布前 tag rules。
+- [x] 已另行授权并把仓库远程策略 `sha_pinning_required` 设为 `true`，阻止 workflow 重新使用可移动 Action tag；每次新 RC 前仍需复核远端状态。
+- [x] 已另行授权并启用匹配 `v*-rc.*` 的 tag rules，禁止既有 RC tag update/deletion 且无 bypass；workflow 仍在 draft 前后、npm publish 前和 Release finalize 前 peel 远端 tag 并比对 `GITHUB_SHA`。
+- [x] 已另行授权并启用 GitHub Immutable Releases，防止已发布 Prerelease 的 tag 和六个 asset 事后被改写；该策略不替代发布前 tag rules。
 
 实施步骤：
 
@@ -605,7 +605,8 @@
 - [x] 移除只保留一个 pending run 的顶层 GitHub concurrency；在受保护 `npm-release` Environment 之后按 `run_number` 等待全部更早 release run 进入终态，确保快速连续 tag 不会静默丢失中间 RC，且 npm publish/finalize 严格串行。
 - [x] npm publish 前重新读取 package metadata；已有 `next` 时只允许严格更高的 `x.y.z-rc.n`，拒绝乱序或回退 RC，并补纯函数与 workflow mutation 回归测试。正式 workflow rerun 同样被拒绝，防止旧 `run_number` 重入临界区。
 - [x] 补充从旧 unscoped `dsh-feishu-bot` 切换到 `@tingrudeng/dsh-feishu-bot@next` 的先 remove 后 add 步骤；披露 GitHub draft asset 校验与公开 PATCH 之间无法原子封闭的窄窗口。
-- [ ] 由用户单独确认远程保护策略、首次真实 tag 与 bootstrap publish；发布后重新下载 npm tarball 并核对 SHA-256/registry integrity，确认 `next` 指向新 RC 且 `latest` 不存在或保持原值；分别验证 npm provenance 证书身份与限定 repository、signer workflow、source ref 的 GitHub attestation。
+- [x] 用户已单独确认远程保护策略、首次真实 tag/bootstrap publish，以及失败后使用全新 rc.6 tag 继续；rc.5 的既有远程事实全部保留。
+- [ ] rc.6 发布后重新下载 npm tarball并核对 SHA-256/registry integrity，确认 `next` 指向新 RC 且 `latest` 不存在或保持原值；分别验证 npm provenance 证书身份与限定 repository、signer workflow、source ref 的 GitHub attestation。
 
 验收标准：
 
@@ -623,10 +624,41 @@
 - 正式 workflow 已形成 `build -> build_attest -> stage_draft -> publish_npm -> finalize_release` 的固定五 job 链，权限按 job 最小化，所有外部 Action 使用完整 SHA；合同测试额外拒绝未知高权限 job、表达式形式的 fail-open、额外 pack/publish 和 `latest` 移动。
 - 独立复核发现的两项供应链缺口已关闭：draft 前后、npm publish 前与 finalize 前都会解析轻量/annotated tag 并要求最终 commit 等于 `GITHUB_SHA`；npm audit 导出的 SLSA bundle 还会用 `gh attestation verify --digest-alg sha512` 校验证书中的 repository、workflow、ref、commit 与 hosted runner，而不只信任 statement 自述。
 - 独立复核发现的 RC 顺序缺口也已关闭：workflow 不使用只保留一个 pending run 的原生 concurrency；publish job 按 `run_number` 等待全部更早 run，并要求候选严格高于 no-store 读取的 npm `next`。formal build、队列入口和三个远程权限 job 都 fail-closed 拒绝完整或 partial rerun；最终 targeted review 未发现新增 P1/P2。
-- 当前 Preview Gate 退出码 0：22 个测试文件、339/339，`tsc --noEmit`、release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口导入和干净 DSH Profile smoke 全部通过；标准 `npm run build` 也退出 0。发布聚焦测试 85/85，workflow 的 Ruby YAML 解析、26 个 `run` block 的 `bash -n`、actionlint v1.7.10 与 `git diff --check` 均通过。
-- 当前不可发布 rc.5 为 650,211 bytes，SHA-256 `a718bdb9222f6ac3556d3d7076dd5c0a46aa20ea3d98fa7d1ee32589384a54dc`；`/private/tmp/dsh-feishu-final.62SVQ2` 精确包含 tarball、`SHA256SUMS`、CycloneDX SBOM 与 `release.json`，Preview Gate 输出明确 `sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。
+- 阶段 6.5 结束时 Preview Gate 退出码 0：22 个测试文件、339/339，`tsc --noEmit`、release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口导入和干净 DSH Profile smoke 全部通过；标准 `npm run build` 也退出 0。发布聚焦测试 85/85，workflow 的 Ruby YAML 解析、26 个 `run` block 的 `bash -n`、actionlint v1.7.10 与 `git diff --check` 均通过。
+- 阶段 6.5 结束时不可发布 rc.5 为 650,211 bytes，SHA-256 `a718bdb9222f6ac3556d3d7076dd5c0a46aa20ea3d98fa7d1ee32589384a54dc`；`/private/tmp/dsh-feishu-final.62SVQ2` 精确包含 tarball、`SHA256SUMS`、CycloneDX SBOM 与 `release.json`，Preview Gate 输出明确 `sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。
 - 差异安全扫描未发现凭据/token 前缀、私钥、真实飞书 open/app id 或用户绝对路径；新增的唯一 `console.log` 只输出更早 RC run 的数量，不含 id、ref、正文或 token。本轮未创建 tag、GitHub Release/attestation、npm 版本、Environment/secret、Trusted Publisher 或远程 ruleset。
-- 远程发布仍被外部门禁阻塞：当前 `npm-release` Environment 尚不存在，package 尚未 bootstrap，远端无 tag rules、Action SHA enforcement 或 Immutable Releases。首次真实 tag 前必须单独确认并配置这些状态，不能把本地 339/339 当作远程双渠道验收。
+- 阶段 6.5 结束时远程发布仍被外部门禁阻塞：当时 `npm-release` Environment 尚不存在，package 尚未 bootstrap，远端无 tag rules、Action SHA enforcement 或 Immutable Releases。该历史状态已由阶段 6.6 的远程配置与 rc.5 运行事实取代。
+
+### 阶段 6.6：rc.5 Draft 查询修复与 rc.6 发布
+
+目标：保留 rc.5 的失败 run、tag 与 Draft Release 作为审计事实，修复 GitHub 对未发布 Draft 不支持 tag endpoint 查询导致的发布中断，并以全新的 rc.6 完成首次双渠道发布。
+
+已确认事实（2026-08-16）：
+
+- rc.5 tag 指向提交 `641902db09903509d6395a4fdaafbadbcb8e99c9`；workflow run `31949610430` 的 build 与 attestation 成功，`stage_draft` 在上传六个附件后失败，npm 尚无该包。
+- rc.5 Draft Release ID 为 `371332167`，必须保留；不得删除、重跑、移动 tag 或复用版本。
+- 根因是 `/releases/tags/v0.1.0-rc.5` 对未发布 Draft 返回 404；按 Release ID 查询和 Release 列表均能读取该 Draft。
+- 用户已确认生成并推送新的 GitHub 发布；本阶段授权范围为修复、提交、推送 rc.6 源码与新 tag，并观察正式 workflow，不包含清理 rc.5 审计事实。
+
+实施步骤：
+
+- [x] 用 RED 测试复现分页 Release 列表中精确选择 Draft 的缺失契约。
+- [x] 实现 fail-closed 的 `selectStagedDraftRelease`，拒绝缺失、重复、非 Draft、非 prerelease 和非法 Release ID。
+- [x] 让 `stage_draft` checkout 精确触发提交，通过分页 Release 列表选出 Draft ID，删除 Draft tag endpoint 查询。
+- [x] 递增源码和当前版本文档到 `0.1.0-rc.6`；`pnpm-lock.yaml` 不记录根包版本，无需改动，并保留 rc.5 历史证据。
+- [x] 执行发布聚焦测试、全量测试、typecheck、build、YAML、shell、actionlint、diff 与敏感信息检查。
+- [ ] 提交并推送 `master`，核对远端 SHA；同步 `NPM_BOOTSTRAP_GIT_SHA` 后创建并推送全新 annotated `v0.1.0-rc.6` tag。
+- [ ] 观察 rc.6 workflow 到终态，核对 GitHub Prerelease、六个附件、npm `next`、tarball 摘要及两侧 provenance；失败时保留所有远程事实并停止。
+- [ ] 首包成功后撤销 bootstrap token/secret，并转入 Trusted Publisher 与下一 RC 的纯 OIDC 验证。
+
+阶段 6.6 本地验证记录（2026-08-16）：
+
+- TDD RED：聚焦测试最初为 93 项中 10 项失败，均由缺失 selector/workflow 契约触发；实现后同组 93/93 通过。
+- 全量 `./node_modules/.bin/vitest run`：22 个文件、350/350；`./node_modules/.bin/tsc --noEmit` 与 `./node_modules/.bin/tsdown` 均 exit 0。
+- 不可发布 Preview Gate：22 个文件、350/350，release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口和干净 DSH Profile smoke 全部通过；rc.6 tarball 为 650,332 bytes，SHA-256 `beb5a1ea343d569cc0924df48921638449dd73e8f95e7597d5216e76866672ea`，明确 `sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。
+- workflow 的 Ruby YAML 解析、21 个 `run` block 的 `bash -n` 与 actionlint v1.7.10 均通过；`git diff --check` 通过。
+- 独立定向审查未发现 P0–P3：确认 `gh api --paginate --slurp` 的分页数组形状、唯一 tag fail-closed、精确 commit checkout、远端 tag 重验与 Release ID 下游链路。
+- 本机 pnpm 11.18.0 默认运行前检查因 workspace state 仍记录 rc.5 而试图重装依赖；lockfile 与已安装快照字节一致，故基础门禁直接使用现有锁定二进制，Preview Gate 使用明确的 `--use-existing-deps`，没有修改依赖或把该环境提示误报为代码失败。
 
 ## 文件级影响预估
 

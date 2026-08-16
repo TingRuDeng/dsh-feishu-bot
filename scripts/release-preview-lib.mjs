@@ -154,6 +154,40 @@ export function assertNpmVersionAvailable(name, version, status) {
   throw new Error(`npm registry returned ${status} for ${name}@${version}`)
 }
 
+export function selectStagedDraftRelease(pages, tag) {
+  if (!Array.isArray(pages) || typeof tag !== 'string' || tag === '') {
+    throw new Error('GitHub release listing response is invalid')
+  }
+
+  const matches = []
+  for (const page of pages) {
+    if (!Array.isArray(page)) throw new Error('GitHub release listing page is invalid')
+    for (const release of page) {
+      if (
+        release === null
+        || typeof release !== 'object'
+        || Array.isArray(release)
+        || typeof release.tag_name !== 'string'
+      ) {
+        throw new Error('GitHub release listing record is invalid')
+      }
+      if (release.tag_name === tag) matches.push(release)
+    }
+  }
+
+  if (matches.length !== 1) {
+    throw new Error(`staged GitHub release must match exactly once: ${matches.length}`)
+  }
+  const [release] = matches
+  if (release.draft !== true || release.prerelease !== true) {
+    throw new Error('staged GitHub release state mismatch')
+  }
+  if (!Number.isSafeInteger(release.id) || release.id <= 0) {
+    throw new Error('staged GitHub release id is invalid')
+  }
+  return release
+}
+
 function parseReleaseCandidate(version, label) {
   const match = typeof version === 'string' ? releaseCandidateParts.exec(version) : null
   if (match === null) throw new Error(`npm next ${label} must be an x.y.z-rc.n version: ${String(version)}`)

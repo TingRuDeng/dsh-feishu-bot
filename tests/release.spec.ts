@@ -316,6 +316,45 @@ describe('preview release manifest', () => {
     else expect(verify).toThrow(error)
   })
 
+  it('selects the exact staged draft from paginated GitHub release listings', () => {
+    const expected = {
+      id: 102,
+      tag_name: 'v0.1.0-rc.6',
+      draft: true,
+      prerelease: true,
+      assets: [],
+    }
+
+    expect(releaseModule.selectStagedDraftRelease([
+      [{ id: 101, tag_name: 'v0.1.0-rc.5', draft: true, prerelease: true, assets: [] }],
+      [expected],
+    ], 'v0.1.0-rc.6')).toEqual(expected)
+  })
+
+  it.each([
+    ['no matching release', [[{ id: 101, tag_name: 'v0.1.0-rc.5', draft: true, prerelease: true }]]],
+    ['duplicate matching releases', [[
+      { id: 102, tag_name: 'v0.1.0-rc.6', draft: true, prerelease: true },
+    ], [
+      { id: 103, tag_name: 'v0.1.0-rc.6', draft: true, prerelease: true },
+    ]]],
+    ['published release', [[{ id: 102, tag_name: 'v0.1.0-rc.6', draft: false, prerelease: true }]]],
+    ['non-prerelease draft', [[{ id: 102, tag_name: 'v0.1.0-rc.6', draft: true, prerelease: false }]]],
+    ['invalid release id', [[{ id: 0, tag_name: 'v0.1.0-rc.6', draft: true, prerelease: true }]]],
+  ])('rejects staged draft lookup with %s', (_name, pages) => {
+    expect(() => releaseModule.selectStagedDraftRelease(pages, 'v0.1.0-rc.6'))
+      .toThrow(/staged GitHub release/u)
+  })
+
+  it.each([
+    ['non-array response', {}],
+    ['non-array page', [{}]],
+    ['malformed release record', [[null]]],
+  ])('rejects staged draft lookup with %s', (_name, pages) => {
+    expect(() => releaseModule.selectStagedDraftRelease(pages, 'v0.1.0-rc.6'))
+      .toThrow(/GitHub release listing/u)
+  })
+
   it.each([
     [undefined, '0.1.0-rc.5'],
     ['0.1.0-rc.4', '0.1.0-rc.5'],

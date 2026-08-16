@@ -140,6 +140,23 @@ function validateReleaseWorkflow(source: string) {
   )
   requireContract(publishJob.includes('bootstrap is only allowed before the package exists'), 'bootstrap must be impossible after first publication')
   requireContract(publishJob.includes('OIDC publishing requires an existing package'), 'OIDC mode must require a bootstrapped package')
+  requireContract(draftJob.includes('path: release-source'), 'draft job must check out the staged release selector')
+  requireContract(draftJob.includes('ref: ${{ github.sha }}'), 'draft selector checkout must use the triggering commit')
+  requireContract(draftJob.includes('persist-credentials: false'), 'draft selector checkout must not persist Git credentials')
+  requireContract(
+    draftJob.includes('repos/$GITHUB_REPOSITORY/releases?per_page=100')
+      && draftJob.includes('--paginate')
+      && draftJob.includes('--slurp'),
+    'draft job must list every GitHub release page',
+  )
+  requireContract(
+    draftJob.includes('selectStagedDraftRelease(pages, process.env.TAG)'),
+    'draft job must fail closed through the staged release selector',
+  )
+  requireContract(
+    !draftJob.includes('releases/tags/$TAG'),
+    'draft job must not query an unpublished draft through the tag endpoint',
+  )
   requireContract(publishJob.includes('path: release-source'), 'npm job must check out the exact release queue implementation')
   requireContract(publishJob.includes('ref: ${{ github.sha }}'), 'release queue checkout must use the triggering commit')
   requireContract(publishJob.includes('persist-credentials: false'), 'release queue checkout must not persist Git credentials')
@@ -241,6 +258,14 @@ describe('release workflow contract', () => {
     ['build OIDC authority', (source: string) => source.replace('  build:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read', '  build:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      id-token: write')],
     ['bootstrap without commit pin', (source: string) => source.replace('NPM_BOOTSTRAP_GIT_SHA', 'UNPINNED_BOOTSTRAP_SHA')],
     ['missing durable release queue', (source: string) => source.replace('node release-source/scripts/release-queue.mjs', 'echo queue-disabled')],
+    ['draft tag endpoint lookup', (source: string) => source.replace(
+      'repos/$GITHUB_REPOSITORY/releases?per_page=100',
+      'repos/$GITHUB_REPOSITORY/releases/tags/$TAG',
+    )],
+    ['missing staged draft selector', (source: string) => source.replace(
+      'selectStagedDraftRelease(pages, process.env.TAG)',
+      'pages.flat()[0]',
+    )],
     ['missing npm next monotonicity guard', (source: string) => source.replace('assertNpmNextAdvances(', 'allowNpmNextRegression(')],
     ['stale npm next preflight', (source: string) => source.replace("cache: 'no-store'", "cache: 'default'")],
     ['staged draft not reverified', (source: string) => source.replace('staged draft changed before npm publish', 'unchecked draft')],
