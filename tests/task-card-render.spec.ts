@@ -117,6 +117,24 @@ describe('renderTaskCard', () => {
     expect(json.split('思考中').length - 1).toBe(1)
   })
 
+  it('keeps tool names inert inside the Markdown progress body', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['Write\u2028- injected\u0085[approve](https://evil.example)'],
+      recentTools: ['Bash`spoof` <tag>\u2029- next'],
+      toolCallCount: 2,
+    })
+
+    expect(card.elements[0]!.text.content).toBe([
+      '✅ Bashˋspoofˋ &lt;tag&gt; \\- next',
+      '▸ Write \\- injected \\[approve\\]\\(https://evil.example\\) …',
+      '已调用工具 2 次',
+      '思考中.....',
+    ].join('\n'))
+    expect(card.elements[0]!.text.content).not.toContain('[approve](https://evil.example)')
+  })
+
   it('terminal cards uniformly strip the active thinking hint', () => {
     for (const status of ['completed', 'stopped', 'failed'] as const) {
       const card = renderTaskCard({ ...base, status, currentTools: [], toolCallCount: 1 })

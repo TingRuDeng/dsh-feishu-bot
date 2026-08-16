@@ -10,6 +10,8 @@
  * 'failed' (the documented default arm).
  */
 
+import { escapeLarkMarkdownLiteral } from './lark-markdown.ts'
+
 /** One turn's card-facing state, frozen at the terminal turn/end. */
 export interface TaskCardSnapshot {
   /** The folded turn number. */
@@ -602,8 +604,8 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   const lines: string[] = []
   if (snapshot.status === 'running') {
     if (snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0) {
-      for (const name of snapshot.recentTools) lines.push(`✅ ${name}`)
-      for (const name of snapshot.currentTools) lines.push(`▸ ${name} …`)
+      for (const name of snapshot.recentTools) lines.push(`✅ ${escapeLarkMarkdownLiteral(name)}`)
+      for (const name of snapshot.currentTools) lines.push(`▸ ${escapeLarkMarkdownLiteral(name)} …`)
       lines.push(`已调用工具 ${snapshot.toolCallCount} 次`)
     }
   } else {

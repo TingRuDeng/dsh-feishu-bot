@@ -1,7 +1,7 @@
 {
-  "name": "dsh-feishu-bot",
+  "name": "@tingrudeng/dsh-feishu-bot",
   "description": "Feishu (Lark) private-chat frontend for DeepSeek Harness: drive, monitor, and approve local agents from Feishu, sharing sessions with the Web GUI",
-  "version": "0.1.0-rc.4",
+  "version": "0.1.0-rc.5",
   "license": "MIT",
   "keywords": [
     "dsh-plugin",
@@ -11,6 +11,14 @@
     "chatbot",
     "ai-agent"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TingRuDeng/dsh-feishu-bot.git"
+  },
+  "homepage": "https://github.com/TingRuDeng/dsh-feishu-bot#readme",
+  "bugs": {
+    "url": "https://github.com/TingRuDeng/dsh-feishu-bot/issues"
+  },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -43,12 +51,19 @@
     "prepare": "tsdown",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "release:preview": "node scripts/release-preview.mjs"
+    "release:preview": "node scripts/release-preview.mjs",
+    "release:formal": "node scripts/release-preview.mjs --formal"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
     }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/",
+    "tag": "next",
+    "provenance": true
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1"
@@ -57,29 +72,31 @@
     "@deepseek-ai/dsh-agent": "link:../deepseek-harness/packages/core/agent",
     "@deepseek-ai/dsh-api-remotes": "link:../deepseek-harness/packages/api/remotes",
     "@deepseek-ai/dsh-brand": "link:../deepseek-harness/packages/util/brand",
+    "@deepseek-ai/dsh-credentials": "link:../deepseek-harness/packages/credentials/credentials",
+    "@deepseek-ai/dsh-invariants": "link:../deepseek-harness/packages/runtime-diagnostics/invariants",
     "@deepseek-ai/dsh-llm": "link:../deepseek-harness/packages/llm/llm",
     "@deepseek-ai/dsh-session": "link:../deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-session-persistence": "link:../deepseek-harness/packages/session/session-persistence",
     "@deepseek-ai/dsh-storage-domain": "link:../deepseek-harness/packages/storage/storage-domain",
+    "@deepseek-ai/dsh-user-approval": "link:../deepseek-harness/packages/interaction/user-approval",
     "@larksuiteoapi/node-sdk": "^1.44.0",
-    "zod": "^4.4.3",
-    "@deepseek-ai/dsh-credentials": "link:../deepseek-harness/packages/credentials/credentials",
-    "@deepseek-ai/dsh-invariants": "link:../deepseek-harness/packages/runtime-diagnostics/invariants",
-    "@deepseek-ai/dsh-user-approval": "link:../deepseek-harness/packages/interaction/user-approval"
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@cyclonedx/cyclonedx-library": "10.1.0",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent-loop": "link:../deepseek-harness/packages/core/agent-loop",
     "@deepseek-ai/dsh-session-persistence-jsonl": "link:../deepseek-harness/packages/session/session-persistence-jsonl",
+    "@deepseek-ai/dsh-storage": "link:../deepseek-harness/packages/storage/storage",
+    "@deepseek-ai/dsh-storage-json": "link:../deepseek-harness/packages/storage/storage-json",
     "@deepseek-ai/dsh-system-prompt": "link:../deepseek-harness/packages/core/system-prompt",
     "@deepseek-ai/dsh-tools": "link:../deepseek-harness/packages/core/tools",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^26.2.0",
-    "tsdown": "^0.9.0",
+    "rollup-plugin-sbom": "4.0.0",
+    "tsdown": "0.22.14",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0",
-    "@deepseek-ai/dsh-storage": "link:../deepseek-harness/packages/storage/storage",
-    "@deepseek-ai/dsh-storage-json": "link:../deepseek-harness/packages/storage/storage-json"
+    "vitest": "^3.0.0"
   },
   "packageManager": "pnpm@11.18.0",
   "engines": {

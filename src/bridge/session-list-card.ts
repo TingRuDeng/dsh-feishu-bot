@@ -1,3 +1,5 @@
+import { escapeLarkMarkdownLiteral, normalizeLarkPlainText } from './lark-markdown.ts'
+
 /** One session choice rendered on the Feishu `/ls` navigation card. */
 export interface SessionListChoice {
   sessionId: string
@@ -38,20 +40,6 @@ export interface SessionListCard {
 }
 
 export const SESSION_LIST_PAGE_SIZE = 7
-
-function normalizePlainText(value: string): string {
-  return value.replace(/[\r\n\t]+/gu, ' ').replace(/\s{2,}/gu, ' ').trim()
-}
-
-/** Keep user-derived metadata inert inside Lark Markdown card fields. */
-function escapeLarkMarkdown(value: string): string {
-  return normalizePlainText(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('`', 'ˋ')
-    .replace(/[\\*_{}\[\]()#+!|~]/gu, '\\$&')
-}
 
 function pageFacts(total: number, requestedPage: number): {
   page: number
@@ -114,7 +102,7 @@ export function renderSessionWorkspaceCard(input: SessionWorkspaceCardInput): Se
   }]
   input.workspaces.slice(offset, offset + SESSION_LIST_PAGE_SIZE).forEach((workspace, localIndex) => {
     const index = offset + localIndex
-    const name = normalizePlainText(workspace.name) || '未命名工作空间'
+    const name = normalizeLarkPlainText(workspace.name) || '未命名工作空间'
     elements.push(button(`${index + 1}. ${name}（${workspace.sessionCount} 个会话）`, {
       kind: 'session-list', action: 'workspace', token: input.token, index,
     }))
@@ -127,7 +115,7 @@ export function renderSessionWorkspaceCard(input: SessionWorkspaceCardInput): Se
 /** Render one session page from the selected workspace snapshot. */
 export function renderSessionListCard(input: SessionListCardInput): SessionListCard {
   const { page, pageCount, offset } = pageFacts(input.choices.length, input.page)
-  const workspaceName = normalizePlainText(input.workspaceName) || '未命名工作空间'
+  const workspaceName = normalizeLarkPlainText(input.workspaceName) || '未命名工作空间'
   const elements: unknown[] = [{
     tag: 'markdown',
     content: '请选择要继续的会话：',
@@ -135,7 +123,7 @@ export function renderSessionListCard(input: SessionListCardInput): SessionListC
   }]
   input.choices.slice(offset, offset + SESSION_LIST_PAGE_SIZE).forEach((choice, localIndex) => {
     const index = offset + localIndex
-    const title = normalizePlainText(choice.title) || '未命名会话'
+    const title = normalizeLarkPlainText(choice.title) || '未命名会话'
     elements.push(button(`${index + 1}. ${title}`, {
       kind: 'session-list', action: 'select', token: input.token,
       workspaceIndex: input.workspaceIndex, index,
@@ -165,9 +153,9 @@ export function renderSessionListStatusCard(
     bound: { title: '会话已绑定', template: 'green', detail: '绑定完成，直接发送消息即可继续任务。' },
     failed: { title: '绑定失败', template: 'red', detail: detail ?? '请重新发送 /ls 后再试。' },
   }[status]
-  const title = escapeLarkMarkdown(choice.title)
-  const workspace = escapeLarkMarkdown(choice.workspace)
-  const detailText = escapeLarkMarkdown(presentation.detail)
+  const title = escapeLarkMarkdownLiteral(choice.title)
+  const workspace = escapeLarkMarkdownLiteral(choice.workspace)
+  const detailText = escapeLarkMarkdownLiteral(presentation.detail)
   return card(presentation.title, [{
     tag: 'markdown',
     content: `**${title}**\n工作区：${workspace}\n${detailText}`,

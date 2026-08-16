@@ -4,6 +4,8 @@
  * pending registry, and durable pendingCards.
  */
 
+import { escapeLarkMarkdownLiteral } from './lark-markdown.ts'
+
 /** The event fields the pairing scan reads; structurally satisfied by SessionEvent. */
 interface ApprovalScanEvent {
   type: string
@@ -52,20 +54,6 @@ export interface ApprovalCardSpec {
   webUrl: string
 }
 
-/** Truncate to a UTF-8 byte budget without splitting a code point. */
-function truncateBytes(text: string, budget: number): string {
-  if (Buffer.byteLength(text, 'utf8') <= budget) return text
-  let out = ''
-  let bytes = 0
-  for (const char of text) {
-    const size = Buffer.byteLength(char, 'utf8')
-    if (bytes + size > budget - 3) break // reserve for the ellipsis
-    out += char
-    bytes += size
-  }
-  return `${out}…`
-}
-
 /** Feishu interactive card with action buttons (msg_type `interactive`). */
 export interface FeishuActionCard {
   config: { wide_screen_mode: boolean }
@@ -95,9 +83,11 @@ const ITEM_STATE_COPY: Record<Exclude<ApprovalItemState, 'pending'>, string> = {
 /** The item's facts as lark_md lines; never tool arguments. */
 function itemLines(spec: ApprovalCardSpec): string {
   return [
-    `**工具**：${spec.toolName}`,
-    ...spec.reason === undefined ? [] : [`**原因**：${truncateBytes(spec.reason, REASON_BYTE_BUDGET)}`],
-    `**会话**：${spec.sessionTitle}`,
+    `**工具**：${escapeLarkMarkdownLiteral(spec.toolName)}`,
+    ...spec.reason === undefined
+      ? []
+      : [`**原因**：${escapeLarkMarkdownLiteral(spec.reason, REASON_BYTE_BUDGET)}`],
+    `**会话**：${escapeLarkMarkdownLiteral(spec.sessionTitle)}`,
   ].join('\n')
 }
 

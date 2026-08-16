@@ -23,13 +23,13 @@
 
 - insert:
     - id: feishu-gateway
-      name: 'dsh-feishu-bot/gateway'
+      name: '@tingrudeng/dsh-feishu-bot/gateway'
       config:
         appIdRef: FEISHU_APP_ID
         appSecretRef: FEISHU_APP_SECRET
 
     - id: feishu-bridge
-      name: 'dsh-feishu-bot/bridge'
+      name: '@tingrudeng/dsh-feishu-bot/bridge'
       config:
         allowedOpenIds: []
         allowedWorkspaces: []
@@ -41,4 +41,4 @@
       name: '@deepseek-ai/dsh-invariants'
 
     - id: feishu-invariant
-      name: 'dsh-feishu-bot/invariant'
+      name: '@tingrudeng/dsh-feishu-bot/invariant'

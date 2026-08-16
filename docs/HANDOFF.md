@@ -7,6 +7,10 @@
 - M0–M5 功能基线已存在；M6 可靠性阶段 0–4 已完成自动化实现，阶段 5 的文档已按当前源码校准，真实飞书故障矩阵仍待执行。
 - 阶段 6.1 已把卡片与终态投影从内部 turn 粒度提升为绑定会话的 Web/飞书直接用户任务粒度：同一任务的 subagent report/settled continuation 只更新原卡，含 tool-call 的过程文本不投影，全部直接子代理 settled 后只物化一次最新结果；`/release` 后停止同步。真实飞书同类任务仍需用户最终复测。
 - 阶段 6 已建立 `scripts/release-preview.mjs` 单一门禁：release bundle 内联除 Cordis peer 外的运行时依赖，packed manifest 不含源码联调用的 `link:`，并完成 tarball 白名单、隔离安装、四入口导入、干净 DSH web Profile 安装/配置快照和 SHA-256。当前本地产物由 dirty 工作树生成，脚本明确标为 `publishable: false`；真实 web Profile 已切换到 tarball 并通过启动/HTTP smoke，飞书消息与故障矩阵继续由用户实际使用验收。
+- 阶段 6.4 已把 release-preview workflow 的 checkout、setup-node 与 upload-artifact 全部固定到官方稳定版本的完整 commit SHA。
+- 阶段 6.5 已在本地源码实现 tag-only RC workflow：不使用 GitHub 只保留一个 pending run 的原生 concurrency；受保护 Environment 放行后，publish job 以只读 Actions 权限按 `run_number` 等待所有更早 workflow 进入终态，再拒绝不严格高于 registry 当前 RC `next` 的版本。正式 workflow rerun 被拒绝，失败后必须创建新的更高 RC tag。只读 build job 产生唯一 tarball、checksum、CycloneDX 1.7 SBOM 和 descriptor，独立 attestation job 复核四文件摘要后才取得 OIDC/attestation 权限；GitHub build provenance 与 SBOM predicate 均用固定 Action SHA 生成并按 workflow、tag、commit、hosted runner 验签。后续 job 以同一 Actions artifact ID、release ID 和六个 asset digest 暂存 draft，发布同一 tarball 到 npm `next`，重新下载后同时验证 npm 签名/SLSA statement 与 Sigstore 证书中的 repository/workflow/ref/commit/hosted-runner identity，最后才发布 GitHub Prerelease。
+- 发布 workflow 会在 draft 创建前后、npm publish 前和 Release finalize 前解析轻量或 annotated tag 并要求其最终 commit 等于 `GITHUB_SHA`。tag 检查与远程写入仍存在不可原子消除的窄窗口，首次真实 tag 前必须另行启用阻止既有 RC tag 移动/删除的 tag rules；首次 Release 前还应启用 Immutable Releases。draft asset 的最终 GET 校验与公开 PATCH 同样不是原子操作，finalize 期间必须排除其他 `contents: write` 修改；PATCH 后校验失败可能留下已经短暂公开或被锁定的异常 Prerelease，应按发布事故处理。远端当前未配置这些策略，不能把本地 workflow 校验描述为远端不可变性已经成立。
+- 首包 bootstrap 只允许 package 尚不存在且 `NPM_BOOTSTRAP_GIT_SHA` 等于已批准 commit；临时 `NPM_TOKEN` 只进入该 publish step。包存在后 bootstrap 永久被代码拒绝，后续必须使用 Trusted Publishing OIDC。当前本地 Preview Gate 已通过 22 个测试文件、339/339、typecheck、release build、唯一 pack、SBOM、隔离安装、四入口与干净 DSH Profile smoke；rc.5 为 650,211 bytes，SHA-256 `a718bdb9222f6ac3556d3d7076dd5c0a46aa20ea3d98fa7d1ee32589384a54dc`，明确 `publishable: false`。YAML、26 个 workflow shell、actionlint、标准 build 和 diff/sensitive scan 也已通过；最终独立 targeted review 未发现新的 P1/P2。尚未配置 `npm-release` Environment、变量、secret、Trusted Publisher 或发布保护策略，也未创建 tag、Release、attestation 或 npm 版本。
 - 当前工作树继续保留本地 `link:../deepseek-harness/...` 依赖用于源码联调；它们不会进入预览 tarball。未获单独授权前不创建 tag、不上传 Release、不发布 registry。
 - 当前改动未提交、未推送；不要把历史提交/远端 SHA 当作本轮 M6 交付证明。源码 Profile 的既有 boot 冒烟与用户真机 `/ls` 验收、以及本轮 tarball-backed 真实 Profile 启动/HTTP smoke 是不同证据；真实飞书消息与故障矩阵仍不能由配置或 HTTP 代替。
 
@@ -48,6 +52,9 @@
 - `src/audit.ts`：稳定标识哈希与安全错误摘要。
 - `src/invariant.ts`：binding/session 不变量 companion。
 - `cordis.patch.yml`：gateway、bridge、invariants registry 与 invariant companion 的 Bundle 组合。
+- `scripts/release-preview.mjs` / `scripts/release-sbom.mjs` / `scripts/release-queue.mjs`：单一 preview/formal 门禁、唯一 pack、产物 descriptor、tarball-bound CycloneDX SBOM 与正式 RC run-number 队列。
+- `.github/workflows/release-preview.yml` / `.github/workflows/release.yml`：只读 PR 预览与受信 RC tag 的双渠道发布链路；后者的任何真实 run 都属于远程发布授权范围。
+- `tests/release-workflow.spec.ts`：job 顺序/权限、Action pin、单 tarball、bootstrap/OIDC、双 provenance、release ID 与失败语义的 mutation 合同。
 - `docs/usage.zh.md`：飞书后台、凭据、白名单、启动、命令与排障指南。
 - `tasks/todo.md`：本轮范围、验收项和最终验证记录。
 

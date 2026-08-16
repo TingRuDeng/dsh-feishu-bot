@@ -75,6 +75,37 @@ describe('renderApprovalGroupCard', () => {
     expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(500)
     expect(json).toContain('…')
   })
+
+  it('keeps an escaped reason within the rendered 500-byte budget', () => {
+    const card = renderApprovalGroupCard([{
+      spec: { ...spec('pc_1'), reason: '&'.repeat(500) },
+      state: 'pending',
+    }])
+    const content = (card.elements[0] as { text: { content: string } }).text.content
+    const rendered = content.split('\n').find(line => line.startsWith('**原因**：'))!.slice('**原因**：'.length)
+
+    expect(Buffer.byteLength(rendered, 'utf8')).toBeLessThanOrEqual(500)
+    expect(rendered).toMatch(/^(?:&amp;)*…$/u)
+  })
+
+  it('keeps dynamic approval facts inert inside the Markdown template', () => {
+    const card = renderApprovalGroupCard([{
+      spec: {
+        ...spec('pc_1', 'Tool\u2028- click\u0085[link](https://evil.example)'),
+        reason: 'why `code` <admin> **bold**\u2029next',
+        sessionTitle: 'repo_#1\u000b- fake',
+      },
+      state: 'pending',
+    }])
+    const content = (card.elements[0] as { text: { content: string } }).text.content
+
+    expect(content).toBe([
+      '**工具**：Tool \\- click \\[link\\]\\(https://evil.example\\)',
+      '**原因**：why ˋcodeˋ &lt;admin&gt; \\*\\*bold\\*\\* next',
+      '**会话**：repo\\_\\#1 \\- fake',
+    ].join('\n'))
+    expect(content).not.toContain('[link](https://evil.example)')
+  })
 })
 
 describe('pairApprovalId', () => {

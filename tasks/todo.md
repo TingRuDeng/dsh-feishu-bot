@@ -502,6 +502,132 @@
 - 本阶段新增行扫描未发现硬编码凭据值、用户绝对路径或消息正文日志；独立 review-gate 未发现可稳定复现的阻断项。
 - 本轮未重启真实 Web Profile、未生成或发布新预览产物；飞书端 ambiguous create 的真实平台幂等表现仍留待后续预览版真机验收。
 
+### 阶段 6.3：Markdown 动态字面量一致性修复
+
+目标：修复 Approval 与 Task card 中动态字面量直接进入 Markdown 模板造成的展示完整性风险，同时保留 Result card 对助手 Markdown、代码块和 Web 链接的既有产品契约。
+
+范围与关键决策：
+
+- 抽取共享的 Markdown 字面量转义 helper，供 CardKit `markdown` 与旧 interactive `lark_md` 的惰性字段使用。
+- Approval 仅转义 `toolName`、`reason`、`sessionTitle`；固定粗体标签、审批按钮和 Web GUI 链接结构保持不变。
+- Task card 仅转义 `currentTools`、`recentTools` 中的工具名；固定状态文案、数字、allowlist 错误码和 `plain_text` 标题保持不变。
+- Result card 正文明确排除，不套用字面量转义；其助手 Markdown 保留测试必须继续通过。
+- 本阶段不改变 DLP、pending 持久化、审计指纹或发布供应链策略。
+
+验收标准：
+
+- [x] Approval 的三个动态字段不能通过 `[]()`、反引号、`<>`、Unicode 行分隔符或 Markdown 控制字符改变卡片结构。
+- [x] Task card 的工具名不能注入新行、链接、列表或 Markdown 格式，固定进度布局保持不变。
+- [x] Session status 继续使用同一共享 helper，并阻断 Unicode 换行与列表前缀注入。
+- [x] Result card 继续保留 Web Markdown 链接、换行和代码表达能力。
+
+实施步骤：
+
+- [x] 复核四个渲染器的数据来源、schema 和有意 Markdown 契约。
+- [x] 记录字段级修复范围、验收标准和回滚边界并获得用户确认。
+- [x] 先补 Approval 与 Task card 对抗性 RED 测试并确认失败原因。
+- [x] 实现共享 helper，迁移 Session status，并在 Approval/Task 动态槽调用。
+- [x] 运行聚焦测试、全量测试、typecheck、build、diff/敏感信息检查和独立 review-gate。
+
+验证方式：
+
+- RED/GREEN：`./node_modules/.bin/vitest run tests/approval.spec.ts tests/task-card-render.spec.ts tests/session-list-card.spec.ts tests/result-card.spec.ts`。
+- 全量：`./node_modules/.bin/vitest run`、`./node_modules/.bin/tsc --noEmit`、`npm run build`、`git diff --check`。
+- 完成前确认 Result card 的 Markdown-preservation 测试仍通过；不重启真实 Web Profile、不生成或发布预览产物。
+
+回滚边界：只撤销本节新增测试、共享 Markdown helper 及 Approval/Task/Session status 的字段级调用；不改 Result card、不改 storage schema、不触碰运行配置和用户其他改动。
+
+阶段 6.3 review（2026-08-16）：
+
+- 新增共享字面量 helper，统一折叠 ECMAScript 空白、U+0085 与 Unicode 行分隔符，并转义链接、代码、HTML、列表和其他 Markdown 控制字符；Approval、Task card 与 Session status 已按字段接入，Result card 保持原有助手 Markdown 契约。
+- 关键 RED→GREEN：Approval/Task/Session 的 Unicode 分隔符曾可重新制造 Markdown 行首；转义后 500 个 `&` 曾把审批原因从 500 字节放大到 2500 字节。修复后各动态字段保持单行惰性文本，审批原因按完整转义原子限制在 500 字节内。
+- 最终验证：聚焦测试通过 4 个文件、35/35；`./node_modules/.bin/vitest run` 通过 19 个测试文件、254/254；`./node_modules/.bin/tsc --noEmit`、`npm run build`、`git diff --check` 均以退出码 0 完成。
+- 本阶段新增行扫描未发现硬编码凭据值、用户绝对路径、消息正文日志或调试输出；独立 review-gate 未发现代码级阻断项。
+- 本轮未重启真实 Web Profile、未生成或发布预览产物；真实飞书端渲染仍留待后续实际使用验收，审批组卡完整 envelope 的统一容量预检属于既有后续设计范围。
+
+### 阶段 6.4：CI 第三方 Action 不可变引用
+
+目标：在首次对外分发前消除 GitHub Actions 可移动主版本标签带来的构建时间差风险，不改变预览产物内容或远程发布状态。
+
+- [x] 盘点仓库全部 workflow 的外部 `uses:`，确认唯一工作流共有四处 `@v4` 引用。
+- [x] 从各 Action 官方仓库核对最新稳定 v4 release、完整 commit SHA 与 tag 类型。
+- [x] 将 checkout、setup-node、upload-artifact 全部固定到 40 位 commit，并保留精确版本注释。
+- [x] 解析 workflow YAML，扫描全部外部 Action 引用，运行发布聚焦测试及 `git diff --check`。
+
+阶段 6.4 review（2026-08-16）：
+
+- `actions/checkout` 固定到 `v4.4.0` 的 `11d5960a326750d5838078e36cf38b85af677262`，`actions/setup-node` 固定到 `v4.4.0` 的 `49933ea5288caeca8642d1e84afbd3f7d6820020`，`actions/upload-artifact` 固定到 `v4.6.2` 的 `ea165f8d65b6e75b540449e92b4886f43607fa02`；三个精确 release tag 均直接指向 commit。
+- Ruby YAML 解析与全 workflow 引用扫描通过；`tests/release.spec.ts` 通过 8/8，`git diff --check` 退出码 0。
+- 本阶段未运行远程 workflow、未生成产物、未修改 GitHub 权限、未创建 tag/Release、未发布 registry。正式产物签名或可验证 provenance、以及独立 SBOM 仍属于下一阶段 S7。
+
+### 阶段 6.5：双渠道 RC provenance 与 SBOM（渠道与包身份已确认）
+
+目标：从同一受信 tag、同一次构建产生唯一 RC tarball，同时发布到 GitHub Prerelease 与 npm `next`；两端都能验证来源与文件摘要，并提供与该 tarball 绑定的真实软件成分清单。RC 不创建或移动 npm `latest`，也不把校验和、provenance 与 SBOM 混为同一种保证。
+
+已确认的发布边界：
+
+- [x] 首次对外分发采用 GitHub Prerelease + npm `next` 双渠道，不直接发布 npm `latest`。
+- [x] 两个渠道使用同一个受信 tag、同一次正式构建和同一个 `.tgz`；npm 必须直接发布已经验收的 tarball，不能从目录重新执行 `npm pack` 或产生第二份字节。
+- [x] 现有 `pull_request` preview workflow 继续只做 `publishable: false` 的测试产物，显式保持 `contents: read`，不持有 OIDC、attestation、Release 或 npm 发布权限。
+- [x] 首次真实 `npm publish`、创建 tag/Release、配置 Trusted Publisher、写入 GitHub secret/environment，以及修改远程仓库策略仍需用户逐项确认，计划确认本身不授权这些远程写操作。
+
+只读核验结论（2026-08-16）：
+
+- unscoped `dsh-feishu-bot` 已由 `plutokeating` 发布到 `0.11.0`，公开仓库指向 `PlutoKeating/dsh-lark-bot`，当前身份不能把本仓库发布到该包名。当前 npm 登录身份为 `tingrudeng`，`@tingrudeng/dsh-feishu-bot` 尚未公开存在；用户已确认采用该 scoped 名称。
+- `@deepseek-ai/cordis@4.0.1` 已公开发布，当前 peer 范围 `^4.0.1` 可从 npm registry 解析。
+- npm Trusted Publishing 要求 GitHub-hosted runner、Node `>=22.14.0`、npm CLI `>=11.5.1` 与发布 job 的 `id-token: write`；当前本机 Node `24.18.1`、npm `11.16.0` 满足版本门槛。配置 trust 的 `npm trust` 命令还要求 npm `>=11.15.0`、包写权限和账号 2FA。
+- 新包不能直接配置 Trusted Publisher，因为 npm 要求目标 package 已存在。若首个 RC 也必须有 npm provenance，需要在受保护 GitHub Environment 中用一次短期、最小权限 token 完成 bootstrap 发布；随后立刻配置 Trusted Publisher、撤销 token，并用新的 RC 版本验证纯 OIDC 发布。同一 `name@version` 永远不能覆盖或复用。
+- Trusted Publishing 的 GitHub OIDC 发布会自动生成 npm provenance；显式 `--provenance` 可保留为意图断言，但不是第二份 provenance。GitHub artifact attestation 与 npm provenance 是两个独立验证面，都必须指向同一个 tarball。
+- 当前 release bundle 内联除 Cordis peer 外的运行时闭包，而 packed manifest 有意移除这些 dependencies；不能只扫描最终 `package.json` 生成 SBOM。SBOM 工具必须覆盖实际内联依赖、保留 Cordis peer 身份，并通过人工已知组件断言。
+
+实施前待确认门禁：
+
+- [x] 确认正式 npm 包名为 `@tingrudeng/dsh-feishu-bot`，并允许在实现阶段同步修改 `package.json`、产物名、安装命令和发布校验。
+- [x] 确认 SBOM 实现依赖：精确使用 `rollup-plugin-sbom@4.0.0`、`@cyclonedx/cyclonedx-library@10.1.0`，并把 `tsdown` 精确升级到 `0.22.14`；本次授权不包含远程发布或远程配置写入。
+- [x] 确认 bootstrap 方案：在受保护 GitHub Environment 中临时保存最小权限、短有效期 npm token，仅允许固定 commit 的首次 RC publish job 使用；成功后立即删除 secret、撤销 token并配置 Trusted Publisher。任何 token 不写入源码、产物、日志或任务文档。
+- [x] 确认 tag 创建后自动构建、attest、暂存 GitHub draft、以 npm `next` 发布同一 tarball，再把 draft 转为 prerelease；任一步失败时保留 tag、失败 run 与已有远程审计事实，不自动删除或覆盖。
+- [x] 确认可新增 release job 的 `id-token: write`、`attestations: write`，以及仅 GitHub 发布步骤持有的 `contents: write`；bootstrap token 仅对 npm publish step 可见，后续 OIDC job 不再配置 npm token。
+- [ ] 确认后另行授权把仓库远程策略 `sha_pinning_required` 从 `false` 改为 `true`，以阻止未来 workflow 重新使用可移动 Action tag；该设置可回滚为 `false`。
+- [ ] 首次真实 tag 前另行授权并启用匹配 `v*-rc.*` 的 tag rules，禁止发布等待窗口内移动或删除既有 RC tag；workflow 会在 draft 前后、npm publish 前和 Release finalize 前 peel 远端 tag 并比对 `GITHUB_SHA`，但最终检查与远端写入之间的窄窗口只能由 tag rules 原子封闭。
+- [ ] 首次真实 Release 前另行授权启用 GitHub Immutable Releases，防止已发布 Prerelease 的 tag 和六个 asset 在事后被改写；该策略不替代发布前 tag rules。
+
+实施步骤：
+
+- [x] 确定 scoped 包身份并递增到下一个未使用 RC；补齐精确匹配本仓库的 `repository.url` 与 public access 声明。正式脚本拒绝 unscoped 冲突名、已存在版本、非 RC 版本以及会移动 `latest` 的发布参数。
+- [x] 在现有 preview workflow 明确最小只读权限；新增独立 tag-triggered release workflow，所有外部 Action 固定完整 SHA，锁定满足 Trusted Publishing 的 Node/npm 版本，并检查 repository、Git HEAD、tag 与 package version 完全一致。
+- [x] 扩展单一权威 release 脚本的正式模式：禁止 dirty/skip/use-existing-deps，在校验 repository、tag、HEAD、workflow、runner 和 npm 版本之后才允许安装依赖；只有全部正式门禁通过才输出 `publishable: true`，本地 preview 语义保持 `false`。
+- [x] 正式链路只构建一次 `.tgz` 与 `SHA256SUMS`，生成并验证 SBOM；构建 job 仅持有 `contents: read`，独立 attestation job 下载并复核四文件摘要后，才使用 `actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6`（v4.2.2）分别生成 build provenance 与 SBOM predicate，并以 signer workflow、source ref/SHA 和 hosted runner 约束做离线验签。不得使用已弃用的 `actions/attest-sbom`。
+- [x] 先创建 GitHub draft 并上传 `.tgz`、`SHA256SUMS`、SBOM、descriptor 与两份 attestation bundle；按 release ID 和六个 asset digest 核对后，执行 `npm publish <同一 tgz> --tag next --access public --provenance`，重新下载 registry tarball、验证 npm 签名、SLSA statement 与 Sigstore 证书中的 repository/workflow/ref/commit/hosted-runner identity 后，才按同一 release ID 转为 prerelease。workflow 不执行第二次 pack，不发布源码目录。
+- [ ] 首包 bootstrap 成功后配置 Trusted Publisher，精确绑定 `TingRuDeng/dsh-feishu-bot`、release workflow 文件名和受保护 environment；撤销 bootstrap token。用新的 RC 版本完成一次无 `NODE_AUTH_TOKEN` 的 OIDC 发布验证，随后启用禁止 token 的 publishing access。
+- [x] 评估并锁定 CycloneDX 1.7 生成方式；校验实际内联的 Lark SDK、zod 与 DSH runtime 组件，把 Cordis 标为唯一外部 peer，把 tsdown 只列为 build tool，不把 dev-only 工具混入 runtime 清单。
+- [x] 增加 scoped name、release 模式、tag/version、`next`/`latest`、单 tarball 摘要、SBOM 已知组件和 bootstrap/OIDC 分支的自动化拒绝测试；完成全量测试、typecheck、build、workflow YAML/action pin 扫描、干净临时构建和 `git diff --check`。
+- [x] 在不创建正式 tag 的本地 fixture、只读 workflow 校验和不可发布 Preview Gate 中完成演练。
+- [x] 移除只保留一个 pending run 的顶层 GitHub concurrency；在受保护 `npm-release` Environment 之后按 `run_number` 等待全部更早 release run 进入终态，确保快速连续 tag 不会静默丢失中间 RC，且 npm publish/finalize 严格串行。
+- [x] npm publish 前重新读取 package metadata；已有 `next` 时只允许严格更高的 `x.y.z-rc.n`，拒绝乱序或回退 RC，并补纯函数与 workflow mutation 回归测试。正式 workflow rerun 同样被拒绝，防止旧 `run_number` 重入临界区。
+- [x] 补充从旧 unscoped `dsh-feishu-bot` 切换到 `@tingrudeng/dsh-feishu-bot@next` 的先 remove 后 add 步骤；披露 GitHub draft asset 校验与公开 PATCH 之间无法原子封闭的窄窗口。
+- [ ] 由用户单独确认远程保护策略、首次真实 tag 与 bootstrap publish；发布后重新下载 npm tarball 并核对 SHA-256/registry integrity，确认 `next` 指向新 RC 且 `latest` 不存在或保持原值；分别验证 npm provenance 证书身份与限定 repository、signer workflow、source ref 的 GitHub attestation。
+
+验收标准：
+
+- PR 或普通分支不能生成仓库关联 attestation、创建 Release 或发布 npm；只有版本匹配的受信 tag 能进入正式 job。
+- GitHub Prerelease 与 npm registry 下载到的 tarball SHA-256 完全一致，且等于本次唯一正式构建的摘要；npm `next` 精确指向该 RC，`latest` 未被创建或移动。
+- `gh attestation verify` 可验证 tarball 与 `SHA256SUMS` 的 GitHub provenance，并限定正式 workflow 与 tag；npm provenance 除 registry statement 与 subject digest 外，还必须通过同一 verifier 校验证书中的 repository、signer workflow、source ref/SHA 与 hosted runner 身份。
+- SBOM 是有效 SPDX/CycloneDX JSON，与同一 tarball 建立独立 predicate；已知内联、peer 与 dev-only 组件断言符合实际构建边界。
+- bootstrap 凭据已从 GitHub secret/environment 删除并在 npm 撤销；后续新 RC 能在无 npm token 的条件下通过 Trusted Publishing 发布。
+- 任一构建、attestation、SBOM、npm publish 或 GitHub 发布步骤失败时不输出整体成功状态；不自动删除 tag、覆盖 Release、复用版本或执行 unpublish。
+
+回滚边界：代码侧可删除独立 release workflow 并撤销 release 脚本正式模式，现有 PR preview 仍可独立运行；远程 `sha_pinning_required`、tag rules 与 Immutable Releases 的调整必须单独评估并再次授权。已发布 npm 版本不可覆盖，异常 RC 优先把 `next` 移回已知正常版本或移除该 tag，并对问题版本执行 deprecate；Trusted Publishing 不覆盖 dist-tag/deprecate 管理动作，这些操作仍需维护者交互认证与再次授权。unpublish 受 npm 严格条件限制、不可撤销且版本号永远不能复用，不作为常规回滚。已创建的 tag、Release、attestation、provenance 与 registry 版本均属远程审计事实，任何清理必须再次获得用户明确授权。
+
+阶段 6.5 本地实现 review（2026-08-16）：
+
+- 正式 workflow 已形成 `build -> build_attest -> stage_draft -> publish_npm -> finalize_release` 的固定五 job 链，权限按 job 最小化，所有外部 Action 使用完整 SHA；合同测试额外拒绝未知高权限 job、表达式形式的 fail-open、额外 pack/publish 和 `latest` 移动。
+- 独立复核发现的两项供应链缺口已关闭：draft 前后、npm publish 前与 finalize 前都会解析轻量/annotated tag 并要求最终 commit 等于 `GITHUB_SHA`；npm audit 导出的 SLSA bundle 还会用 `gh attestation verify --digest-alg sha512` 校验证书中的 repository、workflow、ref、commit 与 hosted runner，而不只信任 statement 自述。
+- 独立复核发现的 RC 顺序缺口也已关闭：workflow 不使用只保留一个 pending run 的原生 concurrency；publish job 按 `run_number` 等待全部更早 run，并要求候选严格高于 no-store 读取的 npm `next`。formal build、队列入口和三个远程权限 job 都 fail-closed 拒绝完整或 partial rerun；最终 targeted review 未发现新增 P1/P2。
+- 当前 Preview Gate 退出码 0：22 个测试文件、339/339，`tsc --noEmit`、release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口导入和干净 DSH Profile smoke 全部通过；标准 `npm run build` 也退出 0。发布聚焦测试 85/85，workflow 的 Ruby YAML 解析、26 个 `run` block 的 `bash -n`、actionlint v1.7.10 与 `git diff --check` 均通过。
+- 当前不可发布 rc.5 为 650,211 bytes，SHA-256 `a718bdb9222f6ac3556d3d7076dd5c0a46aa20ea3d98fa7d1ee32589384a54dc`；`/private/tmp/dsh-feishu-final.62SVQ2` 精确包含 tarball、`SHA256SUMS`、CycloneDX SBOM 与 `release.json`，Preview Gate 输出明确 `sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。
+- 差异安全扫描未发现凭据/token 前缀、私钥、真实飞书 open/app id 或用户绝对路径；新增的唯一 `console.log` 只输出更早 RC run 的数量，不含 id、ref、正文或 token。本轮未创建 tag、GitHub Release/attestation、npm 版本、Environment/secret、Trusted Publisher 或远程 ruleset。
+- 远程发布仍被外部门禁阻塞：当前 `npm-release` Environment 尚不存在，package 尚未 bootstrap，远端无 tag rules、Action SHA enforcement 或 Immutable Releases。首次真实 tag 前必须单独确认并配置这些状态，不能把本地 339/339 当作远程双渠道验收。
+
 ## 文件级影响预估
 
 | 文件/模块 | 计划改动 |

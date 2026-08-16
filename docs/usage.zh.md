@@ -39,7 +39,11 @@ chmod 600 ~/.dsh/.credentials.yaml
 pnpm dsh plugin --profile web add /path/to/dsh-feishu-bot
 ```
 
-当前仓库依赖使用相邻 `deepseek-harness` 的 `link:` 路径，这是源码联调方式。阶段 6 已提供预览产物门禁：在干净工作树执行 `pnpm release:preview`，脚本会生成 `artifacts/dsh-feishu-bot-0.1.0-rc.1.tgz` 与 `artifacts/SHA256SUMS`，并自动检查 packed manifest 无 `link:`/本机路径、隔离安装、四入口导入和干净 DSH Profile 配置组合。安装预览包时使用绝对路径：`dsh plugin --profile web add /absolute/path/to/dsh-feishu-bot-0.1.0-rc.1.tgz`。重复安装或更换插件版本后，需要重启 `web` Profile。本地产物已完成 tarball-backed 真实 Profile 启动和 HTTP smoke，但尚未完成真实飞书消息/故障矩阵，也未上传 Release 或 registry，不应描述为正式发布。
+当前仓库依赖使用相邻 `deepseek-harness` 的 `link:` 路径，这是源码联调方式。阶段 6 已提供预览产物门禁：在干净工作树执行 `pnpm release:preview`，脚本会生成 `artifacts/tingrudeng-dsh-feishu-bot-0.1.0-rc.5.tgz`、`SHA256SUMS`、同名 `.cdx.json` SBOM 与 `release.json` descriptor，并自动检查 packed manifest 无 `link:`/本机路径、隔离安装、四入口导入和干净 DSH Profile 配置组合。安装预览包时使用绝对路径：`dsh plugin --profile web add /absolute/path/to/tingrudeng-dsh-feishu-bot-0.1.0-rc.5.tgz`。重复安装或更换插件版本后，需要重启 `web` Profile。本地产物已完成 tarball-backed 真实 Profile 启动和 HTTP smoke；正式 RC workflow 虽已在源码中实现并通过本地合同校验，但尚未创建 tag、GitHub Release 或 npm 版本，不应描述为已发布。registry 发布并核验 tarball、`next` 和 npm provenance 后，安装 spec 才是 `@tingrudeng/dsh-feishu-bot@next`。
+
+如果现有 `web` Profile 仍安装旧 unscoped 包 `dsh-feishu-bot`，切换到正式 scoped RC 前必须先执行 `dsh plugin --profile web remove dsh-feishu-bot`，再执行 `dsh plugin --profile web add @tingrudeng/dsh-feishu-bot@next`。DSH 按真实 package name 维护 bundle，直接 add scoped 包不会自动替换旧包，两者并存会重复插入同名 `feishu-*` 行。npm RC 尚未真实发布时不要执行后一条 add 命令。
+
+维护者执行首次 npm 发布前，必须先创建受保护的 `npm-release` Environment，启用阻止既有 `v*-rc.*` tag 被移动/删除的 tag rules，并启用 Immutable Releases。workflow 不使用 GitHub 只保留一个 pending run 的原生 concurrency：Environment 放行后，publish job 会以只读 Actions 权限等待所有更小 `run_number` 完成，再拒绝任何不严格高于当前 npm `next` 的 RC。按 run number 从小到大审批；要放弃旧 run 时先显式取消它。rerun 会被正式门禁拒绝，失败后使用新的更高 RC tag。workflow 会在 draft 创建前后、npm publish 前和 Release finalize 前 peel 远端 tag 并比对 `GITHUB_SHA`，但 repository policy 才能封闭 tag 检查与写入之间的窄窗口。GitHub API 也无法把 draft asset 的最终 GET 校验与公开 PATCH 合成一个原子操作；finalize 期间不得让其他 `contents: write` 主体修改 draft，PATCH 后校验失败应按发布事故处理，不能使用已公开的异常 Release。首包把 `NPM_AUTH_MODE` 设为 `bootstrap`，把 `NPM_BOOTSTRAP_GIT_SHA` 固定为已批准的 tag commit，并只给 publish step 提供短期 `NPM_TOKEN`。首包成功后立即撤销 token、删除 secret 与 bootstrap SHA，配置绑定本仓库、`.github/workflows/release.yml` 和 `npm-release` Environment 的 Trusted Publisher，再把模式切为 `oidc`。这些都是远程写操作，必须单独确认；普通安装者无需配置。
 
 ## 4. 配置用户和工作区白名单
 
@@ -86,10 +90,10 @@ pnpm dsh --profile web --dump-config
 应当同时看到以下四行：
 
 ```text
-feishu-gateway    dsh-feishu-bot/gateway
-feishu-bridge     dsh-feishu-bot/bridge
+feishu-gateway    @tingrudeng/dsh-feishu-bot/gateway
+feishu-bridge     @tingrudeng/dsh-feishu-bot/bridge
 invariants        @deepseek-ai/dsh-invariants
-feishu-invariant  dsh-feishu-bot/invariant
+feishu-invariant  @tingrudeng/dsh-feishu-bot/invariant
 ```
 
 然后启动：

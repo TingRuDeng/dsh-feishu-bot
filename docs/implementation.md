@@ -130,7 +130,13 @@ M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加
 
 同日用户在重启后的真实飞书客户端确认 `/ls` 两级 CardKit 验收通过，包括工作空间选择、真实标题选择、返回/分页和单会话直绑。该用户验收关闭 `/ls` 交互门禁，不扩展为重复事件、断连、进程中止、审批 fallback 或 HMR 故障矩阵证据。
 
-待完成：专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain）以及无本机 `link:` 的正式 tarball 门禁。未完成前不发布、不声明端到端 exactly-once。
+阶段 6.5 已补齐无本机 `link:` 的唯一正式 tarball、CycloneDX 1.7 SBOM、GitHub build/SBOM attestation、npm provenance 和 GitHub Prerelease/npm `next` 同产物发布链路；构建、attestation、GitHub draft、npm publish 与 Release finalize 分权且 fail closed。workflow 不使用会替换 pending run 的原生 concurrency；受保护 Environment 放行后按 `run_number` 等待全部更早 workflow 完成，并在 npm publish 前要求候选 RC 严格高于当前 `next`，同时拒绝 rerun 绕序。npm provenance 除 SLSA statement 自述外还用 Sigstore 证书约束 repository、signer workflow、source ref/SHA 与 hosted runner；远端 tag 在 draft 前后、npm 前和 finalize 前都会 peel 到 commit 并与 `GITHUB_SHA` 比对。当前证据仍仅为本地 preview 与 workflow 合同验证，尚未执行 tag-triggered 远程 run。
+
+剩余发布竞态：GitHub REST API 不能把 draft asset 的最终 GET 校验与 `draft: false` PATCH 合成一个条件事务；其他 `contents: write` 主体若恰在该窗口改写 asset，后置校验会让 workflow 失败，但异常 Prerelease 可能已经短暂公开或被 Immutable Releases 锁定。首次发布应限制 finalize 窗口内的写主体，并把任何 post-PATCH mismatch 当作事故，不把该 Release 或 npm RC 视为验收通过。
+
+阶段 6.5 当前本地证据：22 个测试文件、339/339；typecheck、release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口和干净 DSH Profile smoke 均通过，标准 build、YAML、26 个 workflow shell、actionlint 与 `git diff --check` 也通过。发布聚焦测试为 85/85，修复后独立 targeted review 未发现新的 P1/P2。不可发布 rc.5 为 650,211 bytes，SHA-256 `a718bdb9222f6ac3556d3d7076dd5c0a46aa20ea3d98fa7d1ee32589384a54dc`；`sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。该证据不代表远程 tag、GitHub Release/attestation 或 npm 发布已经发生。
+
+待完成：专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain），以及首次真实 tag 前的 tag rules/Immutable Releases、受保护 Environment bootstrap、Trusted Publisher 切换和双渠道下载/身份验收。未完成前不声明远程发布完成或端到端 exactly-once。
 
 ## 全局测试策略
 

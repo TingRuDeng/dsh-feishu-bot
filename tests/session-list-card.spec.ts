@@ -103,6 +103,21 @@ describe('session list CardKit 2.0 navigation', () => {
     expect(buttons(failed)).toEqual([])
   })
 
+  it('keeps dynamic status facts inert inside the Markdown template', () => {
+    const card = sessionCards.renderSessionListStatusCard('failed', {
+      ...sessionChoice(1),
+      title: 'Title\n[click](https://evil.example)',
+      workspace: 'repo_#1',
+    }, '1. fake\u2028- next `code` <admin> **bold**') as Card
+    const content = (card.body!.elements[0] as { content: string }).content
+
+    expect(content).toBe([
+      '**Title \\[click\\]\\(https://evil.example\\)**',
+      '工作区：repo\\_\\#1',
+      '1\\. fake \\- next ˋcodeˋ &lt;admin&gt; \\*\\*bold\\*\\*',
+    ].join('\n'))
+  })
+
   it('normalizes line breaks in user-derived button labels', () => {
     const card = sessionCards.renderSessionListCard({
       token: 'safe-token',
