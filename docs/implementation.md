@@ -136,9 +136,11 @@ M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加
 
 阶段 6.5 结束时的本地证据：22 个测试文件、339/339；typecheck、release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口和干净 DSH Profile smoke 均通过，标准 build、YAML、26 个 workflow shell、actionlint 与 `git diff --check` 也通过。发布聚焦测试为 85/85，修复后独立 targeted review 未发现新的 P1/P2。不可发布 rc.5 为 650,211 bytes，SHA-256 `a718bdb9222f6ac3556d3d7076dd5c0a46aa20ea3d98fa7d1ee32589384a54dc`；`sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。这是 rc.5 远程尝试前的历史本地证据。
 
-2026-08-16 阶段 6.6 远程事实：Action SHA enforcement、RC tag rules、Immutable Releases 和受保护的 `npm-release` Environment 已启用。rc.5 run `31949610430` 完成 build 与 attestation，并创建包含六个附件的 Draft Release `371332167`；随后因 GitHub 的 tag endpoint 不暴露未发布 Draft 而在 `stage_draft` 失败，npm package 未创建。rc.5 的 run、tag 与 Draft 作为审计事实保留，不重跑、不移动、不删除、不复用。rc.6 将 Draft 定位改为从分页 Release 列表精确、fail-closed 选择唯一 tag。
+2026-08-16 阶段 6.6 远程事实：Action SHA enforcement、RC tag rules、Immutable Releases 和受保护的 `npm-release` Environment 已启用。rc.5 run `31949610430` 完成 build 与 attestation，并创建包含六个附件的 Draft Release `371332167`；随后因 GitHub 的 tag endpoint 不暴露未发布 Draft 而在 `stage_draft` 失败，npm package 未创建。rc.5 的 run、tag 与 Draft 作为审计事实保留，不重跑、不移动、不删除、不复用。rc.6 将 Draft 定位改为从分页 Release 列表精确、fail-closed 选择唯一 tag；run `31950986283` 的 build、attestation 和 Draft `371339257` 六附件暂存均成功，但受保护 Environment 放行后，`publish_npm` 的 `contents: read` token 按 Release ID 复核 Draft 时返回 403，因此 npm publish、npm provenance 与 finalize 全部未执行。rc.6 的 run、tag、Draft 与附件同样保留。
 
-待完成：rc.6 的双渠道下载、摘要和 provenance 身份验收；首包成功后的 bootstrap 凭据撤销、Trusted Publisher 切换及新 RC 纯 OIDC 验证；以及专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain）。未完成前不声明远程发布完成或端到端 exactly-once。
+2026-08-17 阶段 6.7 当前源码：rc.7 候选保留 npm 前 Draft 即时、fail-closed 复核，并把 `publish_npm` 调整为 job 级 `actions: read`、`contents: write`、`id-token: write`。GitHub Actions 没有 step 级权限；SHA-pinned checkout 使用但不持久化 token，`GH_TOKEN` 只显式进入队列和 Draft/tag 复核，mutation 合同拒绝该 job 中的 GitHub REST/CLI 写操作与 Git push。发布聚焦测试 110/110、全量测试 22 个文件 356/356、typecheck、标准 build、YAML 解析、26 个 workflow shell block、actionlint v1.7.10、`git diff --check` 与敏感差异扫描均通过；独立供应链复核未发现新的 P1/P2。不可发布 Preview Gate 通过，rc.7 tarball 为 650,593 bytes，SHA-256 `e8bf34a14a8115632f4648d76aa7910ceabcbe64238713f212dad21ca8e23797`，`sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。rc.7 tag 尚未创建。
+
+待完成：经再次确认后的 rc.7 tag workflow、双渠道下载/摘要/provenance 身份验收；首包成功后的 bootstrap 凭据撤销、Trusted Publisher 切换及新 RC 纯 OIDC 验证；以及专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain）。未完成前不声明远程发布完成或端到端 exactly-once。
 
 ## 全局测试策略
 

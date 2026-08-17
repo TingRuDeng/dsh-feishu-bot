@@ -482,7 +482,7 @@ jobs:
     environment: npm-release
     permissions:
       actions: read
-      contents: read
+      contents: write
       id-token: write
     outputs:
       release_id: ${{ needs.stage_draft.outputs.release_id }}

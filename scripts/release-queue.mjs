@@ -30,6 +30,7 @@ export async function listReleaseWorkflowRuns({ repository, token, fetchImpl = f
     url.searchParams.set('per_page', String(pageSize))
     url.searchParams.set('page', String(page))
     const response = await fetchImpl(url, {
+      method: 'GET',
       headers: {
         accept: 'application/vnd.github+json',
         authorization: `Bearer ${token}`,

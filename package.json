@@ -1,7 +1,7 @@
 {
   "name": "@tingrudeng/dsh-feishu-bot",
   "description": "Feishu (Lark) private-chat frontend for DeepSeek Harness: drive, monitor, and approve local agents from Feishu, sharing sessions with the Web GUI",
-  "version": "0.1.0-rc.6",
+  "version": "0.1.0-rc.7",
   "license": "MIT",
   "keywords": [
     "dsh-plugin",

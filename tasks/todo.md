@@ -606,7 +606,7 @@
 - [x] npm publish 前重新读取 package metadata；已有 `next` 时只允许严格更高的 `x.y.z-rc.n`，拒绝乱序或回退 RC，并补纯函数与 workflow mutation 回归测试。正式 workflow rerun 同样被拒绝，防止旧 `run_number` 重入临界区。
 - [x] 补充从旧 unscoped `dsh-feishu-bot` 切换到 `@tingrudeng/dsh-feishu-bot@next` 的先 remove 后 add 步骤；披露 GitHub draft asset 校验与公开 PATCH 之间无法原子封闭的窄窗口。
 - [x] 用户已单独确认远程保护策略、首次真实 tag/bootstrap publish，以及失败后使用全新 rc.6 tag 继续；rc.5 的既有远程事实全部保留。
-- [ ] rc.6 发布后重新下载 npm tarball并核对 SHA-256/registry integrity，确认 `next` 指向新 RC 且 `latest` 不存在或保持原值；分别验证 npm provenance 证书身份与限定 repository、signer workflow、source ref 的 GitHub attestation。
+- [ ] 首个成功 RC 发布后重新下载 npm tarball并核对 SHA-256/registry integrity，确认 `next` 指向该 RC 且 `latest` 不存在或保持原值；分别验证 npm provenance 证书身份与限定 repository、signer workflow、source ref 的 GitHub attestation。
 
 验收标准：
 
@@ -647,9 +647,9 @@
 - [x] 让 `stage_draft` checkout 精确触发提交，通过分页 Release 列表选出 Draft ID，删除 Draft tag endpoint 查询。
 - [x] 递增源码和当前版本文档到 `0.1.0-rc.6`；`pnpm-lock.yaml` 不记录根包版本，无需改动，并保留 rc.5 历史证据。
 - [x] 执行发布聚焦测试、全量测试、typecheck、build、YAML、shell、actionlint、diff 与敏感信息检查。
-- [ ] 提交并推送 `master`，核对远端 SHA；同步 `NPM_BOOTSTRAP_GIT_SHA` 后创建并推送全新 annotated `v0.1.0-rc.6` tag。
-- [ ] 观察 rc.6 workflow 到终态，核对 GitHub Prerelease、六个附件、npm `next`、tarball 摘要及两侧 provenance；失败时保留所有远程事实并停止。
-- [ ] 首包成功后撤销 bootstrap token/secret，并转入 Trusted Publisher 与下一 RC 的纯 OIDC 验证。
+- [x] 提交并推送 `master`，核对远端 SHA；同步 `NPM_BOOTSTRAP_GIT_SHA` 后创建并推送全新 annotated `v0.1.0-rc.6` tag。commit 与 tag peel 均为 `755d2753b39d1f222ceadc1d75a88f7eeb60c527`。
+- [x] 观察 rc.6 workflow 到终态；run `31950986283` 在环境审批后进入 `publish_npm`，但 Draft 复核返回 403，npm publish 前置与发布步骤均跳过，`finalize_release` 未执行。六个 Draft 附件及既有 tag/run 均保留。
+- [ ] 首包成功后撤销 bootstrap token/secret，并转入 Trusted Publisher 与下一 RC 的纯 OIDC 验证；rc.6 未到达该门禁。
 
 阶段 6.6 本地验证记录（2026-08-16）：
 
@@ -659,6 +659,48 @@
 - workflow 的 Ruby YAML 解析、21 个 `run` block 的 `bash -n` 与 actionlint v1.7.10 均通过；`git diff --check` 通过。
 - 独立定向审查未发现 P0–P3：确认 `gh api --paginate --slurp` 的分页数组形状、唯一 tag fail-closed、精确 commit checkout、远端 tag 重验与 Release ID 下游链路。
 - 本机 pnpm 11.18.0 默认运行前检查因 workspace state 仍记录 rc.5 而试图重装依赖；lockfile 与已安装快照字节一致，故基础门禁直接使用现有锁定二进制，Preview Gate 使用明确的 `--use-existing-deps`，没有修改依赖或把该环境提示误报为代码失败。
+
+阶段 6.6 远程验证记录（2026-08-16）：
+
+- run `31950986283` 的 `build`、`build_attest`、`stage_draft` 成功，证明 rc.5 的 Draft tag endpoint 404 已关闭；`publish_npm` 在 `Reverify the staged draft before npm publication` 失败，错误为 `staged release lookup returned 403`，其后的 npm pin、registry preflight、publish、npm provenance 与 finalize 全部未执行。
+- rc.6 Draft Release ID `371339257` 仍为 `draft=true`、`prerelease=true`，包含六个附件；正式 tarball 为 650,327 bytes，SHA-256 `9a033346307f8e34b5ea77525ac7fccad170dc32ab776a7ae5077a366b354e4c`。`@tingrudeng/dsh-feishu-bot` 仍未出现在 npm registry。
+- rc.6 tag object 为 `d80d7db9a4088d55c7005ef15e6910131608c845`，peel 后与远端 `master` 均为 `755d2753b39d1f222ceadc1d75a88f7eeb60c527`。不得重跑 rc.6，不得移动或删除 tag，不得删除 Draft，不得复用该版本。
+- 根因是 GitHub Draft Release 仅对具有 push 能力的主体可见；`stage_draft` 的 `contents: write` token 能创建并读取 Draft，而 `publish_npm` 的 `contents: read` job token 按 Release ID 查询同一 Draft 返回 403。GitHub Actions 权限只支持 job 级声明，没有 step 级 `contents` 降权，也没有独立的 `releases: read` 权限。
+
+### 阶段 6.7：rc.6 Draft 复核权限修复与 rc.7 发布
+
+目标：保留 npm 发布前对 GitHub Draft 的即时、fail-closed 复核，采用不引入长期用户凭据的最小可行权限例外，并以全新 rc.7 继续首次双渠道发布。
+
+范围与决策门禁：
+
+- [x] 用户确认允许 `publish_npm` 整个 job 使用 `contents: write`。这是 GitHub job 级权限，不能表述为仅 Draft 复核 step 获得写权限；SHA-pinned checkout 仍会在拉取时使用 job token，`persist-credentials: false` 只阻止持久化，`GH_TOKEN` 环境变量则只显式传给受控的队列读取与 Draft/远端 tag 复核边界。
+- [x] 不采用删除 Draft 复核或只信任 `stage_draft` outputs 的方案：环境审批期间 Draft 可变，而 npm 版本发布不可覆盖，取消复核会破坏双渠道同产物契约。
+- [x] 不新增独立 Draft guard job：它会增加审批/等待与 guard-to-publish TOCTOU 窗口，最终仍需 `publish_npm` 自己复核 Draft，不能解决权限根因。
+- [x] rc.5、rc.6 的 run、tag、Draft、attestation 和附件继续作为审计事实保留；不得重跑、删除、移动或复用。实现授权不自动包含创建 rc.7 tag 或再次触发生产发布。
+
+实施步骤：
+
+- [x] 先更新 `tests/release-workflow.spec.ts` 的权限契约并取得 RED：要求 `publish_npm` 精确使用 `actions: read`、`contents: write`、`id-token: write`；同时拒绝该 job 出现 GitHub Release/tag/content 的 POST/PATCH/DELETE、`gh release create/edit/upload/delete`、Git push 等写操作，并约束 `GH_TOKEN` 的显式注入位置。RED 为 33 项中 1 项失败，精确报告当前 `contents: read` 权限不满足契约。
+- [x] 仅把 `.github/workflows/release.yml` 的 `publish_npm.permissions.contents` 改为 `write`；保留精确 commit checkout、Action SHA pin、`persist-credentials: false`、远端 tag peel、Draft ID/状态/tag/六附件摘要复核和全部 fail-closed 行为。GREEN 聚焦契约 33/33 通过。
+- [x] 递增源码与当前版本文档到全新 `0.1.0-rc.7`，保留 rc.5/rc.6 历史测试夹具与审计记录；同步修正文档中“npm job 只读”及 rc.6 尚待验收的过时表述。`pnpm-lock.yaml` 不记录根包版本，无需改动。
+- [x] 独立复核发现 queue step 会把同一 write-capable job token 交给 `scripts/release-queue.mjs`，而原测试未约束 HTTP method。补 RED 证明默认 GET 未被显式锁定，随后固定 `method: 'GET'`、断言无 request body，并把别名形式的 GitHub token 引用纳入 workflow mutation 契约。
+- [x] 执行发布聚焦测试、全量测试、typecheck、build、Preview Gate、YAML、所有 workflow shell block、actionlint、diff 与敏感信息检查，并进行一次独立供应链复核。
+- [ ] 本地门禁通过后提交并推送 `master`，核对远端 SHA，再单独更新 `NPM_BOOTSTRAP_GIT_SHA`。创建 rc.7 tag 前重新核对 Environment、Action SHA enforcement、RC tag rules、Immutable Releases，并再次取得精确生产目标确认。
+- [ ] 经确认后创建并推送全新 annotated `v0.1.0-rc.7` tag，观察 workflow 到终态；任一步失败时保留全部远程事实并停止，不重跑、不覆盖、不删除。
+- [ ] 首包成功后重新下载 GitHub/npm tarball并核对同一摘要、`next`/`latest`、GitHub attestation 与 npm provenance；随后撤销 bootstrap token/secret，配置 Trusted Publisher，并用更高的新 RC 验证纯 OIDC。
+
+验收与回滚：
+
+- 合同测试必须证明 `publish_npm` 仅声明必要的三项 job 权限，且虽拥有 `contents: write`，工作流中没有 GitHub 写请求或 Git push；npm 前 Draft 复核不能删除、跳过、fail-open 或移动到审批前。
+- rc.7 本地正式产物仍只构建一次；Preview Gate 必须明确 `publishable: false`。真实远程验收必须证明 Draft 复核不再 403，并且 npm 与 GitHub 两端最终引用同一 tarball。
+- 代码侧回滚仅撤销 `publish_npm` 的权限例外与相应契约；已经创建的 RC tag、Draft、attestation 或 npm 版本不自动清理，任何远程恢复动作仍需单独授权。
+
+阶段 6.7 本地 review：
+
+- TDD 权限契约先以 33 项中 1 项失败证明 `contents: read` 不满足 rc.7 设计，改为 job 级 `contents: write` 后 33/33 通过；独立复核发现 queue 请求 method 未被锁定，补充第二轮 RED 后固定为显式 GET 且无 body。最终发布聚焦测试 110/110，queue/workflow 定向测试 38/38。
+- 全量 `./node_modules/.bin/vitest run` 通过 22 个文件、356/356；`./node_modules/.bin/tsc --noEmit` 与 `npm run build` 均 exit 0，标准 build 生成 13 个文件。
+- `node scripts/release-preview.mjs --allow-dirty --use-existing-deps` exit 0；release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口和干净 DSH Profile smoke 全部通过。rc.7 tarball 为 650,593 bytes，SHA-256 `e8bf34a14a8115632f4648d76aa7910ceabcbe64238713f212dad21ca8e23797`，明确 `sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。
+- 两个 workflow YAML 均解析成功，26 个 `run` block 均通过 `bash -n`，actionlint v1.7.10、`git diff --check` 与高置信敏感差异扫描均通过；独立供应链复核确认原 token 写能力阻断已关闭，未发现新的 P1/P2。静态合同不能替代 rc.7 远程运行，Draft 403 是否真实关闭仍待单独授权的 tag workflow 验收。
 
 ## 文件级影响预估
 

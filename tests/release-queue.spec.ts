@@ -10,7 +10,12 @@ describe('release workflow queue', () => {
       [{ id: 10_001, run_number: 10, status: 'in_progress' }],
       [{ id: 10_001, run_number: 10, status: 'completed' }],
     ]
-    const requests: Array<{ url: string, authorization: string | null }> = []
+    const requests: Array<{
+      url: string
+      authorization: string | null
+      method: string | undefined
+      hasBody: boolean
+    }> = []
     let waits = 0
     const logs: string[] = []
 
@@ -26,6 +31,8 @@ describe('release workflow queue', () => {
         requests.push({
           url: String(input),
           authorization: headers.get('authorization'),
+          method: init?.method,
+          hasBody: init?.body !== undefined && init.body !== null,
         })
         return new Response(JSON.stringify({ workflow_runs: responses.shift() }), {
           status: 200,
@@ -42,7 +49,10 @@ describe('release workflow queue', () => {
     expect(requests[0]).toEqual({
       url: 'https://api.github.com/repos/TingRuDeng/dsh-feishu-bot/actions/workflows/release.yml/runs?event=push&per_page=100&page=1',
       authorization: 'Bearer synthetic-test-token',
+      method: 'GET',
+      hasBody: false,
     })
+    expect(requests.every(request => request.method === 'GET' && !request.hasBody)).toBe(true)
   })
 
   it('rejects an unexpected repository before sending the job token', async () => {

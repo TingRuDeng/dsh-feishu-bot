@@ -40,6 +40,11 @@ function namedStepBlock(source: string, name: string) {
   return source.slice(start, next < 0 ? source.length : start + marker.length + next)
 }
 
+function replaceInJob(source: string, jobName: string, searchValue: string, replaceValue: string) {
+  const block = jobBlock(source, jobName)
+  return source.replace(block, block.replace(searchValue, replaceValue))
+}
+
 function requireExactPermissions(block: string, permissions: string[]) {
   const match = block.match(/^    permissions:\n((?:      [a-z-]+: (?:read|write|none)\n)+)/mu)
   requireContract(match !== null, 'job permissions are missing')
@@ -88,7 +93,7 @@ function validateReleaseWorkflow(source: string) {
   requireExactPermissions(buildJob, ['contents: read'])
   requireExactPermissions(attestJob, ['attestations: write', 'contents: read', 'id-token: write'])
   requireExactPermissions(draftJob, ['contents: write'])
-  requireExactPermissions(publishJob, ['actions: read', 'contents: read', 'id-token: write'])
+  requireExactPermissions(publishJob, ['actions: read', 'contents: write', 'id-token: write'])
   requireExactPermissions(finalizeJob, ['contents: write'])
   for (const [name, block] of [
     ['attestation', attestJob],
@@ -165,6 +170,25 @@ function validateReleaseWorkflow(source: string) {
   requireContract(queueStep.includes('GH_TOKEN: ${{ github.token }}'), 'release queue must receive the job-scoped GitHub token')
   requireContract(queueStep.includes('CURRENT_RUN_NUMBER: ${{ github.run_number }}'), 'release queue must order by GitHub run number')
   requireContract(queueStep.includes('CURRENT_RUN_ATTEMPT: ${{ github.run_attempt }}'), 'release queue must reject partial workflow reruns')
+  const draftReverifyStep = namedStepBlock(publishJob, 'Reverify the staged draft before npm publication')
+  requireContract(
+    draftReverifyStep.includes('GH_TOKEN: ${{ github.token }}'),
+    'staged draft reverify must receive the job-scoped GitHub token',
+  )
+  requireContract(
+    (publishJob.match(/\$\{\{\s*(?:github\.token|secrets\.GITHUB_TOKEN)\s*\}\}/gu) ?? []).length === 2,
+    'npm job must expose its GitHub token only to the release queue and staged draft reverify',
+  )
+  for (const [name, pattern] of [
+    ['REST write method', /\bmethod:\s*['"](?:POST|PUT|PATCH|DELETE)['"]/iu],
+    ['HTTP write method', /(?:--method(?:=|\s+)|-X(?:=|\s*)|--request(?:=|\s+))(?:POST|PUT|PATCH|DELETE)\b/iu],
+    ['gh api implicit write field', /(?:^|\s)(?:-f|--raw-field|-F|--field|--input)(?:=|\s)/u],
+    ['gh release write command', /\bgh\s+release\s+(?:create|edit|upload|delete)\b/iu],
+    ['curl command', /\bcurl\b/iu],
+    ['Git write command', /\bgit\s+(?:push|update-ref)\b/iu],
+  ] as const) {
+    requireContract(!pattern.test(publishJob), `npm job contains forbidden ${name}`)
+  }
   requireContract(
     publishJob.indexOf('Wait for earlier RC workflows') < publishJob.indexOf('Verify payload and registry preconditions'),
     'release queue must complete before registry preflight',
@@ -256,8 +280,32 @@ describe('release workflow contract', () => {
     ['lossy native release concurrency', (source: string) => source.replace('permissions: {}', 'permissions: {}\n\nconcurrency:\n  group: dsh-feishu-bot-release\n  cancel-in-progress: false')],
     ['privileged rerun guard removed', (source: string) => source.replace('      - name: Reject release workflow reruns', '      - name: Allow release workflow reruns')],
     ['build OIDC authority', (source: string) => source.replace('  build:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read', '  build:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n      id-token: write')],
+    ['npm draft visibility permission removed', (source: string) => source.replace(
+      '  publish_npm:\n    needs: stage_draft\n    runs-on: ubuntu-latest\n    environment: npm-release\n    permissions:\n      actions: read\n      contents: write',
+      '  publish_npm:\n    needs: stage_draft\n    runs-on: ubuntu-latest\n    environment: npm-release\n    permissions:\n      actions: read\n      contents: read',
+    )],
     ['bootstrap without commit pin', (source: string) => source.replace('NPM_BOOTSTRAP_GIT_SHA', 'UNPINNED_BOOTSTRAP_SHA')],
     ['missing durable release queue', (source: string) => source.replace('node release-source/scripts/release-queue.mjs', 'echo queue-disabled')],
+    ['extra npm job GitHub token exposure', (source: string) => source.replace(
+      '      - name: Pin npm\n        run:',
+      '      - name: Pin npm\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run:',
+    )],
+    ['aliased npm job GitHub token exposure', (source: string) => source.replace(
+      '      - name: Pin npm\n        run:',
+      '      - name: Pin npm\n        env:\n          TOKEN: ${{ secrets.GITHUB_TOKEN }}\n        run:',
+    )],
+    ['npm job REST write', (source: string) => source.replace(
+      '          if (!response.ok) throw new Error(`staged release lookup returned ${response.status}`)',
+      "          await fetch('https://api.github.com/write', { method: 'PATCH' })\n          if (!response.ok) throw new Error(`staged release lookup returned ${response.status}`)",
+    )],
+    ['npm job release write', (source: string) => source.replace(
+      '          verify_release_tag\n          node --input-type=module',
+      '          verify_release_tag\n          gh release edit "$TAG" --draft=false\n          node --input-type=module',
+    )],
+    ['npm job implicit gh api write', (source: string) => replaceInJob(source, 'publish_npm',
+      'gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \\',
+      'gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" -f force=true \\',
+    )],
     ['draft tag endpoint lookup', (source: string) => source.replace(
       'repos/$GITHUB_REPOSITORY/releases?per_page=100',
       'repos/$GITHUB_REPOSITORY/releases/tags/$TAG',
@@ -283,6 +331,8 @@ describe('release workflow contract', () => {
       'run: npm publish "$TGZ" --tag next --access public --provenance',
     )],
   ])('rejects %s regression', (_name, mutate) => {
-    expect(() => validateReleaseWorkflow(mutate(releaseWorkflow))).toThrow()
+    const mutated = mutate(releaseWorkflow)
+    expect(mutated).not.toBe(releaseWorkflow)
+    expect(() => validateReleaseWorkflow(mutated)).toThrow()
   })
 })
