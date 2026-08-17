@@ -1,5 +1,6 @@
 import { access } from 'node:fs/promises'
 import { isAbsolute, resolve, sep } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 export const RELEASE_PACKAGE_NAME = '@tingrudeng/dsh-feishu-bot'
 export const RELEASE_REPOSITORY = 'TingRuDeng/dsh-feishu-bot'
@@ -77,8 +78,8 @@ export function assertReleaseManifest(manifest) {
   ) {
     throw new Error(`unexpected release repository: ${String(manifest.repository?.url)}`)
   }
-  if (manifest.publishConfig?.tag !== 'next') {
-    throw new Error('publishConfig.tag must be next')
+  if (manifest.publishConfig?.tag !== 'latest') {
+    throw new Error('publishConfig.tag must be latest')
   }
   if (manifest.publishConfig?.access !== 'public') {
     throw new Error('publishConfig.access must be public')
@@ -190,7 +191,7 @@ export function selectStagedDraftRelease(pages, tag) {
 
 function parseReleaseCandidate(version, label) {
   const match = typeof version === 'string' ? releaseCandidateParts.exec(version) : null
-  if (match === null) throw new Error(`npm next ${label} must be an x.y.z-rc.n version: ${String(version)}`)
+  if (match === null) throw new Error(`npm latest ${label} must be an x.y.z-rc.n version: ${String(version)}`)
   return match.slice(1)
 }
 
@@ -200,16 +201,58 @@ function compareNumericIdentifier(left, right) {
   return left < right ? -1 : 1
 }
 
-export function assertNpmNextAdvances(name, candidateVersion, currentNext) {
+export function assertNpmLatestAdvances(name, candidateVersion, currentLatest) {
   const candidate = parseReleaseCandidate(candidateVersion, 'candidate')
-  if (currentNext === undefined) return
-  const current = parseReleaseCandidate(currentNext, 'value')
+  if (currentLatest === undefined) return
+  const current = parseReleaseCandidate(currentLatest, 'value')
   for (let index = 0; index < candidate.length; index += 1) {
     const order = compareNumericIdentifier(candidate[index], current[index])
     if (order > 0) return
     if (order < 0) break
   }
-  throw new Error(`npm next for ${name} must advance beyond ${currentNext}; candidate is ${candidateVersion}`)
+  throw new Error(`npm latest for ${name} must advance beyond ${currentLatest}; candidate is ${candidateVersion}`)
+}
+
+export async function fetchNpmJsonWithRetry({
+  url,
+  label,
+  isReady = () => true,
+  fetchImpl = globalThis.fetch,
+  wait = () => delay(5_000),
+  attempts = 6,
+}) {
+  if (
+    typeof url !== 'string'
+    || url === ''
+    || typeof label !== 'string'
+    || label === ''
+    || typeof isReady !== 'function'
+    || typeof fetchImpl !== 'function'
+    || typeof wait !== 'function'
+    || !Number.isSafeInteger(attempts)
+    || attempts <= 0
+  ) {
+    throw new Error('npm registry retry options are invalid')
+  }
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const response = await fetchImpl(url, {
+      cache: 'no-store',
+      headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+    })
+    if (response?.ok === true) {
+      const metadata = await response.json()
+      if (isReady(metadata)) return metadata
+      if (attempt === attempts) {
+        throw new Error(`${label} did not become ready after ${attempts} attempts`)
+      }
+    } else if (response?.status !== 404 || attempt === attempts) {
+      throw new Error(`${label} returned ${String(response?.status)}`)
+    }
+    await wait()
+  }
+
+  throw new Error(`${label} retry loop terminated unexpectedly`)
 }
 
 export function findBlockingReleaseRuns(runs, currentRunNumber) {

@@ -702,6 +702,56 @@
 - `node scripts/release-preview.mjs --allow-dirty --use-existing-deps` exit 0；release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口和干净 DSH Profile smoke 全部通过。rc.7 tarball 为 650,593 bytes，SHA-256 `e8bf34a14a8115632f4648d76aa7910ceabcbe64238713f212dad21ca8e23797`，明确 `sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。
 - 两个 workflow YAML 均解析成功，26 个 `run` block 均通过 `bash -n`，actionlint v1.7.10、`git diff --check` 与高置信敏感差异扫描均通过；独立供应链复核确认原 token 写能力阻断已关闭，未发现新的 P1/P2。静态合同不能替代 rc.7 远程运行，Draft 403 是否真实关闭仍待单独授权的 tag workflow 验收。
 
+阶段 6.7 远程验收补记（2026-08-17）：
+
+- rc.7 源码提交 `20b7cad9cef9da9e419c25ffeb3f58c9fb8f8d72` 与 annotated tag `v0.1.0-rc.7` 已推送；tag object 为 `0be3b7ae92cd2163f95d8c512249eeff17c71771`，peel 后精确指向该提交。
+- workflow run `31989507142` 的 build、双 attestation 与 Draft 暂存成功；环境审批后 npm publish 成功，但发布后根 packument 单次查询在首次包传播窗口返回 404，导致 run 失败并正确跳过 finalize。不得重跑、移动或删除 rc.7 tag，不得删除 Draft 或复用 npm 版本。
+- `@tingrudeng/dsh-feishu-bot@0.1.0-rc.7` 已公开存在；npm 与 Draft tarball 字节一致，SHA-256 为 `e0c4f8d99261f743338a98e49dfbf114c764201fdf179210c174df7a2e6a182d`。GitHub build/SBOM attestation、npm provenance、registry integrity 与六个 Draft 附件均已独立验证。
+- npm 首包即使使用 `--tag next` 仍同时创建 `latest`；用户随后确认不再维护 `next`，后续 RC 仅发布到 `latest`，并授权删除现有 `next` dist-tag。该决策取代阶段 6.5 的 next-only 发布边界。
+
+### 阶段 6.8：rc.7 registry 传播修复与 rc.8 latest-only 发布
+
+目标：保留 rc.7 的失败 run、tag、Draft、attestation 与已发布 npm 版本作为审计事实，修复根 packument 传播窗口，将唯一 npm 发布通道收敛为 `latest`，并以全新 rc.8 验证无长期 token 的 Trusted Publishing OIDC 链路。
+
+范围与已确认决策：
+
+- [x] 用户确认后续仅发布 `latest`，不再发布、同步或在安装文档中推荐 `next`。
+- [x] 用户授权删除当前 `@tingrudeng/dsh-feishu-bot` 的 `next` dist-tag；只删除标签，不删除 rc.7 包。执行前后必须只读核对 dist-tags，若本机无 npm 认证则通过一次性交互认证完成，不把凭据写入仓库、日志或长期配置。
+- [x] rc.7 的 npm 包、GitHub Draft、tag、workflow run 与 attestation 不执行删除、覆盖、重跑或手工 finalize；修复后只使用更高的 rc.8。
+- [x] Trusted Publisher、GitHub Environment 模式切换、bootstrap secret/token 撤销、提交推送和 rc.8 tag 仍是独立远程写操作；按既定顺序逐项验收，不因本阶段代码授权自动扩大范围。
+
+实施步骤：
+
+- [x] 先用 RED 测试要求 release manifest 与 bootstrap/OIDC 两分支只发布 `latest`，严格拒绝 `next` 和额外 `npm dist-tag` 写操作；把 RC 单调性门禁从当前 `next` 改为当前 `latest`。
+- [x] 为 npm JSON 元数据传播增加可执行 retry 单元测试：404 与已返回但尚未满足 ready 条件时重试，非 404 立即失败，耗尽次数后保留真实失败语义。
+- [x] 在 `scripts/release-preview-lib.mjs` 实现最小 retry helper；workflow 的 version endpoint 与根 packument 共用该 helper，均使用 no-store 请求并等待 provenance/`latest` 达到当前版本。
+- [x] 将正式 manifest、bootstrap/OIDC publish 与发布后验收统一切换为 `latest`；删除 `LATEST_BEFORE` 与 next-only 合同，不引入第二次 publish 或长期 token 驱动的 dist-tag 修改。
+- [x] 递增源码和当前版本文档到 `0.1.0-rc.8`，把安装说明改为默认 tag 或显式 `@latest`；保留 rc.5-rc.7 历史事实和失败恢复边界。
+- [x] 执行聚焦 RED/GREEN、全量测试、typecheck、build、Preview Gate、workflow YAML、全部 shell block、actionlint、diff、敏感信息与独立发布门禁复核。
+- [x] 使用一次性交互 npm 认证删除远端 `next` 并立即核对只剩 `latest=0.1.0-rc.7`；不打印或持久化凭据。
+- [x] 经单独确认后配置 Trusted Publisher，切换 `NPM_AUTH_MODE=oidc`，删除 GitHub bootstrap secret/SHA，撤销 npm bootstrap token，并把 Publishing access 收紧为禁止 bypass 2FA token。
+- [ ] 用全新 rc.8 完成真实 OIDC 与 latest-only 验收。
+
+验收与回滚：
+
+- 发布合同必须证明唯一 tarball 只经互斥的 bootstrap/OIDC 分支发布一次，命令显式使用 `--tag latest`，workflow 不包含 `next` 发布或额外 dist-tag 写入。
+- version endpoint 与根 packument 的短暂 404、provenance 尚未可见、`latest` 尚未指向当前版本都会在有界窗口内重试；非 404 HTTP 错误、摘要不一致、标签错误或重试耗尽仍 fail closed。
+- 真实 rc.8 只有在 npm `latest`、registry tarball、npm provenance、GitHub attestation 与 Draft 六附件全部一致时才公开 GitHub Prerelease；`next` 不存在。
+- 代码回滚只能用于后续新 RC；已经发布的 npm 版本、tag、Draft 和 attestation 不覆盖、不复用、不自动清理。删除或恢复 dist-tag、撤销或重建 Trusted Publisher 均需再次授权。
+
+阶段 6.8 本地与 dist-tag 验证记录（2026-08-17）：
+
+- RED 聚焦发布合同为 104 项中 60 通过、44 按预期失败；GREEN 后 `tests/release.spec.ts` 与 `tests/release-workflow.spec.ts` 为 104/104。全量 Vitest 为 22 个文件、361/361；`tsc --noEmit` 与普通 build 均 exit 0。
+- 全量初次运行暴露一个既有 Bridge 测试观察窗口：durable admission 只等待 `received`，原用例却在 Agent 可见后、chat FIFO 写入 `committed` 前立即断言终态。生产源码未改；把最终 inbound 状态纳入同一个 `vi.waitFor` 后，聚焦用例与两次全量门禁均通过。
+- `node scripts/release-preview.mjs --allow-dirty --use-existing-deps` exit 0；release build、唯一 pack、CycloneDX 1.7 SBOM、隔离安装、四入口和干净 DSH Profile smoke 全部通过。rc.8 tarball 为 650,608 bytes，SHA-256 `a745efc70dda05698a73637eed7b05740a8c7f9219aa45d11515065efb08968d`，明确 `sourceClean: false`、`dshConfigSmoke: true`、`publishable: false`。
+- 两个 workflow YAML 均解析成功，26 个 `run` block 均通过 `bash -n`；actionlint v1.7.10、`git diff --check` 与高置信敏感差异扫描通过。独立发布门禁复核未发现阻止本地交付的问题；真实 OIDC、GitHub finalize 与两端同产物仍须 rc.8 远程运行证明。
+- 删除前公开 npm dist-tags 为 `latest=0.1.0-rc.7`、`next=0.1.0-rc.7`。经一次性登录和写操作级 WebAuth 后，`npm dist-tag rm` exit 0；npm CLI 与 no-store registry 查询均只返回 `latest=0.1.0-rc.7`。随后 `npm logout` exit 0，`npm whoami` 返回 `ENEEDAUTH`，临时 npmrc 与专用缓存目录均已删除。
+- npm 包设置已重新读取确认 Trusted Publisher 精确绑定 `TingRuDeng/dsh-feishu-bot`、`release.yml`、`npm-release`，权限仅为 `npm publish`；Publishing access 已选中最严格的禁止 bypass 2FA token 模式。
+- GitHub API 复核 `npm-release` Environment 仅保留 `NPM_AUTH_MODE=oidc`，Environment secrets 为 0，bootstrap commit 变量与 token secret 均不存在。npm Access Tokens 列表刷新后项目 bootstrap token 已不存在，另外两个既有过期 token 保持不变。
+- 使用项目专用临时 npm cache 再次公开查询，dist-tags 仍仅为 `latest=0.1.0-rc.7`。rc.8 尚未提交、推送、创建 tag 或触发 workflow，纯 OIDC 发布仍待真实远程验收。
+- 提交前新鲜门禁再次通过：发布合同 104/104、全量 Vitest 22 个文件 361/361、typecheck、标准 build、Preview Gate、2 个 workflow YAML、26 个 shell block、actionlint v1.7.10、diff 与敏感信息扫描均 exit 0；Preview Gate 产物大小和 SHA-256 与上次一致。pnpm 因 workspace 状态仍记录旧 RC 版本而尝试重装依赖，本轮未修改依赖树，改用 Preview Gate 同样调用的本地固定二进制完成验证，lockfile 与 workspace 配置保持不变。
+- 提交前 review-gate 结论为通过：未发现 `next` 发布、额外 dist-tag 写入、OIDC token 残留、fail-open 或范围外改动。公开 registry 确认 `latest=0.1.0-rc.7`、`next` 不存在且 rc.8 尚未占用；剩余风险仅为真实 rc.8 OIDC 发布、两端同产物和 GitHub finalize 尚未执行。
+
 ## 文件级影响预估
 
 | 文件/模块 | 计划改动 |

@@ -122,13 +122,13 @@ function validateReleaseWorkflow(source: string) {
   requireContract(!/\b(?:npm|pnpm)\s+pack\b/u.test(source), 'release workflow must not create a second tarball')
   requireContract(!source.includes('*.tgz'), 'release workflow must use the descriptor tarball, not a glob')
 
-  const publishCommands = source.match(/npm publish "\$TGZ" --tag next --access public --provenance/gu) ?? []
-  requireContract(publishCommands.length === 2, 'bootstrap and OIDC must each publish the descriptor tarball to next')
+  const publishCommands = source.match(/npm publish "\$TGZ" --tag latest --access public --provenance/gu) ?? []
+  requireContract(publishCommands.length === 2, 'bootstrap and OIDC must each publish the descriptor tarball to latest')
   const allPublishCommands = source.match(/^[ \t]+(?:run:[ \t]+)?(?:env[^\n]*[ \t]+)?npm publish\b[^\n]*$/gmu) ?? []
   requireContract(allPublishCommands.length === 2, 'release workflow must have exactly two mutually exclusive publish commands')
   requireContract(
-    !/(?:--tag(?:=|\s+)latest\b|npm\s+dist-tag\b[^\n]*\blatest\b|npm\s+config\s+set\s+tag\s+latest\b)/iu.test(source),
-    'release workflow must not move latest',
+    !/(?:--tag(?:=|\s+)next\b|npm\s+dist-tag\b|npm\s+config\s+set\s+tag\s+next\b)/iu.test(source),
+    'release workflow must publish only to latest without separate dist-tag writes',
   )
   requireContract(!/npm publish\s+(?:\.|\.\/|"?\$ARTIFACT_DIR)/u.test(source), 'release workflow must not publish a directory')
   requireContract(source.includes("vars.NPM_AUTH_MODE == 'bootstrap'"), 'bootstrap publish branch is missing')
@@ -136,7 +136,7 @@ function validateReleaseWorkflow(source: string) {
   requireContract(source.includes('NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}'), 'bootstrap token must be scoped to its publish step')
   requireContract((source.match(/\$\{\{ secrets\./gu) ?? []).length === 1, 'bootstrap token must be the only workflow secret')
   requireContract(
-    publishJob.includes('run: env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$TGZ" --tag next --access public --provenance'),
+    publishJob.includes('run: env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$TGZ" --tag latest --access public --provenance'),
     'OIDC publish must remove token variables',
   )
   requireContract(
@@ -193,11 +193,19 @@ function validateReleaseWorkflow(source: string) {
     publishJob.indexOf('Wait for earlier RC workflows') < publishJob.indexOf('Verify payload and registry preconditions'),
     'release queue must complete before registry preflight',
   )
-  requireContract(publishJob.includes('assertNpmNextAdvances('), 'npm preflight must reject a non-increasing next tag')
+  requireContract(publishJob.includes('assertNpmLatestAdvances('), 'npm preflight must reject a non-increasing latest tag')
   const registryPreflightStep = namedStepBlock(publishJob, 'Verify payload and registry preconditions')
   const registryVerificationStep = namedStepBlock(publishJob, 'Verify the published registry tarball and dist-tags')
-  requireContract(registryPreflightStep.includes("cache: 'no-store'"), 'npm next preflight must bypass stale registry caches')
-  requireContract(registryVerificationStep.includes("cache: 'no-store'"), 'npm post-publish verification must bypass stale registry caches')
+  requireContract(registryPreflightStep.includes("cache: 'no-store'"), 'npm latest preflight must bypass stale registry caches')
+  requireContract(registryVerificationStep.includes('fetchNpmJsonWithRetry'), 'npm post-publish verification must use the tested registry retry boundary')
+  requireContract(
+    (registryVerificationStep.match(/fetchNpmJsonWithRetry\(\{/gu) ?? []).length === 2,
+    'npm post-publish verification must retry both version metadata and the root packument',
+  )
+  requireContract(
+    registryVerificationStep.includes("metadata['dist-tags']?.latest === process.env.VERSION"),
+    'npm post-publish verification must wait for latest to reach the published version',
+  )
   requireContract(publishJob.includes('staged draft changed before npm publish'), 'npm job must reverify the staged release id before publishing')
   for (const [name, block] of [
     ['draft', draftJob],
@@ -272,8 +280,8 @@ describe('release workflow contract', () => {
   it.each([
     ['movable Action tag', (source: string) => source.replace(/actions\/checkout@[0-9a-f]{40}/u, 'actions/checkout@v4')],
     ['second pack', (source: string) => source.replace('pnpm release:formal', 'pnpm release:formal\n          npm pack')],
-    ['latest dist-tag', (source: string) => source.replace('--tag next', '--tag latest')],
-    ['latest equals syntax', (source: string) => source.replace('--tag next', '--tag=latest')],
+    ['next dist-tag', (source: string) => source.replace('--tag latest', '--tag next')],
+    ['next equals syntax', (source: string) => source.replace('--tag latest', '--tag=next')],
     ['directory publish', (source: string) => source.replace('npm publish "$TGZ"', 'npm publish .')],
     ['extra publish', (source: string) => source.replace('npm publish "$TGZ"', 'npm publish "$TGZ"\n          npm publish "$TGZ"')],
     ['branch trigger', (source: string) => source.replace("tags:\n      - 'v*-rc.*'", "branches:\n      - master")],
@@ -314,8 +322,12 @@ describe('release workflow contract', () => {
       'selectStagedDraftRelease(pages, process.env.TAG)',
       'pages.flat()[0]',
     )],
-    ['missing npm next monotonicity guard', (source: string) => source.replace('assertNpmNextAdvances(', 'allowNpmNextRegression(')],
-    ['stale npm next preflight', (source: string) => source.replace("cache: 'no-store'", "cache: 'default'")],
+    ['missing npm latest monotonicity guard', (source: string) => source.replace('assertNpmLatestAdvances(', 'allowNpmLatestRegression(')],
+    ['stale npm latest preflight', (source: string) => source.replace("cache: 'no-store'", "cache: 'default'")],
+    ['missing root packument retry', (source: string) => source.replace(
+      "const packageMetadata = await fetchNpmJsonWithRetry({",
+      "const packageMetadata = await fetchNpmJsonWithoutRetry({",
+    )],
     ['staged draft not reverified', (source: string) => source.replace('staged draft changed before npm publish', 'unchecked draft')],
     ['missing GitHub attestation verification', (source: string) => source.replace('gh attestation verify', 'gh attestation inspect')],
     ['missing npm provenance verification', (source: string) => source.replace('npm audit signatures --json --include-attestations', 'npm view')],
@@ -327,8 +339,8 @@ describe('release workflow contract', () => {
     ['expression always', (source: string) => source.replace('      - name: Publish the verified GitHub prerelease', '      - name: Publish the verified GitHub prerelease\n        if: ${{ always() }}')],
     ['extra privileged job', (source: string) => `${source}\n  early_finalize:\n    needs: stage_draft\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: gh release edit "$GITHUB_REF_NAME" --draft=false\n`],
     ['OIDC token retention', (source: string) => source.replace(
-      'run: env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$TGZ" --tag next --access public --provenance',
-      'run: npm publish "$TGZ" --tag next --access public --provenance',
+      'run: env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$TGZ" --tag latest --access public --provenance',
+      'run: npm publish "$TGZ" --tag latest --access public --provenance',
     )],
   ])('rejects %s regression', (_name, mutate) => {
     const mutated = mutate(releaseWorkflow)

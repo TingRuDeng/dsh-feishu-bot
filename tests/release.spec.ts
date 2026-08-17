@@ -20,7 +20,7 @@ const sourceManifest = {
   publishConfig: {
     access: 'public',
     registry: 'https://registry.npmjs.org/',
-    tag: 'next',
+    tag: 'latest',
     provenance: true,
   },
   type: 'module',
@@ -129,7 +129,7 @@ describe('preview release manifest', () => {
     ['malformed prerelease', { version: 'release-candidate' }, /valid semantic prerelease/u],
     ['non-RC prerelease', { version: '0.1.0-beta.1' }, /must use an rc identifier/u],
     ['wrong repository', { repository: { type: 'git', url: 'https://example.invalid/repo.git' } }, /unexpected release repository/u],
-    ['latest publish tag', { publishConfig: { ...sourceManifest.publishConfig, tag: 'latest' } }, /publishConfig\.tag must be next/u],
+    ['next publish tag', { publishConfig: { ...sourceManifest.publishConfig, tag: 'next' } }, /publishConfig\.tag must be latest/u],
     ['private package access', { publishConfig: { ...sourceManifest.publishConfig, access: 'restricted' } }, /publishConfig\.access must be public/u],
     ['alternate registry', { publishConfig: { ...sourceManifest.publishConfig, registry: 'https://registry.example.invalid/' } }, /public npm registry/u],
     ['disabled provenance', { publishConfig: { ...sourceManifest.publishConfig, provenance: false } }, /publishConfig\.provenance must be true/u],
@@ -360,11 +360,11 @@ describe('preview release manifest', () => {
     ['0.1.0-rc.4', '0.1.0-rc.5'],
     ['0.1.99-rc.999', '0.2.0-rc.0'],
     ['0.1.0-rc.99999999999999999998', '0.1.0-rc.99999999999999999999'],
-  ])('allows npm next %s to advance to %s', (currentNext, candidate) => {
-    expect(() => releaseModule.assertNpmNextAdvances(
+  ])('allows npm latest %s to advance to %s', (currentLatest, candidate) => {
+    expect(() => releaseModule.assertNpmLatestAdvances(
       sourceManifest.name,
       candidate,
-      currentNext,
+      currentLatest,
     )).not.toThrow()
   })
 
@@ -373,12 +373,92 @@ describe('preview release manifest', () => {
     ['0.1.0-rc.6', '0.1.0-rc.5'],
     ['0.2.0-rc.0', '0.1.99-rc.999'],
     ['0.1.0-beta.1', '0.1.0-rc.5'],
-  ])('rejects npm next %s moving to %s', (currentNext, candidate) => {
-    expect(() => releaseModule.assertNpmNextAdvances(
+  ])('rejects npm latest %s moving to %s', (currentLatest, candidate) => {
+    expect(() => releaseModule.assertNpmLatestAdvances(
       sourceManifest.name,
       candidate,
-      currentNext,
-    )).toThrow(/npm next/u)
+      currentLatest,
+    )).toThrow(/npm latest/u)
+  })
+
+  it('retries a transient npm registry 404 before returning ready JSON', async () => {
+    const responses = [
+      new Response('not found', { status: 404 }),
+      Response.json({ 'dist-tags': { latest: '0.1.0-rc.8' } }),
+    ]
+    let waits = 0
+    let requestOptions
+
+    const result = await releaseModule.fetchNpmJsonWithRetry({
+      url: 'https://registry.npmjs.org/%40tingrudeng%2Fdsh-feishu-bot',
+      label: 'npm package verification',
+      fetchImpl: async (_url, options) => {
+        requestOptions = options
+        return responses.shift()
+      },
+      wait: async () => { waits += 1 },
+      isReady: metadata => metadata['dist-tags']?.latest === '0.1.0-rc.8',
+    })
+
+    expect(result).toEqual({ 'dist-tags': { latest: '0.1.0-rc.8' } })
+    expect(waits).toBe(1)
+    expect(requestOptions).toEqual({
+      cache: 'no-store',
+      headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+    })
+  })
+
+  it('retries successful npm JSON until its required metadata is ready', async () => {
+    const responses = [
+      Response.json({ dist: {} }),
+      Response.json({ dist: { attestations: { provenance: { predicateType: 'https://slsa.dev/provenance/v1' } } } }),
+    ]
+    let waits = 0
+
+    const result = await releaseModule.fetchNpmJsonWithRetry({
+      url: 'https://registry.npmjs.org/%40tingrudeng%2Fdsh-feishu-bot/0.1.0-rc.8',
+      label: 'npm version verification',
+      fetchImpl: async () => responses.shift(),
+      wait: async () => { waits += 1 },
+      isReady: metadata => metadata.dist?.attestations?.provenance?.predicateType === 'https://slsa.dev/provenance/v1',
+    })
+
+    expect(result.dist.attestations.provenance.predicateType).toBe('https://slsa.dev/provenance/v1')
+    expect(waits).toBe(1)
+  })
+
+  it('fails immediately on a non-retryable npm registry status', async () => {
+    let requests = 0
+
+    await expect(releaseModule.fetchNpmJsonWithRetry({
+      url: 'https://registry.npmjs.org/%40tingrudeng%2Fdsh-feishu-bot',
+      label: 'npm package verification',
+      fetchImpl: async () => {
+        requests += 1
+        return new Response('unavailable', { status: 503 })
+      },
+      wait: async () => undefined,
+    })).rejects.toThrow(/npm package verification returned 503/u)
+    expect(requests).toBe(1)
+  })
+
+  it('fails closed when npm registry metadata never becomes ready', async () => {
+    let requests = 0
+    let waits = 0
+
+    await expect(releaseModule.fetchNpmJsonWithRetry({
+      url: 'https://registry.npmjs.org/%40tingrudeng%2Fdsh-feishu-bot',
+      label: 'npm package verification',
+      attempts: 3,
+      fetchImpl: async () => {
+        requests += 1
+        return Response.json({ 'dist-tags': { latest: '0.1.0-rc.7' } })
+      },
+      wait: async () => { waits += 1 },
+      isReady: metadata => metadata['dist-tags']?.latest === '0.1.0-rc.8',
+    })).rejects.toThrow(/npm package verification did not become ready after 3 attempts/u)
+    expect(requests).toBe(3)
+    expect(waits).toBe(2)
   })
 
   it('orders each release behind every earlier incomplete workflow run', async () => {

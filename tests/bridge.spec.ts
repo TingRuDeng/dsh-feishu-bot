@@ -1842,13 +1842,13 @@ describe('assembled bridge (M1 acceptance)', () => {
           status: 'active',
         })
         expect(second.ctx.agents.get(coldSessionId as never)).toBeDefined()
+        expect(second.ctx.storageDomain.get('feishu_bot')!.table('inbound_events')
+          .get('om_cross_chat_first')).toMatchObject({
+          status: 'rejected', reason: 'binding-write-failed',
+        })
+        expect(second.ctx.storageDomain.get('feishu_bot')!.table('inbound_events')
+          .get('om_cross_chat_second')).toMatchObject({ status: 'committed' })
       }, { timeout: 3_000, interval: 20 })
-      expect(second.ctx.storageDomain.get('feishu_bot')!.table('inbound_events')
-        .get('om_cross_chat_first')).toMatchObject({
-        status: 'rejected', reason: 'binding-write-failed',
-      })
-      expect(second.ctx.storageDomain.get('feishu_bot')!.table('inbound_events')
-        .get('om_cross_chat_second')).toMatchObject({ status: 'committed' })
     } finally {
       releaseFirstPut?.()
     }

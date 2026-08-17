@@ -615,12 +615,12 @@ jobs:
           RELEASE_SOURCE_DIR: ${{ github.workspace }}/release-source
         run: |
           node --input-type=module <<'NODE'
-          import { appendFileSync, readFileSync } from 'node:fs'
+          import { readFileSync } from 'node:fs'
           import { createHash } from 'node:crypto'
           import { join } from 'node:path'
           import { pathToFileURL } from 'node:url'
 
-          const { assertNpmNextAdvances } = await import(pathToFileURL(
+          const { assertNpmLatestAdvances } = await import(pathToFileURL(
             join(process.env.RELEASE_SOURCE_DIR, 'scripts/release-preview-lib.mjs'),
           ).href)
 
@@ -638,7 +638,6 @@ jobs:
             cache: 'no-store',
             headers: { accept: 'application/json', 'cache-control': 'no-cache' },
           })
-          let latest = '__absent__'
           if (process.env.NPM_AUTH_MODE === 'bootstrap') {
             if (!/^[a-f0-9]{40}$/u.test(process.env.BOOTSTRAP_GIT_SHA ?? '')) {
               throw new Error('NPM_BOOTSTRAP_GIT_SHA must pin the authorized bootstrap commit')
@@ -654,14 +653,12 @@ jobs:
             if (metadata.versions?.[process.env.VERSION] !== undefined) {
               throw new Error(`${process.env.PACKAGE_NAME}@${process.env.VERSION} already exists`)
             }
-            assertNpmNextAdvances(
+            assertNpmLatestAdvances(
               process.env.PACKAGE_NAME,
               process.env.VERSION,
-              metadata['dist-tags']?.next,
+              metadata['dist-tags']?.latest,
             )
-            if (typeof metadata['dist-tags']?.latest === 'string') latest = metadata['dist-tags'].latest
           }
-          appendFileSync(process.env.GITHUB_OUTPUT, `latest=${latest}\n`)
           NODE
       - name: Publish the bootstrap RC with a temporary token
         if: vars.NPM_AUTH_MODE == 'bootstrap'
@@ -673,48 +670,37 @@ jobs:
           test -n "$NODE_AUTH_TOKEN"
           export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc-bootstrap"
           printf '%s\n' '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}' > "$NPM_CONFIG_USERCONFIG"
-          npm publish "$TGZ" --tag next --access public --provenance
+          npm publish "$TGZ" --tag latest --access public --provenance
       - name: Publish the RC with Trusted Publishing
         if: vars.NPM_AUTH_MODE == 'oidc'
         env:
           TGZ: ${{ github.workspace }}/release-payload/${{ needs.stage_draft.outputs.tarball }}
-        run: env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$TGZ" --tag next --access public --provenance
+        run: env -u NODE_AUTH_TOKEN -u NPM_TOKEN npm publish "$TGZ" --tag latest --access public --provenance
       - name: Verify the published registry tarball and dist-tags
         env:
           PACKAGE_NAME: ${{ needs.stage_draft.outputs.package_name }}
           VERSION: ${{ needs.stage_draft.outputs.version }}
           TARBALL_INTEGRITY: ${{ needs.stage_draft.outputs.tarball_integrity }}
           TARBALL_SHA256: ${{ needs.stage_draft.outputs.tarball_sha256 }}
-          LATEST_BEFORE: ${{ steps.registry_before.outputs.latest }}
+          RELEASE_SOURCE_DIR: ${{ github.workspace }}/release-source
         run: |
           node --input-type=module <<'NODE'
           import { createHash } from 'node:crypto'
-          import { setTimeout as delay } from 'node:timers/promises'
+          import { join } from 'node:path'
+          import { pathToFileURL } from 'node:url'
+
+          const { fetchNpmJsonWithRetry } = await import(pathToFileURL(
+            join(process.env.RELEASE_SOURCE_DIR, 'scripts/release-preview-lib.mjs'),
+          ).href)
 
           const encodedName = encodeURIComponent(process.env.PACKAGE_NAME)
           const versionUrl = `https://registry.npmjs.org/${encodedName}/${encodeURIComponent(process.env.VERSION)}`
-          let versionMetadata
-          for (let attempt = 0; attempt < 6; attempt += 1) {
-            const response = await fetch(versionUrl, {
-              cache: 'no-store',
-              headers: { accept: 'application/json', 'cache-control': 'no-cache' },
-            })
-            if (response.ok) {
-              const candidate = await response.json()
-              if (candidate.dist?.attestations?.provenance?.predicateType === 'https://slsa.dev/provenance/v1') {
-                versionMetadata = candidate
-                break
-              }
-              if (attempt === 5) throw new Error('npm registry provenance descriptor is missing')
-              await delay(5_000)
-              continue
-            }
-            if (response.status !== 404 || attempt === 5) {
-              throw new Error(`npm registry version verification returned ${response.status}`)
-            }
-            await delay(5_000)
-          }
-          if (versionMetadata?.dist?.integrity !== process.env.TARBALL_INTEGRITY) {
+          const versionMetadata = await fetchNpmJsonWithRetry({
+            url: versionUrl,
+            label: 'npm registry version verification',
+            isReady: metadata => metadata.dist?.attestations?.provenance?.predicateType === 'https://slsa.dev/provenance/v1',
+          })
+          if (versionMetadata.dist?.integrity !== process.env.TARBALL_INTEGRITY) {
             throw new Error('npm registry integrity mismatch')
           }
           const tarballResponse = await fetch(versionMetadata.dist.tarball)
@@ -723,17 +709,12 @@ jobs:
           const tarballHash = createHash('sha256').update(tarball).digest('hex')
           if (tarballHash !== process.env.TARBALL_SHA256) throw new Error('npm tarball SHA-256 mismatch')
 
-          const packageResponse = await fetch(`https://registry.npmjs.org/${encodedName}`, {
-            cache: 'no-store',
-            headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+          const packageMetadata = await fetchNpmJsonWithRetry({
+            url: `https://registry.npmjs.org/${encodedName}`,
+            label: 'npm registry package verification',
+            isReady: metadata => metadata['dist-tags']?.latest === process.env.VERSION,
           })
-          if (!packageResponse.ok) throw new Error(`npm registry package verification returned ${packageResponse.status}`)
-          const packageMetadata = await packageResponse.json()
-          if (packageMetadata['dist-tags']?.next !== process.env.VERSION) throw new Error('npm next tag mismatch')
-          const latestAfter = typeof packageMetadata['dist-tags']?.latest === 'string'
-            ? packageMetadata['dist-tags'].latest
-            : '__absent__'
-          if (latestAfter !== process.env.LATEST_BEFORE) throw new Error('npm latest tag changed')
+          if (packageMetadata['dist-tags']?.latest !== process.env.VERSION) throw new Error('npm latest tag mismatch')
           NODE
       - name: Verify npm provenance signature and workflow identity
         env:
