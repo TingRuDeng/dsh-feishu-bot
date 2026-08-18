@@ -142,7 +142,30 @@ M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加
 
 阶段 6.8 按用户确认把后续 npm 通道从 `next` 收敛为唯一 `latest`：release manifest、bootstrap/OIDC publish、RC 单调性与发布后验收统一使用 `latest`，workflow 不执行额外 dist-tag 写入。rc.7 暴露的传播竞态由可执行 `fetchNpmJsonWithRetry` 契约覆盖：version endpoint 的 provenance 和根 packument 的 `latest` 都以 no-store 有界重试，404/尚未 ready 会等待，非 404 或耗尽次数仍保留真实失败。远端 `next` 已通过一次性交互认证删除，公开 registry 只保留 `latest=0.1.0-rc.7`；临时 npm 登录随后注销并清理。Trusted Publisher 已精确绑定仓库、`release.yml` 与 `npm-release`，权限仅为 `npm publish`；Publishing access 已收紧为禁止 bypass 2FA token。GitHub Environment 仅保留 `NPM_AUTH_MODE=oidc` 且没有 secrets，bootstrap commit 变量、GitHub token secret 与 npm bootstrap token 均已撤销。
 
-待完成：新 rc.8 latest-only 的真实 OIDC、两端同产物与 GitHub finalize 验证；以及专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain）。未完成前不声明 GitHub Prerelease、纯 OIDC 或端到端 exactly-once 已完成。
+同日 rc.8 完成真实远程验收：源码提交 `b005cbacbc2fef0dcf152cede3489da56aeec729`、远端 `master` 与 annotated tag peel 对齐；run `32002958510` 的 build、双 attestation、六附件 Draft、Trusted Publishing OIDC、registry/provenance 复核和 GitHub finalize 全部成功，bootstrap token 分支 skipped。公开 npm 仅有 `latest=0.1.0-rc.8`，不存在 `next`；`npm audit signatures` 验证 registry signature 与 SLSA provenance。GitHub Prerelease 的六附件齐全，Release 与 npm tarball 字节一致，大小 650,603 bytes，SHA-256 `189d2471ac3be13df5d5c5d6474ee81b31e6493c86fae17f0d4dd2a3f63c40fa`。
+
+待完成：专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain）。该矩阵未完成前不声明端到端 exactly-once 已完成。
+
+## M7：模型选择与推理强度（方案，未实现）
+
+完整架构方案见 [M7 架构方案](m7-model-selection.md)。此处只记里程碑与门槛。
+
+前置缺陷：`AgentOptions` 不含 `reasoningEffort`，而桥把 `agentDefaultModel.currentSelection()`
+（`ModelSelection`，含该字段）直接当 `AgentOptions` 传给 `agents.create()`。结构化子类型
+使其静默通过，档位被丢弃——**飞书 `/new` 的会话不继承 Web 端设置的推理强度**。M7.0 先修此项。
+
+| 阶段 | 内容 | 门槛 |
+|---|---|---|
+| M7.0 | 在 `/new` setup 与 `/use` 冷恢复安装 `ModelSelectionRef`（`installModelSelection`） | 首次 `agent/request` 的 `reasoningEffort` 等于默认选择；回归测试 |
+| M7.3 | `/status` 分列"当前会话"与"新会话默认" | 三类情形（绑定/未绑定/`existing`）文案正确 |
+| M7.2 | `/effort <id>` | 非法值回显该 route 合法集合；权限归 boundBy |
+| M7.1 | `/model` 三层卡片 | 复用 `/ls` token/TTL/operator/messageId 校验；换 model 后档位重校验三分支 |
+
+顺序按依赖与风险暴露成本排列：先只读的 M7.3 验证 `listModels` / `resolveModelInfo`
+在真实部署下的返回，数据链路有问题时在只读命令上暴露远比在三层卡片交互里便宜。
+
+M7.1 的前置是 S4 转义统一——`/model` 卡片渲染适配器提供的 name/description，当前
+`escapeLarkMarkdown` 只在 `session-list-card.ts` 内，不先统一就会复制同一缺陷。
 
 ## 全局测试策略
 
@@ -166,6 +189,7 @@ M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加
 | 真实组卡 patch 错误码与独立卡 fallback 未验收 | 中 | 故障注入已绿；实机记录 code、数量与最终可见状态，不保存正文/完整 ID |
 | 硬容量背压在部署默认值下缺长时运行证据 | 中 | 运维监控 `retention-backpressure` / `*-backpressure` 固定审计事件，先压测再发布 |
 | 飞书卡片频控 | 低 | 任务卡节流、per-target 串行、重试/熔断；终态使用 durable delivery |
+| M7 与 Web 对同一 Agent 并发安装 selection ref | 中 | 飞书只对 `created-here` 安装；`existing` 拒绝切换并提示在 Web 端操作。Web 侧安装范围须运行时实验确认（M7 未决问题 1） |
 
 ## 已定决策（2026-08，M0 前）
 

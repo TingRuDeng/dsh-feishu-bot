@@ -478,6 +478,9 @@ bridge listener 收到 approval/request
 - 消息合并窗口 + `..`/`!!`（需回答：合并前原始消息是否逐条落 log、后缀是否模型可见——按"model-visible ⟺ logged"单独设计）。
 - 群聊（mention 解析、thread/chatId 关系、移群清理、群内权限与脱敏分档）。
 - 图片注入 attachment；卡片深化（diff 摘要、会话选择卡）。
+- **模型选择与推理强度**（`/model`、`/effort`、`/status` 作用域分离）：方案见
+  [M7 架构方案](m7-model-selection.md)。其中"`AgentOptions` 不含 `reasoningEffort`
+  导致 `currentSelection()` 的档位被静默丢弃"是**当前已存在的缺陷**，非新功能缺口。
 - 待决审批跨重启恢复（durable pending 协议：恢复点、id 绑定、tool call 可重放性、防 id 复用）。
 - 多通道：gateway 抽象换钉钉/Telegram，bridge 依赖改通道注册表。
 - 微信：待接受 iLink 风险后接入。
@@ -506,4 +509,8 @@ bridge listener 收到 approval/request
 
 - **已由源码确认**（详录见 [M0 核验记录](m0-record.md)）：`userQuestions` 单 provider 且 ask() 无 durable 事件（问答首期彻底不做）；waterfall 按注册序 outermost-first、`prepend: true` 可插队、scope 过滤不拦普通 ctx 的全局监听；bundle 层序 base → web-app → 追加 bundle → profile patch（bridge 默认注册晚于 Web）；apiproxy pending 机制闭包私有不可复用；`ApprovalRequest` 不含 id、配对算法（callId 对称匹配）、orphan asked 不阻碍 load；`followup()` → inbox splice（事件自足可折叠）、`user/message` 待 claim、canceled splice；user/message source 校验仅要求 kind 非空 string；`Agent.cancel()` 默认清 inbox 与 Web 的 `keepInbox: true`；`AgentHandle.dispose()` 创建者所有权、`ctx.agents.resume()` 对插件公开返回 handle；api/remotes 工具函数导出面；storage-domain 与 token-meter 均已在 web profile 组合中加载；`session/event` 全局订阅可用、turn 折叠事件全集；`persistence.list()` 返回含 cwd 的 SessionHeader[]；`createUserMessage` 调用方持有 id；bundle 安装链路与 `--dump-config` 验证方式。
 - **已由自动化/本地运行确认**：Gateway 延迟启动和 Promise admission；同 `message_id`/不同 `event_id` 去重；followup 崩溃点对账；cursor/delivery 双写窗口；稳定 UUID、错误分类与 patch 业务码；审批组 patch fallback、visible/uncertain 状态；binding after-image 补偿；绑定会话的 Web/飞书任务级卡片/结果折叠；`/ls` 两级 CardKit 导航、按需真实标题、稳定分页/返回、同名工作空间、超过 20 条不截断、单会话直绑及卡片身份校验；有界 drain、硬容量和无正文日志。阶段 6.1 最终证据以当前 release gate 为准。
+- **M7 方案待确认（尚未实现，不构成当前事实）**：Web 端是否对所有 Agent 安装
+  `ModelSelectionRef`（决定飞书能否安全读取 `existing` 会话的当前选择）；真实 provider
+  的 `listModels` catalog 内容与 `resolveModelInfo` 的 `reasoning` 暴露情况。二者均须
+  运行时实验，不可由静态阅读推断。详见 [M7 架构方案](m7-model-selection.md) §9。
 - **仍待真实飞书确认**：平台重复事件与 UUID 去重时间窗；启动期消息和进程中止后的实际重投；timeout/断连的迟到 create；真实非零 patch 业务码；组卡 patch 失败后的独立审批卡；Web/飞书 race 的 UI 表现；HMR drain 与重启补投的最终消息数量。缺少这些证据前不声明端到端 exactly-once 或“完全可靠”。
