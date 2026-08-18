@@ -730,7 +730,7 @@
 - [x] 执行聚焦 RED/GREEN、全量测试、typecheck、build、Preview Gate、workflow YAML、全部 shell block、actionlint、diff、敏感信息与独立发布门禁复核。
 - [x] 使用一次性交互 npm 认证删除远端 `next` 并立即核对只剩 `latest=0.1.0-rc.7`；不打印或持久化凭据。
 - [x] 经单独确认后配置 Trusted Publisher，切换 `NPM_AUTH_MODE=oidc`，删除 GitHub bootstrap secret/SHA，撤销 npm bootstrap token，并把 Publishing access 收紧为禁止 bypass 2FA token。
-- [ ] 用全新 rc.8 完成真实 OIDC 与 latest-only 验收。
+- [x] 用全新 rc.8 完成真实 OIDC 与 latest-only 验收。
 
 验收与回滚：
 
@@ -751,6 +751,14 @@
 - 使用项目专用临时 npm cache 再次公开查询，dist-tags 仍仅为 `latest=0.1.0-rc.7`。rc.8 尚未提交、推送、创建 tag 或触发 workflow，纯 OIDC 发布仍待真实远程验收。
 - 提交前新鲜门禁再次通过：发布合同 104/104、全量 Vitest 22 个文件 361/361、typecheck、标准 build、Preview Gate、2 个 workflow YAML、26 个 shell block、actionlint v1.7.10、diff 与敏感信息扫描均 exit 0；Preview Gate 产物大小和 SHA-256 与上次一致。pnpm 因 workspace 状态仍记录旧 RC 版本而尝试重装依赖，本轮未修改依赖树，改用 Preview Gate 同样调用的本地固定二进制完成验证，lockfile 与 workspace 配置保持不变。
 - 提交前 review-gate 结论为通过：未发现 `next` 发布、额外 dist-tag 写入、OIDC token 残留、fail-open 或范围外改动。公开 registry 确认 `latest=0.1.0-rc.7`、`next` 不存在且 rc.8 尚未占用；剩余风险仅为真实 rc.8 OIDC 发布、两端同产物和 GitHub finalize 尚未执行。
+
+阶段 6.8 远程验收记录（2026-08-17）：
+
+- 源码提交 `b005cbacbc2fef0dcf152cede3489da56aeec729`、远端 `master` 与 annotated tag `v0.1.0-rc.8` 已对齐；tag object 为 `df277260c3b010c22de4e377daa0deee706f86bc`，peel 后精确指向该提交。
+- GitHub Actions run `32002958510` 的 `build`、`build_attest`、`stage_draft`、`publish_npm` 与 `finalize_release` 全部成功；bootstrap token 分支明确 skipped，Trusted Publishing OIDC 分支完成 npm publish、registry 摘要/dist-tag 与 npm provenance 身份验证。
+- `@tingrudeng/dsh-feishu-bot@0.1.0-rc.8` 已公开，根 packument 仅有 `latest=0.1.0-rc.8`，不存在 `next`。独立 `npm audit signatures` 为 4 个 registry signature、2 个 attestation 全部通过，目标包包含 npm publish statement 与 SLSA provenance。
+- GitHub Release `v0.1.0-rc.8` 已由 Draft 转为公开 Prerelease，包含 tarball、SHA256SUMS、CycloneDX 1.7 SBOM、release descriptor 及两份 attestation bundle 共六个附件。正式 tarball 为 650,603 bytes，SHA-256 `189d2471ac3be13df5d5c5d6474ee81b31e6493c86fae17f0d4dd2a3f63c40fa`；Release checksum 通过，重新下载的 GitHub 与 npm tarball 字节一致。独立 `gh attestation verify` 对 build provenance 与 CycloneDX predicate 均通过 signer workflow、tag/source digest、commit 和 GitHub-hosted runner 约束。
+- 发布链路验收已完成；剩余项仅为专用飞书 chat 故障矩阵，不把供应链验收扩展为端到端 exactly-once 证明。
 
 ## 文件级影响预估
 
