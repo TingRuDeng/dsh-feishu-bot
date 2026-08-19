@@ -167,7 +167,7 @@ Web 端对任何被触碰的 live Agent 惰性安装 ref；waterfall 先注册�
 先装后始终赢，Web 端在飞书会话上的模型切换静默无效；冷恢复归属"谁冷恢复谁安装"。
 结论见 m7-model-selection.md §6.1/§9。
 
-M7.3 的实现位于 `src/bridge/model-selection.ts` 与 `src/bridge/index.ts`：注册表只保存桥创建或冷恢复的 Agent ref，live `existing` 不抢占 Web 所有权；`/status` 使用 `ctx.llm.resolveModelInfo()` 做 effort 名称解析，并在元数据不可达时回显原始 id。回归覆盖注册表 dispose 清理、四类绑定状态、无 effort、默认来源及解析失败降级。全量验证：23 个测试文件、372 个测试通过；`tsc --noEmit` 通过；`git diff --check` 通过。真实 provider catalog 与真实飞书 GUI 交互仍待实机确认。
+M7.3 的实现位于 `src/bridge/model-selection.ts` 与 `src/bridge/index.ts`：注册表只保存桥创建或冷恢复的 Agent ref，live `existing` 不抢占 Web 所有权；`/status` 使用 `ctx.llm.resolveModelInfo()` 做 effort 名称解析，并在元数据不可达时回显原始 id。回归覆盖注册表 dispose 清理、四类绑定状态、无 effort、默认来源及解析失败降级。全量验证：23 个测试文件、372 个测试通过；`tsc --noEmit` 通过；`git diff --check` 通过。当前锁定的 Harness 工作树为 `0.1.0-rc.7`，而插件此前的远程 rc.8 记录对应的 Harness API 仍需在更新工作树可用后重新审计；本次对当前链接工作树执行了 `pnpm build` 并通过。真实 provider catalog 与真实飞书 GUI 交互仍待实机确认。
 
 顺序按依赖与风险暴露成本排列：M7.3 已先以只读命令验证状态数据链路；后续 M7.2/M7.1 仍需真实部署与交互验收。
 
