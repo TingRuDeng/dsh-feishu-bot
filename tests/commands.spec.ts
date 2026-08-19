@@ -32,6 +32,12 @@ describe('parseCommand', () => {
     expect(parseCommand('/use a b')).toEqual({ kind: 'invalid', name: 'use', problem: 'extra-arguments' })
   })
 
+  it('/effort requires exactly one effort id (M7.2)', () => {
+    expect(parseCommand('/effort high')).toEqual({ kind: 'effort', effortId: 'high' })
+    expect(parseCommand('/effort')).toEqual({ kind: 'invalid', name: 'effort', problem: 'missing-argument' })
+    expect(parseCommand('/effort high extra')).toEqual({ kind: 'invalid', name: 'effort', problem: 'extra-arguments' })
+  })
+
   it('/stop is an argument-less command (M2)', () => {
     expect(parseCommand('/stop')).toEqual({ kind: 'stop' })
     expect(parseCommand('/stop now')).toEqual({ kind: 'invalid', name: 'stop', problem: 'extra-arguments' })

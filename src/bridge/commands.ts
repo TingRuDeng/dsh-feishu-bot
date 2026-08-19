@@ -9,6 +9,7 @@
 export type ParsedCommand =
   | { kind: 'new'; cwd: string | undefined }
   | { kind: 'use'; sessionId: string }
+  | { kind: 'effort'; effortId: string }
   | { kind: 'ls' }
   | { kind: 'status' }
   | { kind: 'release' }
@@ -37,6 +38,10 @@ export function parseCommand(text: string): ParsedCommand | undefined {
       if (rest.length === 0) return { kind: 'invalid', name: 'use', problem: 'missing-argument' }
       if (rest.length > 1) return { kind: 'invalid', name: 'use', problem: 'extra-arguments' }
       return { kind: 'use', sessionId: rest[0]! }
+    case 'effort':
+      if (rest.length === 0) return { kind: 'invalid', name: 'effort', problem: 'missing-argument' }
+      if (rest.length > 1) return { kind: 'invalid', name: 'effort', problem: 'extra-arguments' }
+      return { kind: 'effort', effortId: rest[0]! }
     case 'ls':
     case 'status':
     case 'release':

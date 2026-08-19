@@ -11,7 +11,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { randomBytes } from 'node:crypto'
-import { createUserMessage, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import {
   type AgentOptions,
@@ -1990,6 +1990,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           '/ls — 先选工作空间，再按真实标题选择未归档会话',
           '/use <sessionId|编号> — 绑定未归档会话（编号对应当前打开的工作空间）',
           '/status — 绑定状态、当前会话与新会话默认的模型/档位',
+          '/effort <id> — 只切换档位；非法值回显该模型可选档位（仅绑定者）',
           '/stop — 停止当前任务（排队消息保留）',
           '/release — 解绑并停止后续飞书同步（会话继续运行）',
           '模型/档位选择只在进程内生效，重启后回落 Web 默认。',
@@ -2137,6 +2138,60 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         const source = configuredProvider === undefined ? 'Web GUI 设置' : '部署配置'
         lines.push(`新会话默认：${await describeSelection(defaultSelection())}（来源：${source}）`)
         await commit(lines.join('\n'))
+        return
+      }
+      case 'effort': {
+        // M7.2: boundBy-gated effort-only switch on the bridge-owned ref
+        // (design §5.1/§5.2). Same four ownership shapes as /status: unbound,
+        // bridge-owned, live Web-owned existing, cold. Cold sessions are not
+        // resumed merely for a switch; a plain message resumes them first.
+        const binding = bindings.get(chatId)
+        if (binding === undefined) {
+          await commit('未绑定会话。请先 /new 或 /use 绑定后再切换档位。')
+          return
+        }
+        if (binding.boundBy !== record.senderOpenId) {
+          await commit('只有当前会话的绑定者可以切换模型档位。')
+          return
+        }
+        const sessionId = binding.sessionId as unknown as SessionId
+        const ref = modelSelections.get(sessionId)
+        if (ref === undefined) {
+          if (ctx.agents.get(sessionId) !== undefined) {
+            await commit('该会话由 Web 端持有模型选择权，请在 Web 端切换档位。')
+          } else {
+            await commit('该会话未激活，未修改档位。请先发送一条消息恢复会话，再切换档位。')
+          }
+          return
+        }
+        // A cleared current selection means "next turn falls back to the
+        // new-session default" (/status wording), so validate against the
+        // default route and make the switch explicit on it.
+        const effective = ref.current ?? defaultSelection()
+        let info
+        try {
+          info = await ctx.llm.resolveModelInfo(effective.provider, effective.model)
+        } catch {
+          await commit('档位元数据不可用，未修改当前选择。')
+          return
+        }
+        const efforts = info.reasoning?.efforts
+        if (efforts === undefined || efforts.length === 0) {
+          await commit('该模型不提供可选档位，未修改当前选择。')
+          return
+        }
+        const requested = ReasoningEffortId(command.effortId)
+        const matched = efforts.find(candidate => candidate.id === requested)
+        if (matched === undefined) {
+          await commit(`非法档位 "${command.effortId}"。该模型可选档位：${efforts.map(candidate => `${candidate.id}（${candidate.name}）`).join(' / ')}`)
+          return
+        }
+        ref.current = {
+          provider: effective.provider,
+          model: effective.model,
+          reasoningEffort: requested,
+        }
+        await commit(`已选择档位：${matched.name}（${effective.provider}/${effective.model}），下一轮生效。重启后临时切换会丢失。`)
         return
       }
       case 'release': {

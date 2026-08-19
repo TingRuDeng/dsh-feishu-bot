@@ -1,6 +1,6 @@
 # M7 架构方案：模型选择与推理强度
 
-状态：**M7.0、M7.3 已实现（2026-08-18），M7.1–M7.2 仍为方案**。本文同时记录已验证事实与后续设计，
+状态：**M7.0、M7.2、M7.3 已实现（2026-08-18），M7.1 仍为方案**。本文同时记录已验证事实与后续设计，
 实现进度以 [implementation.md](implementation.md) 的 M7 小节为准。
 
 参考 weclaw 的交互语义（模型/档位切换、状态作用域分离、导航快照），**只借产品语义，
@@ -291,12 +291,22 @@ M7.3 已将桥内模型选择按 `sessionId` 注册为 `Map<SessionId, ModelSele
 
 回归覆盖：`tests/bridge.spec.ts` 的 M7.3 status 组，以及 `tests/model-selection.spec.ts` 的注册、按 session 隔离和 dispose 清理。全量验证见实现文档。
 
-### M7.2 `/effort <id>`
+### M7.2 `/effort <id>` —— ✅ 已实现（2026-08-18）
 
-只改档位的高频操作，不值得走三层卡片。
+只改档位，不动 provider/model。实现要点（与 `/status` 同一套四类所有权判定）：
 
-**验收**：合法值生效并提示"下一轮生效"；非法值回显该 route 合法集合；无绑定时拒绝；
-非 boundBy 拒绝。
+- 无绑定拒绝；非 `boundBy` 拒绝（§5.2 权限矩阵，与 `/stop` `/release` 同级）。
+- live Web-owned `existing` 拒绝，提示在 Web 端切换；冷/未激活会话拒绝且**不隐式恢复**，
+  提示先发消息恢复会话。
+- 以当前选择的 provider/model（`current` 为空时回落新会话默认 route）解析合法档位集合：
+  非法 id 回显合法集合；`reasoning` 缺席（该模型无档位选择）拒绝；`resolveModelInfo` 抛错时
+  **不修改** ref 并明示元数据不可用。
+- 合法切换写入 `ref.current.reasoningEffort`，回帖必含"下一轮生效"（§4.2）并附带重启丢失提示。
+
+**验收**：合法值生效并提示"下一轮生效"（回归断言下一轮 `agent/request` 实际携带新档位）；
+非法值回显该 route 合法集合且选择不变；无绑定/非 boundBy/`existing`/冷会话四条拒绝路径；
+元数据不可用与无档位路由不修改选择。测试见 `tests/bridge.spec.ts` M7.2 组与
+`tests/commands.spec.ts` 的 `/effort` 解析。
 
 ### M7.1 `/model` 三层卡片
 

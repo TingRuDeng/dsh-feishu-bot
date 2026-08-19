@@ -746,6 +746,128 @@ describe('assembled bridge (M1 acceptance)', () => {
     })
   })
 
+  describe('M7.2: /effort switching', () => {
+    const high = ReasoningEffortId('high')
+    const max = ReasoningEffortId('max')
+    const reasoningInfo = {
+      efforts: [
+        { id: high, name: 'High' },
+        { id: max, name: 'Max' },
+      ],
+      defaultEffort: max,
+    }
+    const defaultSelection = () => ({ provider: 'mock', model: 'm', reasoningEffort: high })
+    const mountEffort = (adapter: MockAdapter, configOverrides: object = {}, configureContext?: (ctx: Context) => void | Promise<void>) =>
+      mountBridge(
+        adapter, { agentProvider: undefined, agentModel: undefined, ...configOverrides },
+        undefined, undefined, configureContext, undefined, defaultSelection,
+      )
+
+    it('rejects without a binding', async () => {
+      const { feishu, deliver } = await mountEffort(new MockAdapter([], reasoningInfo))
+      await deliver({ text: '/effort max' })
+      expect(feishu.sent.at(-1)!.text).toContain('未绑定')
+    })
+
+    it('rejects a non-boundBy allowlisted sender', async () => {
+      const { feishu, deliver } = await mountEffort(
+        new MockAdapter([], reasoningInfo), { allowedOpenIds: [OWNER, OTHER] },
+      )
+      await deliver({ text: '/new' })
+      await deliver({ senderOpenId: OTHER, text: '/effort max' })
+      expect(feishu.sent.at(-1)!.text).toContain('绑定者')
+    })
+
+    it('rejects on a live Web-owned existing session without installing a ref', async () => {
+      // probeRoot doubles as the bridge root so the Web-created agent's cwd
+      // stays inside allowedWorkspaces (same pattern as the M7.3 test).
+      const probeRoot = await mkdtemp(join(tmpdir(), 'feishu-bridge-'))
+      dirs.push(probeRoot)
+      const { feishu, deliver } = await mountBridge(
+        new MockAdapter([], reasoningInfo),
+        { agentProvider: undefined, agentModel: undefined },
+        probeRoot, undefined, async (ctx) => {
+          await ctx.agents.create({
+            sessionId: 'web-owned-effort' as never,
+            meta: { cwd: probeRoot },
+            agentOptions: { provider: 'mock', model: 'm' },
+          })
+        }, undefined, defaultSelection,
+      )
+      await deliver({ eventId: 'ev_use_effort_web', text: '/use web-owned-effort' })
+      await deliver({ text: '/effort max' })
+      expect(feishu.sent.at(-1)!.text).toContain('Web 端')
+    })
+
+    it('rejects on a cold bound session without resuming it', async () => {
+      const first = await mountEffort(new MockAdapter([textResponse('让会话落盘')], reasoningInfo))
+      await first.deliver({ text: '/new' })
+      await first.deliver({ text: '先聊一句' })
+      const binding = first.ctx.storageDomain.get('feishu_bot')!.table('bindings')
+        .get('oc_chat_1') as { sessionId: string }
+      await first.ctx.fiber.dispose()
+
+      const cold = await mountBridge(
+        new MockAdapter([], reasoningInfo),
+        { agentProvider: undefined, agentModel: undefined },
+        first.root, undefined, undefined, undefined, defaultSelection,
+      )
+      await cold.deliver({ eventId: 'ev_effort_cold', messageId: 'om_effort_cold', text: '/effort max' })
+      const texts = cold.feishu.sent.map(send => send.text)
+      expect(texts.some(text => text.includes('未激活'))).toBe(true)
+      // The binding is cold: /effort must not have resumed any agent.
+      expect(cold.ctx.agents.get(binding.sessionId as never)).toBeUndefined()
+    })
+
+    it('a legal switch takes effect on the next request', async () => {
+      const adapter = new MockAdapter([textResponse('档位切换后的回答')], reasoningInfo)
+      const { feishu, deliver } = await mountEffort(adapter)
+      await deliver({ text: '/new' })
+      await deliver({ text: '/effort max' })
+      expect(feishu.sent.at(-1)!.text).toContain('下一轮生效')
+      await deliver({ text: '测试档位' })
+      expect(adapter.requests).toHaveLength(1)
+      expect(adapter.requests[0]!.reasoningEffort).toBe(max)
+      await deliver({ text: '/status' })
+      expect(feishu.sent.at(-1)!.text).toContain('当前会话：mock/m（档位：Max）')
+    })
+
+    it('an illegal effort echoes the legal set and leaves the selection unchanged', async () => {
+      const adapter = new MockAdapter([textResponse('未切换的回答')], reasoningInfo)
+      const { feishu, deliver } = await mountEffort(adapter)
+      await deliver({ text: '/new' })
+      await deliver({ text: '/effort bogus' })
+      const reply = feishu.sent.at(-1)!.text
+      expect(reply).toContain('非法档位')
+      expect(reply).toContain('high')
+      expect(reply).toContain('max')
+      await deliver({ text: '测试档位' })
+      expect(adapter.requests[0]!.reasoningEffort).toBe(high)
+    })
+
+    it('metadata failure leaves the selection untouched', async () => {
+      const adapter = new MockAdapter([textResponse('未修改的回答')], reasoningInfo)
+      const { feishu, deliver } = await mountEffort(adapter)
+      await deliver({ text: '/new' })
+      adapter.failResolveModel = true
+      await deliver({ text: '/effort max' })
+      expect(feishu.sent.at(-1)!.text).toContain('未修改')
+      // Reset before the text turn: request routing itself resolves model
+      // metadata, so the flag would fail the whole turn otherwise.
+      adapter.failResolveModel = false
+      await deliver({ text: '测试档位' })
+      expect(adapter.requests[0]!.reasoningEffort).toBe(high)
+    })
+
+    it('a route without reasoning metadata rejects the switch', async () => {
+      const adapter = new MockAdapter([], undefined)
+      const { feishu, deliver } = await mountEffort(adapter)
+      await deliver({ text: '/new' })
+      await deliver({ text: '/effort high' })
+      expect(feishu.sent.at(-1)!.text).toContain('不提供可选档位')
+    })
+  })
+
   it('result-card creation failure falls back to text without losing the answer', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter([textResponse('不能丢失的回答')]))
     await deliver({ text: '/new' })
