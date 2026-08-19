@@ -1,4 +1,4 @@
-import type { GenerateOptions, LlmModelReasoningInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, LlmModelInfo, LlmModelReasoningInfo, LlmResolvedModelInfo, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CallId, LlmAdapter } from '@deepseek-ai/dsh-llm'
 
 /** Helpers to write scripted responses tersely. */
@@ -67,6 +67,12 @@ export class MockAdapter extends LlmAdapter {
   requests: GenerateOptions[] = []
   /** When set, resolveModel throws — exercising metadata-unavailable fallbacks. */
   failResolveModel = false
+  /** Advisory catalog surfaced through the LlmRuntime listModels wrapper. */
+  models: LlmModelInfo[] = []
+  /** When set, listModels throws — exercising catalog-unavailable fallbacks. */
+  failListModels = false
+  /** Per-model reasoning override; falls back to the constructor value. */
+  reasoningByModel: Record<string, LlmModelReasoningInfo | undefined> = {}
 
   constructor(
     private script: (StreamChunk[] | ((options: GenerateOptions) => StreamChunk[]) | 'hang' | 'hang-slow')[],
@@ -76,16 +82,24 @@ export class MockAdapter extends LlmAdapter {
     super()
   }
 
+  override listModels(provider: string): Promise<LlmModelInfo[]> {
+    if (this.failListModels) return Promise.reject(new Error('simulated listModels failure'))
+    return Promise.resolve(this.models.filter(model => model.provider === provider))
+  }
+
   override resolveModel(
     provider: string,
     model: string,
   ): Promise<LlmResolvedModelInfo> {
     if (this.failResolveModel) return Promise.reject(new Error('simulated resolveModel failure'))
+    const reasoning = Object.prototype.hasOwnProperty.call(this.reasoningByModel, model)
+      ? this.reasoningByModel[model]
+      : this.reasoning
     return Promise.resolve({
       provider,
       id: model,
       name: model,
-      ...this.reasoning === undefined ? {} : { reasoning: this.reasoning },
+      ...reasoning === undefined ? {} : { reasoning },
       ...this.defaultMaxTokens === undefined ? {} : { defaultMaxTokens: this.defaultMaxTokens },
     })
   }

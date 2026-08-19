@@ -11,6 +11,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import LlmRuntime, { createMessage, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
+import type { LlmModelReasoningInfo } from '@deepseek-ai/dsh-llm'
 import UserApproval from '@deepseek-ai/dsh-user-approval'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -865,6 +866,216 @@ describe('assembled bridge (M1 acceptance)', () => {
       await deliver({ text: '/new' })
       await deliver({ text: '/effort high' })
       expect(feishu.sent.at(-1)!.text).toContain('不提供可选档位')
+    })
+  })
+
+  describe('S4: adversarial markdown escaping on text paths', () => {
+    const hostileEfforts = (): LlmModelReasoningInfo => ({
+      efforts: [
+        { id: ReasoningEffortId('high'), name: 'High[1](快)' },
+        { id: ReasoningEffortId('max'), name: 'Max**强**' },
+      ],
+      defaultEffort: ReasoningEffortId('max'),
+    })
+
+    it('/status escapes adapter-supplied effort names', async () => {
+      const { feishu, deliver } = await mountBridge(
+        new MockAdapter([], hostileEfforts()),
+        { agentProvider: undefined, agentModel: undefined },
+        undefined, undefined, undefined, undefined,
+        () => ({ provider: 'mock', model: 'm', reasoningEffort: ReasoningEffortId('high') }),
+      )
+      await deliver({ text: '/new' })
+      await deliver({ text: '/status' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('档位：High\\[1\\]\\(快\\)')
+      expect(text).not.toContain('档位：High[1](快)')
+    })
+
+    it('/effort echoes an illegal adversarial id escaped and leaves the choice intact', async () => {
+      const adapter = new MockAdapter([], hostileEfforts())
+      const { feishu, deliver } = await mountBridge(
+        adapter, { agentProvider: undefined, agentModel: undefined },
+        undefined, undefined, undefined, undefined,
+        () => ({ provider: 'mock', model: 'm', reasoningEffort: ReasoningEffortId('high') }),
+      )
+      await deliver({ text: '/new' })
+      await deliver({ text: '/effort h[i](x)' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('非法档位 "h\\[i\\]\\(x\\)"')
+      expect(text).toContain('high（High\\[1\\]\\(快\\)）')
+    })
+
+    it('/effort success escapes the adapter-supplied display name', async () => {
+      const { feishu, deliver } = await mountBridge(
+        new MockAdapter([], hostileEfforts()),
+        { agentProvider: undefined, agentModel: undefined },
+        undefined, undefined, undefined, undefined,
+        () => ({ provider: 'mock', model: 'm', reasoningEffort: ReasoningEffortId('high') }),
+      )
+      await deliver({ text: '/new' })
+      await deliver({ text: '/effort max' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('已选择档位：Max\\*\\*强\\*\\*')
+      expect(text).not.toContain('已选择档位：Max**强**')
+    })
+
+    it('/ls text fallback escapes adversarial session titles', async () => {
+      const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
+      ctx.sessions.create('hostile-title' as never, {
+        seed: [{
+          type: 'session/title', seq: 0, time: 1, data: { title: '恶意[标题](链接)' },
+        }] as never,
+        meta: { cwd: root },
+      })
+      feishu.nextSessionListCardError = Object.assign(
+        new Error('simulated session-list card failure'), { feishuFailureKind: 'permanent' },
+      )
+      await deliver({ text: '/ls' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('恶意\\[标题\\]\\(链接\\)')
+      expect(text).not.toContain('恶意[标题](链接)')
+    })
+
+    it('/unknown echoes the adversarial command name escaped', async () => {
+      const { feishu, deliver } = await mountBridge(new MockAdapter([]))
+      await deliver({ text: '/h[1](x)' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('未知命令 /h\\[1\\]\\(x\\)')
+      expect(text).not.toContain('未知命令 /h[1](x)')
+    })
+  })
+
+  describe('M7.1: /model three-layer card', () => {
+    const high = ReasoningEffortId('high')
+    const max = ReasoningEffortId('max')
+    const reasoningHighMax = { efforts: [{ id: high, name: 'High' }, { id: max, name: 'Max' }], defaultEffort: max }
+    const reasoningMaxOnly = { efforts: [{ id: max, name: 'Max' }], defaultEffort: max }
+    const defaultSelection = () => ({ provider: 'mock', model: 'm', reasoningEffort: high })
+    const mountModel = (adapter: MockAdapter, overrides: object = {}, configureContext?: (ctx: Context) => void | Promise<void>) =>
+      mountBridge(
+        adapter, { agentProvider: undefined, agentModel: undefined, ...overrides },
+        undefined, undefined, configureContext, undefined, defaultSelection,
+      )
+
+    it('rejects without a binding', async () => {
+      const { feishu, deliver } = await mountModel(new MockAdapter([]))
+      await deliver({ text: '/model' })
+      expect(feishu.sent.at(-1)!.text).toContain('未绑定')
+    })
+
+    it('rejects a non-boundBy allowlisted sender', async () => {
+      const { feishu, deliver } = await mountModel(
+        new MockAdapter([]), { allowedOpenIds: [OWNER, OTHER] },
+      )
+      await deliver({ text: '/new' })
+      await deliver({ senderOpenId: OTHER, text: '/model' })
+      expect(feishu.sent.at(-1)!.text).toContain('绑定者')
+    })
+
+    it('rejects on a live Web-owned existing session', async () => {
+      const probeRoot = await mkdtemp(join(tmpdir(), 'feishu-bridge-'))
+      dirs.push(probeRoot)
+      const { feishu, deliver } = await mountBridge(
+        new MockAdapter([]),
+        { agentProvider: undefined, agentModel: undefined },
+        probeRoot, undefined, async (ctx) => {
+          await ctx.agents.create({
+            sessionId: 'web-owned-model' as never,
+            meta: { cwd: probeRoot },
+            agentOptions: { provider: 'mock', model: 'm' },
+          })
+        }, undefined, defaultSelection,
+      )
+      await deliver({ eventId: 'ev_use_model_web', text: '/use web-owned-model' })
+      await deliver({ text: '/model' })
+      expect(feishu.sent.at(-1)!.text).toContain('Web 端')
+    })
+
+    it('rejects on a cold bound session without resuming it', async () => {
+      const first = await mountModel(new MockAdapter([textResponse('让会话落盘')]))
+      await first.deliver({ text: '/new' })
+      await first.deliver({ text: '先聊一句' })
+      const binding = first.ctx.storageDomain.get('feishu_bot')!.table('bindings')
+        .get('oc_chat_1') as { sessionId: string }
+      await first.ctx.fiber.dispose()
+
+      const cold = await mountBridge(
+        new MockAdapter([]),
+        { agentProvider: undefined, agentModel: undefined },
+        first.root, undefined, undefined, undefined, defaultSelection,
+      )
+      await cold.deliver({ eventId: 'ev_model_cold', messageId: 'om_model_cold', text: '/model' })
+      const texts = cold.feishu.sent.map(send => send.text)
+      expect(texts.some(text => text.includes('未激活'))).toBe(true)
+      expect(cold.ctx.agents.get(binding.sessionId as never)).toBeUndefined()
+    })
+
+    it('navigates provider → model → effort and applies on the next request', { timeout: 20_000 }, async () => {
+      const adapter = new MockAdapter([textResponse('切换后回答')])
+      adapter.reasoningByModel = { m: reasoningHighMax, m2: reasoningMaxOnly }
+      adapter.models = [
+        { provider: 'mock', id: 'm2', name: '模型二' },
+        { provider: 'mock', id: 'm', name: '模型一' },
+      ]
+      const { feishu, deliver } = await mountModel(adapter)
+      await deliver({ text: '/new' })
+      await deliver({ text: '/model' })
+
+      const providerCard = feishu.cards.at(-1)!
+      expect(JSON.stringify(providerCard.card)).toContain('选择模型')
+      await feishu.clickCard(OWNER, providerCard.messageId, cardButtonValue(providerCard.card, '1. mock'))
+
+      const modelCard = feishu.cards.at(-1)!
+      expect(JSON.stringify(modelCard.card)).toContain('模型二')
+      await feishu.clickCard(OWNER, modelCard.messageId, cardButtonValue(modelCard.card, '选择此模型'))
+
+      const effortCard = feishu.cards.at(-1)!
+      expect(JSON.stringify(effortCard.card)).toContain('选择档位')
+      // Current effort (high) is invalid on m2 → no keep-current button.
+      expect(JSON.stringify(effortCard.card)).not.toContain('保持当前')
+      await feishu.clickCard(OWNER, effortCard.messageId, cardButtonValue(effortCard.card, 'Max'))
+
+      const statusCard = feishu.cards.at(-1)!
+      expect(JSON.stringify(statusCard.card)).toContain('模型已切换')
+      await deliver({ text: '切换后测试' })
+      expect(adapter.requests.at(-1)).toMatchObject({
+        provider: 'mock', model: 'm2', reasoningEffort: max,
+      })
+    })
+
+    it('applies directly with cleared effort when the route has no reasoning metadata', { timeout: 20_000 }, async () => {
+      const adapter = new MockAdapter([textResponse('无档位回答')])
+      adapter.reasoningByModel = { m: reasoningHighMax, plain: undefined }
+      adapter.models = [{ provider: 'mock', id: 'plain', name: 'Plain 模型' }]
+      const { feishu, deliver } = await mountModel(adapter)
+      await deliver({ text: '/new' })
+      await deliver({ text: '/model' })
+
+      const providerCard = feishu.cards.at(-1)!
+      await feishu.clickCard(OWNER, providerCard.messageId, cardButtonValue(providerCard.card, '1. mock'))
+      const modelCard = feishu.cards.at(-1)!
+      await feishu.clickCard(OWNER, modelCard.messageId, cardButtonValue(modelCard.card, '选择此模型'))
+
+      const statusCard = feishu.cards.at(-1)!
+      expect(JSON.stringify(statusCard.card)).toContain('模型已切换')
+      expect(JSON.stringify(statusCard.card)).toContain('档位')
+      await deliver({ text: '无档位测试' })
+      expect(adapter.requests.at(-1)).toMatchObject({ provider: 'mock', model: 'plain' })
+      expect(adapter.requests.at(-1)!.reasoningEffort).toBeUndefined()
+    })
+
+    it('catalog failure reports and leaves the switch unmade', { timeout: 20_000 }, async () => {
+      const adapter = new MockAdapter([], reasoningHighMax)
+      adapter.models = [{ provider: 'mock', id: 'm', name: '模型一' }]
+      const { feishu, deliver } = await mountModel(adapter)
+      await deliver({ text: '/new' })
+      adapter.failListModels = true
+      await deliver({ text: '/model' })
+      const providerCard = feishu.cards.at(-1)!
+      await feishu.clickCard(OWNER, providerCard.messageId, cardButtonValue(providerCard.card, '1. mock'))
+      expect(feishu.sent.at(-1)!.text).toContain('模型目录不可用')
+      adapter.failListModels = false
     })
   })
 

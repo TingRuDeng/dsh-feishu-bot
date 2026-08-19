@@ -1,5 +1,6 @@
 import type { FeishuCard } from './task-card.ts'
 import { createCardMessageEnvelope, jsonUtf8Bytes } from '../gateway/envelope.ts'
+import { normalizeLarkPlainText } from './lark-markdown.ts'
 
 /** Leave headroom below Feishu's documented card size ceiling. */
 export const RESULT_CARD_SOFT_LIMIT_BYTES = 24 * 1_024
@@ -28,7 +29,7 @@ export function renderResultCard(
     header: {
       title: {
         tag: 'plain_text',
-        content: `${workspaceName} · 最终结果 · ${segmentIndex}/${segmentCount}`,
+        content: `${normalizeLarkPlainText(workspaceName) || '未知工作区'} · 最终结果 · ${segmentIndex}/${segmentCount}`,
       },
       template: 'green',
     },

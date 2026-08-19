@@ -38,6 +38,11 @@ describe('parseCommand', () => {
     expect(parseCommand('/effort high extra')).toEqual({ kind: 'invalid', name: 'effort', problem: 'extra-arguments' })
   })
 
+  it('/model is an argument-less command (M7.1)', () => {
+    expect(parseCommand('/model')).toEqual({ kind: 'model' })
+    expect(parseCommand('/model x')).toEqual({ kind: 'invalid', name: 'model', problem: 'extra-arguments' })
+  })
+
   it('/stop is an argument-less command (M2)', () => {
     expect(parseCommand('/stop')).toEqual({ kind: 'stop' })
     expect(parseCommand('/stop now')).toEqual({ kind: 'invalid', name: 'stop', problem: 'extra-arguments' })

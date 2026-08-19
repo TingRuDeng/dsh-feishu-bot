@@ -13,6 +13,12 @@ describe('result-card capacity preflight', () => {
     expect(segment!.card.elements[0]!.text.content).toBe(segment!.text)
   })
 
+  it('normalizes a hostile workspace name in the plain-text header (S4)', () => {
+    const [segment] = segmentResultCards('oc_test', '工作区\n[告警](http://evil.example)', '正文')
+    expect(segment!.card.header.title.content)
+      .toBe('工作区 [告警](http://evil.example) · 最终结果 · 1/1')
+  })
+
   it('neutralizes backticks inside a local path so inline code stays balanced', () => {
     const [segment] = segmentResultCards('oc_test', 'workspace', '[奇怪文件](/tmp/a`b.txt)')
 

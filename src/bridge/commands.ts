@@ -11,6 +11,7 @@ export type ParsedCommand =
   | { kind: 'use'; sessionId: string }
   | { kind: 'effort'; effortId: string }
   | { kind: 'ls' }
+  | { kind: 'model' }
   | { kind: 'status' }
   | { kind: 'release' }
   | { kind: 'stop' }
@@ -43,6 +44,7 @@ export function parseCommand(text: string): ParsedCommand | undefined {
       if (rest.length > 1) return { kind: 'invalid', name: 'effort', problem: 'extra-arguments' }
       return { kind: 'effort', effortId: rest[0]! }
     case 'ls':
+    case 'model':
     case 'status':
     case 'release':
     case 'stop':

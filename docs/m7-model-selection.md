@@ -1,6 +1,6 @@
 # M7 架构方案：模型选择与推理强度
 
-状态：**M7.0、M7.2、M7.3 已实现（2026-08-18），M7.1 仍为方案**。本文同时记录已验证事实与后续设计，
+状态：**M7.0–M7.3 全部实现（2026-08-18）**。本文同时记录已验证事实与后续设计，
 实现进度以 [implementation.md](implementation.md) 的 M7 小节为准。
 
 参考 weclaw 的交互语义（模型/档位切换、状态作用域分离、导航快照），**只借产品语义，
@@ -165,9 +165,9 @@ step** 生效；当前 step 使用 `assembled` 快照。
 理由：同 chat 内 allowlist 用户共享**输入权**（发消息），但不共享**控制权**（停止、
 解绑、审批、改模型）。这是既有矩阵的一致延伸，不是新规则。
 
-### 5.3 三层卡片复用 `/ls` 骨架
+### 5.3 三层卡片复用 `/ls` 骨架 —— ✅ 已实现（2026-08-18）
 
-`/model` 的导航结构与 `/ls` 同构，**必须复用同一套校验**：
+`/model` 的导航结构与 `/ls` 同构，**复用同一套校验**：
 
 - 随机 token + `listingTtlMs` 过期
 - `operatorOpenId` 比对
@@ -175,15 +175,18 @@ step** 生效；当前 step 使用 `assembled` 快照。
 - `presentation`: `staged | visible | uncertain | text` 四态
 - patch 失败降级独立卡，create 模糊不重发第二张
 
-**不得**为 `/model` 新写一套卡片状态机。任何绕过上述校验的新卡片入口，都是在审批之外
-开第二个未加固面。
+实现（`src/bridge/model-card.ts` 纯函数 + `src/bridge/index.ts` 编排）：provider 列表来自
+`ctx.llm.listProviders()`（已注册 route，非配置目录）；模型列表来自 `listModels()`；
+档位层来自 `resolveModelInfo().reasoning.efforts`。三层均每页 7 条、无全局截断；按钮值
+`kind:'model'` 走同一卡片动作分发。catalog 不可用/为空/元数据不可用时**不修改**当前选择
+并文字说明。档位层的"保持当前"仅在当前 effort 对新 route 合法时出现（§5.4）。
 
-### 5.4 effort 的 per-route 合法性
+### 5.4 effort 的 per-route 合法性 —— ✅ 已实现（2026-08-18）
 
 `efforts` 是**每个 provider/model route 独有**的，不是全局常量。例如 deepseek 适配器
 只接受 `off` / `high` / `max`，非法值在 `serialize.ts` 抛错。
 
-因此切换 model 时**必须重新校验 effort**：
+因此切换 model 时**必须重新校验 effort**（`revalidateEffort` 纯函数）：
 
 ```
 新 route 的 efforts 包含当前 effort  ⇒ 保留
@@ -192,6 +195,11 @@ step** 生效；当前 step 使用 `assembled` 快照。
 ```
 
 静默丢弃或静默保留非法值都不可接受：前者用户以为设置生效，后者下一轮请求直接失败。
+
+实现细节：选模型后若新 route 无档位元数据，直接应用切换并清空 effort（状态卡注明）；
+有档位时进入档位层，"保持当前"按钮只在重校验为"保留"时渲染，显式选择/清空/保持都
+在写 ref 前用 `resolveModelInfo` 二次校验。回归见 `tests/model-card.spec.ts`（三分支纯函数）
+与 `tests/bridge.spec.ts` M7.1 组（跨 route 切换实际生效、无档位清空、目录失败不改选择）。
 
 ---
 
@@ -245,11 +253,15 @@ ref 是先注册者，之后 Web GUI 触碰该会话时其惰性安装会输给�
 `/model` 卡片会渲染 provider / model / effort 的 `name` 与 `description`——这些是
 **适配器提供的外部数据**，直接进 `lark_md`。
 
-当前仓库内 `escapeLarkMarkdown` 只存在于 `session-list-card.ts`，审批卡、结果卡、
-任务卡均未转义（见 [HANDOFF.md](HANDOFF.md) 安全项 S4）。
+**S4 转义统一已落地（2026-08-18）**：共享模块 `src/bridge/lark-markdown.ts` 的
+`escapeLarkMarkdownLiteral` / `normalizeLarkPlainText` 是唯一转义实现；审批卡、任务卡、
+会话列表卡（含按钮/标题）、结果卡 header 均已使用；桥内文本消息路径（`/status`
+`/effort` 的档位名与非法值回显、`/ls` 文本 fallback 的会话标题、卡片绑定 fallback、
+`/unknown`/`/invalid` 回显、`/new` 的 cwd、文本 `/use` 的 sessionId）也已统一转义。
+对抗输入回归见 `tests/bridge.spec.ts` S4 组（档位名、非法档位 id、会话标题、未知命令名
+四类含 `[]()` `**` 的输入均以惰性字面量回显）。
 
-**M7.1 的前置条件**：转义函数提到共享模块，四个渲染器统一使用。否则 `/model` 会复制
-同一缺陷，把已知问题的暴露面再扩大一处。
+**M7.1 的前置已满足**：`/model` 卡片从第一天起就复用该共享转义，不再复制旧缺陷。
 
 ### 6.4 与 `agentProvider` / `agentModel` 配置的关系
 
@@ -308,12 +320,14 @@ M7.3 已将桥内模型选择按 `sessionId` 注册为 `Map<SessionId, ModelSele
 元数据不可用与无档位路由不修改选择。测试见 `tests/bridge.spec.ts` M7.2 组与
 `tests/commands.spec.ts` 的 `/effort` 解析。
 
-### M7.1 `/model` 三层卡片
+### M7.1 `/model` 三层卡片 —— ✅ 已实现（2026-08-18）
 
-最大的一项，放最后。前置：S4 转义统一（§6.3）。
-
-**验收**：三层导航、返回、分页、token/TTL/operator/messageId 校验、patch 失败降级、
-换 model 后 effort 重校验（§5.4 三分支全覆盖）。
+三层导航、返回、分页、token/TTL/operator/messageId 校验、patch 失败降级、换 model 后
+effort 重校验（§5.4 三分支全覆盖）均落地（§5.3/§5.4 详述）。四条所有权拒绝路径与
+`/effort` 同构：无绑定、非 boundBy、live Web-owned existing、冷会话不隐式恢复。验收与
+回归：`tests/model-card.spec.ts`（转义/分页/三分支/状态卡纯函数）+ `tests/bridge.spec.ts`
+M7.1 组（四拒绝路径、provider→model→effort 全流程点击后下一轮 `agent/request` 实际携带
+新 provider/model/effort、无档位 route 直接清空生效、目录失败不改选择）。
 
 ---
 

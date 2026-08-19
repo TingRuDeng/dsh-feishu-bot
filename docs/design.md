@@ -517,5 +517,6 @@ bridge listener 收到 approval/request
   归属为"谁冷恢复谁安装"。证据：`scripts/m7-web-selection-experiment.mjs`（注册序隔离、
   飞书建-Web 触碰、Web 独有对照三场景），详见 [M7 架构方案](m7-model-selection.md) §6.1/§9。
 - **M7.3 `/status` 与注册表已由源码/自动化确认（2026-08-18）**：桥按 `sessionId` 保存 `ModelSelectionRef`，只为 `/new` 创建或冷恢复的 Agent 安装；Agent dispose 同时卸载 listener 并删除条目，live `existing` 不抢占 Web 所有权。`/status` 区分未绑定、桥持有、live Web-owned、冷/未激活，分别显示当前实际值与新会话默认的 provider/model/effort；effort 名由 `resolveModelInfo` 解析，失败回显原始 id并标记元数据不可用。证据为 `tests/bridge.spec.ts`、`tests/model-selection.spec.ts`，全量 23 文件/372 测试通过，typecheck 通过。
+- **S4 转义统一与 M7.1/M7.2 已由自动化确认（2026-08-18）**：共享 `lark-markdown.ts` 的转义覆盖审批卡、任务卡、会话列表卡、结果卡 header 与全部文本回显路径（`/status` `/effort` `/ls` fallback `/unknown` `/new`），对抗输入回归通过；`/effort` 与 `/model` 三层卡沿用同一四类所有权判定（无绑定/非 boundBy/live Web-owned/冷不隐式恢复），换 model 走 `revalidateEffort` 三分支，全流程点击后下一轮 `agent/request` 实际携带新三元组。证据为 `tests/bridge.spec.ts` S4/M7.1/M7.2 组、`tests/model-card.spec.ts`、`tests/model-selection.spec.ts`。
 - **M7 仍待真实部署确认**：真实 provider 的 `listModels` catalog 内容与 `resolveModelInfo` 的 `reasoning` 暴露情况。须实机确认。
 - **仍待真实飞书确认**：平台重复事件与 UUID 去重时间窗；启动期消息和进程中止后的实际重投；timeout/断连的迟到 create；真实非零 patch 业务码；组卡 patch 失败后的独立审批卡；Web/飞书 race 的 UI 表现；HMR drain 与重启补投的最终消息数量。缺少这些证据前不声明端到端 exactly-once 或“完全可靠”。
