@@ -146,7 +146,7 @@ M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加
 
 待完成：专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain）。该矩阵未完成前不声明端到端 exactly-once 已完成。
 
-## M7：模型选择与推理强度（M7.0 已实现，M7.1–M7.3 方案）
+## M7：模型选择与推理强度（M7.0、M7.3 已实现，M7.1–M7.2 方案）
 
 完整架构方案见 [M7 架构方案](m7-model-selection.md)。此处只记里程碑与门槛。
 
@@ -157,7 +157,7 @@ M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加
 | 阶段 | 内容 | 门槛 |
 |---|---|---|
 | M7.0 ✅（2026-08-18） | `/new` setup 与 `/use` 冷恢复安装 `ModelSelectionRef`（`installModelSelection`）；`existing` 不安装 | 回归测试三条：`/new` 首次请求 effort = 默认选择；`/use` 冷恢复同；live Web-owned Agent 经 `/use` 绑定不安装（adapter 默认档生效）。全量测试、typecheck 通过 |
-| M7.3 | `/status` 分列"当前会话"与"新会话默认" | 三类情形（绑定/未绑定/`existing`）文案正确 |
+| M7.3 ✅（2026-08-18） | `/status` 分列“当前会话”与“新会话默认” | 未绑定、桥持有、live `existing`、冷/未激活四类文案；provider/model/effort 显示；effort 名称解析失败可降级；注册表按 Agent dispose 清理 |
 | M7.2 | `/effort <id>` | 非法值回显该 route 合法集合；权限归 boundBy |
 | M7.1 | `/model` 三层卡片 | 复用 `/ls` token/TTL/operator/messageId 校验；换 model 后档位重校验三分支 |
 
@@ -167,8 +167,9 @@ Web 端对任何被触碰的 live Agent 惰性安装 ref；waterfall 先注册�
 先装后始终赢，Web 端在飞书会话上的模型切换静默无效；冷恢复归属"谁冷恢复谁安装"。
 结论见 m7-model-selection.md §6.1/§9。
 
-顺序按依赖与风险暴露成本排列：先只读的 M7.3 验证 `listModels` / `resolveModelInfo`
-在真实部署下的返回，数据链路有问题时在只读命令上暴露远比在三层卡片交互里便宜。
+M7.3 的实现位于 `src/bridge/model-selection.ts` 与 `src/bridge/index.ts`：注册表只保存桥创建或冷恢复的 Agent ref，live `existing` 不抢占 Web 所有权；`/status` 使用 `ctx.llm.resolveModelInfo()` 做 effort 名称解析，并在元数据不可达时回显原始 id。回归覆盖注册表 dispose 清理、四类绑定状态、无 effort、默认来源及解析失败降级。全量验证：23 个测试文件、372 个测试通过；`tsc --noEmit` 通过；`git diff --check` 通过。真实 provider catalog 与真实飞书 GUI 交互仍待实机确认。
+
+顺序按依赖与风险暴露成本排列：M7.3 已先以只读命令验证状态数据链路；后续 M7.2/M7.1 仍需真实部署与交互验收。
 
 M7.1 的前置是 S4 转义统一——`/model` 卡片渲染适配器提供的 name/description，当前
 `escapeLarkMarkdown` 只在 `session-list-card.ts` 内，不先统一就会复制同一缺陷。

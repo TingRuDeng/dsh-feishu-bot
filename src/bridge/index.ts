@@ -11,13 +11,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { randomBytes } from 'node:crypto'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import {
-  installModelSelection,
   type AgentOptions,
   type ModelSelection,
-  type ModelSelectionRef,
 } from '@deepseek-ai/dsh-agent'
 import {
   classifyFeishuFailure,
@@ -42,6 +40,7 @@ import {
 import { parseCommand } from './commands.ts'
 import { authorizeCwd, buildWorkspaceFilter, validateDefaultWorkspace } from './workspace.ts'
 import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
+import { createModelSelectionRegistry } from './model-selection.ts'
 import { reconcileMessage } from './inbound.ts'
 import {
   directBoundTaskMessageId,
@@ -165,7 +164,7 @@ export const Config: z<Config> = z.transform(ConfigSchema, (config) => {
 export const name = 'feishu-bridge'
 export const inject = [
   'feishu', 'agents', 'sessions', 'sessionPersistence', 'storageDomain',
-  'agentDefaultModel', 'workspaceRegistry', 'sessionProjections', 'sessionProjectionCache',
+  'agentDefaultModel', 'workspaceRegistry', 'sessionProjections', 'sessionProjectionCache', 'llm',
 ]
 
 type Tables = {
@@ -353,17 +352,36 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const agentOptions = (): AgentOptions => defaultSelection()
   const archivedSessionIds = (): Set<string> =>
     new Set(workspaceRegistry.archivedSessionIds.map(String))
-  const installSelectionRef = (agentCtx: Context, sessionId: SessionId): void => {
-    const selection: ModelSelectionRef = {
-      current: defaultSelection(),
-      assembled: undefined,
+  // M7.3: the registry keeps one ref per bridge-owned session; entries die
+  // with their agent scope (model-selection.ts). `install` is handed to the
+  // resolver for cold resumes and called directly in the /new setup.
+  const modelSelections = createModelSelectionRegistry(defaultSelection)
+  const resolve = createBridgeAgentResolver(ctx, agentOptions, modelSelections.install)
+
+  /**
+   * Human name for one reasoning effort, resolved through the adapter's
+   * route metadata (M7.3). Three outcomes stay distinct in the text: named,
+   * unnamed (metadata present but id unknown — show the raw id), and
+   * metadata-unavailable (resolveModelInfo threw — raw id plus a marker).
+   */
+  const describeEffort = async (
+    provider: string, model: string, effort: ReasoningEffortId | undefined,
+  ): Promise<string> => {
+    if (effort === undefined) return '未指定（模型默认）'
+    try {
+      const info = await ctx.llm.resolveModelInfo(provider, model)
+      const name = info.reasoning?.efforts.find(candidate => candidate.id === effort)?.name
+      return name === undefined ? String(effort) : name
+    } catch {
+      return `${String(effort)}（元数据不可用）`
     }
-    agentCtx.effect(
-      () => installModelSelection(agentCtx, selection),
-      `feishuBridge.modelSelection(${String(sessionId)})`,
-    )
   }
-  const resolve = createBridgeAgentResolver(ctx, agentOptions, installSelectionRef)
+
+  /** One provider/model/effort selection rendered for a /status line. */
+  const describeSelection = async (selection: ModelSelection): Promise<string> =>
+    `${selection.provider}/${selection.model}（档位：${await describeEffort(
+      selection.provider, selection.model, selection.reasoningEffort,
+    )}）`
 
   /** Recorded cwd of a session: live header first, then persisted header. */
   const sessionCwd = async (sessionId: string): Promise<string | undefined> => {
@@ -1971,9 +1989,10 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           '/new [cwd] — 新建会话并绑定（cwd 须在允许的工作区内）',
           '/ls — 先选工作空间，再按真实标题选择未归档会话',
           '/use <sessionId|编号> — 绑定未归档会话（编号对应当前打开的工作空间）',
-          '/status — 当前绑定状态',
+          '/status — 绑定状态、当前会话与新会话默认的模型/档位',
           '/stop — 停止当前任务（排队消息保留）',
           '/release — 解绑并停止后续飞书同步（会话继续运行）',
+          '模型/档位选择只在进程内生效，重启后回落 Web 默认。',
           '普通文本会作为消息发给绑定的会话。',
         ].join('\n'))
         return
@@ -2088,10 +2107,36 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         return
       }
       case 'status': {
+        // M7.3: distinguish the bound session's actual value from the
+        // new-session default. Four shapes: unbound; bridge-owned (ref
+        // installed — the current selection is the next step's); existing
+        // (live agent without a bridge ref — Web holds selection); cold
+        // (bound but not live — ownership decided by whichever frontend
+        // resumes, and a bridge resume adopts the default).
         const binding = bindings.get(chatId)
-        await commit(binding === undefined
-          ? '未绑定会话。'
-          : `绑定：${binding.sessionId}（${binding.status}），由 ${binding.boundBy} 于 ${new Date(binding.boundAt).toLocaleString()} 绑定。模型提问需在 Web GUI 作答。`)
+        const lines: string[] = []
+        if (binding === undefined) {
+          lines.push('未绑定会话。')
+        } else {
+          lines.push(`绑定：${binding.sessionId}（${binding.status}），由 ${binding.boundBy} 于 ${new Date(binding.boundAt).toLocaleString()} 绑定。`)
+          const sessionId = binding.sessionId as unknown as SessionId
+          const ref = modelSelections.get(sessionId)
+          const live = ctx.agents.get(sessionId)
+          if (ref !== undefined) {
+            const current = ref.current
+            lines.push(current === undefined
+              ? '当前会话：未指定（下一轮回落新会话默认值）'
+              : `当前会话：${await describeSelection(current)}`)
+            lines.push('切换在下一轮生效；重启后临时切换会丢失（模型选择不持久化）。')
+          } else if (live !== undefined) {
+            lines.push('当前会话由 Web 端持有模型选择权，实际值以 Web 端为准。')
+          } else {
+            lines.push('当前会话未激活；恢复后由飞书接管模型选择，将使用新会话默认值。')
+          }
+        }
+        const source = configuredProvider === undefined ? 'Web GUI 设置' : '部署配置'
+        lines.push(`新会话默认：${await describeSelection(defaultSelection())}（来源：${source}）`)
+        await commit(lines.join('\n'))
         return
       }
       case 'release': {
@@ -2184,7 +2229,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
               // M7.0: model selection (with reasoning effort) installs in the
               // agent scope before publication, alongside M6's ownership
               // compensation. Ownership is unambiguous here: /new created it.
-              installSelectionRef(agentCtx, sessionId)
+              modelSelections.install(agentCtx, sessionId)
               agentCtx.effect(() => async () => {
                 rollbackRequested = true
                 if (!setupAdopted) {

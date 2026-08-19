@@ -1,6 +1,6 @@
 # M7 架构方案：模型选择与推理强度
 
-状态：**M7.0 已实现（2026-08-18），M7.1–M7.3 方案（未实现）**。本文只描述设计与边界，
+状态：**M7.0、M7.3 已实现（2026-08-18），M7.1–M7.2 仍为方案**。本文同时记录已验证事实与后续设计，
 实现进度以 [implementation.md](implementation.md) 的 M7 小节为准。
 
 参考 weclaw 的交互语义（模型/档位切换、状态作用域分离、导航快照），**只借产品语义，
@@ -279,21 +279,17 @@ M7 的裁定：**配置覆盖是部署级下限，不是锁**。用户仍可用 
 等于 `agentDefaultModel` 当前值。有回归测试（`tests/bridge.spec.ts` M7.0 组：`/new` 继承、
 `/use` 冷恢复继承、live Web-owned Agent 经 `/use` 绑定不安装三条）。
 
-### M7.3 `/status` 展示（先于交互）
+### M7.3 `/status` 展示（只读）—— ✅ 已实现（2026-08-18）
 
-**先做只读**，因为它能用最小代价验证 `listModels` / `efforts` 在真实部署下返回预期
-数据。数据链路有问题时，在只读命令上暴露远比在三层卡片交互里暴露便宜。
+M7.3 已将桥内模型选择按 `sessionId` 注册为 `Map<SessionId, ModelSelectionRef>`：
 
-按 weclaw"状态命令区分作用域"（lessons.md）分两组表述：
+- `/new` 与 `/use` 冷恢复在 Agent setup 作用域安装 ref；live `existing` Agent 不安装、不修改。
+- Agent scope dispose 时同时卸载 waterfall 并删除 map 条目，避免历史会话泄漏。
+- `/status` 保留绑定信息，并分别报告当前会话实际值与新会话默认值，覆盖未绑定、桥持有、live Web-owned existing、冷/未激活四类情形。
+- 每组值显示 provider/model/effort；effort 通过 `resolveModelInfo` 解析名称。元数据缺失时显示原始 id，解析失败时显示原始 id 并标注“元数据不可用”。
+- 默认值标明来源（Web GUI 设置或部署配置）；冷恢复说明会采用新会话默认。模型选择仍只在进程内生效，重启后回落默认。
 
-```
-当前会话：deepseek / deepseek-chat / high
-新会话默认：deepseek / deepseek-chat / （provider 默认）
-```
-
-空字段用占位文案说明默认语义，不留空白。
-
-**验收**：绑定/未绑定、有/无 effort、`ownership: existing` 三类情形文案正确。
+回归覆盖：`tests/bridge.spec.ts` 的 M7.3 status 组，以及 `tests/model-selection.spec.ts` 的注册、按 session 隔离和 dispose 清理。全量验证见实现文档。
 
 ### M7.2 `/effort <id>`
 

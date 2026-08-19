@@ -65,6 +65,8 @@ export function toolCallResponse(rawCallId: string, name: string, args: object, 
  */
 export class MockAdapter extends LlmAdapter {
   requests: GenerateOptions[] = []
+  /** When set, resolveModel throws — exercising metadata-unavailable fallbacks. */
+  failResolveModel = false
 
   constructor(
     private script: (StreamChunk[] | ((options: GenerateOptions) => StreamChunk[]) | 'hang' | 'hang-slow')[],
@@ -78,6 +80,7 @@ export class MockAdapter extends LlmAdapter {
     provider: string,
     model: string,
   ): Promise<LlmResolvedModelInfo> {
+    if (this.failResolveModel) return Promise.reject(new Error('simulated resolveModel failure'))
     return Promise.resolve({
       provider,
       id: model,

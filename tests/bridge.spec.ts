@@ -636,6 +636,116 @@ describe('assembled bridge (M1 acceptance)', () => {
     })
   })
 
+  describe('M7.3: /status model selection reporting', () => {
+    const high = ReasoningEffortId('high')
+    const max = ReasoningEffortId('max')
+    const reasoningInfo = {
+      efforts: [
+        { id: high, name: 'High' },
+        { id: max, name: 'Max' },
+      ],
+      defaultEffort: max,
+    }
+    const defaultSelection = () => ({ provider: 'mock', model: 'm', reasoningEffort: high })
+
+    it('unbound: reports the new-session default with its source', async () => {
+      const { feishu, deliver } = await mountBridge(
+        new MockAdapter([], reasoningInfo), { agentProvider: undefined, agentModel: undefined },
+        undefined, undefined, undefined, undefined, defaultSelection,
+      )
+      await deliver({ text: '/status' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('未绑定会话')
+      expect(text).toContain('新会话默认：mock/m（档位：High）')
+      expect(text).toContain('来源：Web GUI 设置')
+    })
+
+    it('configured override: default line carries the deployment source and unspecified effort', async () => {
+      const { feishu, deliver } = await mountBridge(new MockAdapter([]))
+      await deliver({ text: '/status' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('新会话默认：mock/m（档位：未指定（模型默认））')
+      expect(text).toContain('来源：部署配置')
+    })
+
+    it('bridge-owned binding: reports current value, default, and the restart caveat', async () => {
+      const adapter = new MockAdapter([], reasoningInfo)
+      const { feishu, deliver } = await mountBridge(
+        adapter, { agentProvider: undefined, agentModel: undefined },
+        undefined, undefined, undefined, undefined, defaultSelection,
+      )
+      await deliver({ text: '/new' })
+      await deliver({ text: '/status' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('当前会话：mock/m（档位：High）')
+      expect(text).toContain('新会话默认：mock/m（档位：High）')
+      expect(text).toContain('重启后临时切换会丢失')
+    })
+
+    it('existing (live Web-owned): defers the current value to Web', async () => {
+      const probeRoot = await mkdtemp(join(tmpdir(), 'feishu-bridge-'))
+      dirs.push(probeRoot)
+      const { feishu, deliver } = await mountBridge(
+        new MockAdapter([], reasoningInfo),
+        { agentProvider: undefined, agentModel: undefined },
+        probeRoot, undefined, async (ctx) => {
+          await ctx.agents.create({
+            sessionId: 'web-owned-status' as never,
+            meta: { cwd: probeRoot },
+            agentOptions: { provider: 'mock', model: 'm' },
+          })
+        }, undefined, defaultSelection,
+      )
+      await deliver({ eventId: 'ev_use_status_web', text: '/use web-owned-status' })
+      await deliver({ text: '/status' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('以 Web 端为准')
+      expect(text).toContain('新会话默认：mock/m（档位：High）')
+    })
+
+    it('cold bound session: reports inactive and that resume adopts the default', async () => {
+      // A session only exists across restarts once it has a durable event log
+      // (upstream persistence materializes lazily on first append), so give
+      // the /new session one turn before disposing the first process.
+      const first = await mountBridge(
+        new MockAdapter([textResponse('第一条消息的回复')], reasoningInfo),
+        { agentProvider: undefined, agentModel: undefined },
+        undefined, undefined, undefined, undefined, defaultSelection,
+      )
+      await first.deliver({ text: '/new' })
+      await first.deliver({ text: '先聊一句让会话落盘' })
+      await first.ctx.fiber.dispose()
+
+      const second = await mountBridge(
+        new MockAdapter([], reasoningInfo),
+        { agentProvider: undefined, agentModel: undefined },
+        first.root, undefined, undefined, undefined, defaultSelection,
+      )
+      // Unique wire ids: the second process's counter restarts, and the first
+      // process's rows are already in the durable inbound table.
+      await second.deliver({ eventId: 'ev_status_cold', messageId: 'om_status_cold', text: '/status' })
+      // Startup recovery may replay the prior turn's terminal card; the
+      // /status reply is not necessarily the last send, so scan for it.
+      const texts = second.feishu.sent.map(send => send.text)
+      expect(texts.some(text => text.includes('未激活'))).toBe(true)
+      expect(texts.some(text => text.includes('新会话默认：mock/m（档位：High）'))).toBe(true)
+    })
+
+    it('resolveModelInfo failure falls back to the raw effort id with a marker', async () => {
+      const adapter = new MockAdapter([], reasoningInfo)
+      const { feishu, deliver } = await mountBridge(
+        adapter, { agentProvider: undefined, agentModel: undefined },
+        undefined, undefined, undefined, undefined, defaultSelection,
+      )
+      adapter.failResolveModel = true
+      await deliver({ text: '/new' })
+      await deliver({ text: '/status' })
+      const text = feishu.sent.at(-1)!.text
+      expect(text).toContain('档位：high（元数据不可用）')
+      adapter.failResolveModel = false
+    })
+  })
+
   it('result-card creation failure falls back to text without losing the answer', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter([textResponse('不能丢失的回答')]))
     await deliver({ text: '/new' })
@@ -1641,14 +1751,14 @@ describe('assembled bridge (M1 acceptance)', () => {
   it('/status and /release reflect and clear the binding', { timeout: 20_000 }, async () => {
     const { feishu, deliver } = await mountBridge(new MockAdapter([]))
     await deliver({ text: '/status' })
-    expect(feishu.sent.at(-1)!.text).toContain('未绑定')
+    expect(feishu.sent.at(-1)!.text).toContain('未绑定会话')
     await deliver({ text: '/new' })
     await deliver({ text: '/status' })
-    expect(feishu.sent.at(-1)!.text).toContain('绑定：')
+    expect(feishu.sent.at(-1)!.text).toContain('当前会话')
     await deliver({ text: '/release' })
     expect(feishu.sent.at(-1)!.text).toContain('已解绑')
     await deliver({ text: '/status' })
-    expect(feishu.sent.at(-1)!.text).toContain('未绑定')
+    expect(feishu.sent.at(-1)!.text).toContain('未绑定会话')
   })
 
   it('only boundBy may release or stop an active binding', { timeout: 20_000 }, async () => {
