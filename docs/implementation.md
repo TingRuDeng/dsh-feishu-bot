@@ -146,20 +146,26 @@ M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加
 
 待完成：专用飞书 chat 故障矩阵（重复事件、启动期消息、进程中止、重启补投、create timeout、patch 失败、审批 fallback、HMR drain）。该矩阵未完成前不声明端到端 exactly-once 已完成。
 
-## M7：模型选择与推理强度（方案，未实现）
+## M7：模型选择与推理强度（M7.0 已实现，M7.1–M7.3 方案）
 
 完整架构方案见 [M7 架构方案](m7-model-selection.md)。此处只记里程碑与门槛。
 
 前置缺陷：`AgentOptions` 不含 `reasoningEffort`，而桥把 `agentDefaultModel.currentSelection()`
 （`ModelSelection`，含该字段）直接当 `AgentOptions` 传给 `agents.create()`。结构化子类型
-使其静默通过，档位被丢弃——**飞书 `/new` 的会话不继承 Web 端设置的推理强度**。M7.0 先修此项。
+使其静默通过，档位被丢弃——**飞书 `/new` 的会话不继承 Web 端设置的推理强度**。M7.0 已修。
 
 | 阶段 | 内容 | 门槛 |
 |---|---|---|
-| M7.0 | 在 `/new` setup 与 `/use` 冷恢复安装 `ModelSelectionRef`（`installModelSelection`） | 首次 `agent/request` 的 `reasoningEffort` 等于默认选择；回归测试 |
+| M7.0 ✅（2026-08-18） | `/new` setup 与 `/use` 冷恢复安装 `ModelSelectionRef`（`installModelSelection`）；`existing` 不安装 | 回归测试三条：`/new` 首次请求 effort = 默认选择；`/use` 冷恢复同；live Web-owned Agent 经 `/use` 绑定不安装（adapter 默认档生效）。全量测试、typecheck 通过 |
 | M7.3 | `/status` 分列"当前会话"与"新会话默认" | 三类情形（绑定/未绑定/`existing`）文案正确 |
 | M7.2 | `/effort <id>` | 非法值回显该 route 合法集合；权限归 boundBy |
 | M7.1 | `/model` 三层卡片 | 复用 `/ls` token/TTL/operator/messageId 校验；换 model 后档位重校验三分支 |
+
+M7.0 附带完成的运行时实验（`scripts/m7-web-selection-experiment.mjs`，真实
+Cordis/AgentRegistry/AgentLoop 运行时 + api-proxy `selectionFor` 语义逐字回放）：
+Web 端对任何被触碰的 live Agent 惰性安装 ref；waterfall 先注册者赢 ⇒ 飞书 setup
+先装后始终赢，Web 端在飞书会话上的模型切换静默无效；冷恢复归属"谁冷恢复谁安装"。
+结论见 m7-model-selection.md §6.1/§9。
 
 顺序按依赖与风险暴露成本排列：先只读的 M7.3 验证 `listModels` / `resolveModelInfo`
 在真实部署下的返回，数据链路有问题时在只读命令上暴露远比在三层卡片交互里便宜。
@@ -189,7 +195,7 @@ M7.1 的前置是 S4 转义统一——`/model` 卡片渲染适配器提供的 n
 | 真实组卡 patch 错误码与独立卡 fallback 未验收 | 中 | 故障注入已绿；实机记录 code、数量与最终可见状态，不保存正文/完整 ID |
 | 硬容量背压在部署默认值下缺长时运行证据 | 中 | 运维监控 `retention-backpressure` / `*-backpressure` 固定审计事件，先压测再发布 |
 | 飞书卡片频控 | 低 | 任务卡节流、per-target 串行、重试/熔断；终态使用 durable delivery |
-| M7 与 Web 对同一 Agent 并发安装 selection ref | 中 | 飞书只对 `created-here` 安装；`existing` 拒绝切换并提示在 Web 端操作。Web 侧安装范围须运行时实验确认（M7 未决问题 1） |
+| M7 与 Web 对同一 Agent 并发安装 selection ref | 低（M7.0 实验已确认方向） | 飞书只对 `created-here` 安装；`existing` 拒绝切换并提示在 Web 端操作。waterfall 先注册者赢 ⇒ 飞书 setup 先装后始终赢；残余为 Web 侧 UX——Web GUI 在飞书会话上改模型静默无效（M7 文档 §6.1/§9，真实 GUI 点击复核留待实机） |
 
 ## 已定决策（2026-08，M0 前）
 

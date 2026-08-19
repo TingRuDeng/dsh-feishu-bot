@@ -13,7 +13,12 @@ import z from '@deepseek-ai/schemastery'
 import { randomBytes } from 'node:crypto'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
-import type { AgentOptions } from '@deepseek-ai/dsh-agent'
+import {
+  installModelSelection,
+  type AgentOptions,
+  type ModelSelection,
+  type ModelSelectionRef,
+} from '@deepseek-ai/dsh-agent'
 import {
   classifyFeishuFailure,
   isPermanentFeishuFailure,
@@ -199,7 +204,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   await validateDefaultWorkspace(config.defaultWorkspace, config.allowedWorkspaces)
   setupSignal.throwIfAborted()
   const defaultModel = ctx.get('agentDefaultModel') as {
-    currentSelection: () => AgentOptions
+    currentSelection: () => ModelSelection
   } | undefined
   const workspaceRegistry = ctx.get('workspaceRegistry') as {
     readonly archivedSessionIds: readonly SessionId[]
@@ -337,12 +342,28 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     )
     return work
   }
-  const agentOptions = (): AgentOptions => configuredProvider === undefined
+  // M7.0: the effective per-agent model selection, captured when an agent is
+  // created or cold-resumed. The configured override carries no effort — the
+  // adapter/provider default applies; the default path carries the complete
+  // provider/model/reasoningEffort triple. `agentOptions` alone would drop
+  // the effort silently, because dsh-agent's AgentOptions has no such field.
+  const defaultSelection = (): ModelSelection => configuredProvider === undefined
     ? defaultModel.currentSelection()
     : { provider: configuredProvider, model: configuredModel! }
+  const agentOptions = (): AgentOptions => defaultSelection()
   const archivedSessionIds = (): Set<string> =>
     new Set(workspaceRegistry.archivedSessionIds.map(String))
-  const resolve = createBridgeAgentResolver(ctx, agentOptions)
+  const installSelectionRef = (agentCtx: Context, sessionId: SessionId): void => {
+    const selection: ModelSelectionRef = {
+      current: defaultSelection(),
+      assembled: undefined,
+    }
+    agentCtx.effect(
+      () => installModelSelection(agentCtx, selection),
+      `feishuBridge.modelSelection(${String(sessionId)})`,
+    )
+  }
+  const resolve = createBridgeAgentResolver(ctx, agentOptions, installSelectionRef)
 
   /** Recorded cwd of a session: live header first, then persisted header. */
   const sessionCwd = async (sessionId: string): Promise<string | undefined> => {
@@ -2160,6 +2181,10 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
             meta: { cwd: authorized.realpath },
             agentOptions: agentOptions(),
             setup: async (agentCtx) => {
+              // M7.0: model selection (with reasoning effort) installs in the
+              // agent scope before publication, alongside M6's ownership
+              // compensation. Ownership is unambiguous here: /new created it.
+              installSelectionRef(agentCtx, sessionId)
               agentCtx.effect(() => async () => {
                 rollbackRequested = true
                 if (!setupAdopted) {

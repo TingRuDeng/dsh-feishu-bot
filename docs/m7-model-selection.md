@@ -1,7 +1,7 @@
 # M7 架构方案：模型选择与推理强度
 
-状态：**方案（未实现）**。本文只描述设计与边界，不代表已交付。实现进度以
-[implementation.md](implementation.md) 的 M7 小节与 [tasks/todo.md](../tasks/todo.md) 为准。
+状态：**M7.0 已实现（2026-08-18），M7.1–M7.3 方案（未实现）**。本文只描述设计与边界，
+实现进度以 [implementation.md](implementation.md) 的 M7 小节为准。
 
 参考 weclaw 的交互语义（模型/档位切换、状态作用域分离、导航快照），**只借产品语义，
 不复制代码**（AGPL 边界，同 [weclaw-lessons.md](weclaw-lessons.md) 纪律）。
@@ -66,7 +66,7 @@ TypeScript 结构化子类型允许多余字段通过（对象字面量以外不
 | 事件 | 作用 |
 |---|---|
 | `system-prompt/assemble` | 快照 `ref.current` 到 `ref.assembled`，并把 provider/model 注入模板变量 |
-| `agent/request` | 用 `ref.assembled` 覆写 `LlmCallConfig` 的 provider/model/reasoningEffort |
+| `agent/request` | 用 `ref.assembled` 覆写 `LlmCallConfig` 的 provider/model/reasoningEffort；同时**显式剥离继承的 effort**——ref 未选档位时请求回落该 model 的 provider 默认档，而不是沿用上游传入的值 |
 
 **谁调用 `installModelSelection`，谁就拥有该 Agent 的模型选择权。** 所以飞书要做模型
 切换，正确路径是持有一个 `ModelSelectionRef` 并调用它，而不是往 `AgentOptions` 塞字段。
@@ -200,20 +200,37 @@ step** 生效；当前 step 使用 `assembled` 快照。
 ### 6.1 与 Web GUI 的并发写
 
 同一 Agent 的 `ModelSelectionRef` 若被 Web 和飞书**同时安装两次**，两个
-`agent/request` listener 会按注册序覆写，后注册者赢——产生"用户在 Web 改了模型，
-飞书这边看不到，且下一轮以飞书的值发出"这类不可解释行为。
+`agent/request` listener 按注册序组成 waterfall：Cordis 的 waterfall 是
+outermost-first（`shift()` 从队头取），而 `installModelSelection` 的 listener 是
+先 `await next()` 再覆写——因此**先注册者赢**，后安装的 ref 会被静默压过。
 
-**裁定**：飞书只对**自己创建或冷恢复**的 Agent 安装 selection ref
-（`ownership: 'created-here'`）。对 `ownership: 'existing'` 的 Agent：
+**运行时实验（M7.0，2026-08-18）已确认**（脚本
+[`scripts/m7-web-selection-experiment.mjs`](../scripts/m7-web-selection-experiment.mjs)，
+真实 Cordis/AgentRegistry/AgentLoop 运行时 + api-proxy `selectionFor` 语义逐字回放）：
+
+- Web 端**会**对任何被其触碰的 live Agent 惰性安装 ref（`models`/`selectModel` RPC
+  走共享的 agent registry，飞书创建的 Agent 也在内；Web GUI 打开会话时 composer 模型
+  座 mount 即触发 `models` RPC）。
+- 但飞书在 agent setup（发布前）先装，Web 只能在发布后触碰——**先注册者总是飞书**。
+  所以对飞书创建的 Agent，飞书侧的切换持续生效；Web GUI 在该会话上改模型会**静默无效**
+  （Web 显示已选，下一轮仍以飞书的值发出）。双安装的后果不是随机胜负，而是偏向
+  原始创建者，代价是后安装者的 UI 说谎。
+
+**裁定**（维持不变，理由随实验强化）：飞书只对**自己创建或冷恢复**的 Agent 安装
+selection ref（`ownership: 'created-here'`）。对 `ownership: 'existing'` 的 Agent：
 
 - `/model` `/effort` 拒绝，回帖说明"该会话由 Web 端持有模型选择权，请在 Web 端切换"。
 - `/status` 仍显示 `agentDefaultModel` 默认值，并标注"当前会话实际值以 Web 端为准"。
 
-这与 §6.6 的 resolver ownership 语义一致：**谁创建谁拥有**，不跨前端抢占。
+这与 §6.6 的 resolver ownership 语义一致：**谁创建谁拥有**，不跨前端抢占。注意
+冷恢复的归属延伸：**谁冷恢复谁安装**——飞书 `/use` 冷恢复 Web 创建的会话后，飞书
+ref 是先注册者，之后 Web GUI 触碰该会话时其惰性安装会输给飞书（反之 Web 冷恢复后
+飞书不安装，Web 独有）。对双方都是"最后恢复方持有选择权"。
 
-**待确认**：Web 侧是否对所有 Agent 都安装 selection ref。若是，则飞书创建的 Agent 也
-可能被 Web 覆写。这一点**必须在 M7.0 用运行时实验确认**，不能靠静态阅读推断。结论
-写入 §12 事实状态标注。
+另有一处与 §9-2 相关的交互：若未来"恢复默认"把飞书 ref 的 `current` 清为
+`undefined`，`installModelSelection` 的 request listener 会原样放行内层结果——此时
+已安装的 Web ref（或请求头快照）的值会浮出。设计"恢复默认"入口时必须把它当作
+主动移交选择权处理，而不是简单的值清空。
 
 ### 6.2 catalog 与实际路由不一致
 
@@ -250,16 +267,17 @@ M7 的裁定：**配置覆盖是部署级下限，不是锁**。用户仍可用 
 
 顺序按**依赖**与**风险暴露成本**排列，不按功能大小。
 
-### M7.0 修复 effort 静默丢弃（前置，非功能）
+### M7.0 修复 effort 静默丢弃（前置，非功能）—— ✅ 已实现（2026-08-18）
 
 不修这个，后续所有 effort 功能都建在坏地基上。
 
 - 在 `/new` 的 setup 回调与 `/use` 冷恢复路径安装 `ModelSelectionRef`。
 - 用 `currentSelection()` 的完整三元组初始化。
-- 运行时实验确认 §6.1 的 Web 并发写行为。
+- 运行时实验确认 §6.1 的 Web 并发写行为（结论见 §6.1 与 §9）。
 
 **验收**：飞书 `/new` 创建的会话，其首次 `agent/request` 的 `LlmCallConfig.reasoningEffort`
-等于 `agentDefaultModel` 当前值。有回归测试。
+等于 `agentDefaultModel` 当前值。有回归测试（`tests/bridge.spec.ts` M7.0 组：`/new` 继承、
+`/use` 冷恢复继承、live Web-owned Agent 经 `/use` 绑定不安装三条）。
 
 ### M7.3 `/status` 展示（先于交互）
 
@@ -311,9 +329,16 @@ M7 的裁定：**配置覆盖是部署级下限，不是锁**。用户仍可用 
 
 ## 9. 未决问题
 
-1. **Web 是否对所有 Agent 安装 selection ref**（§6.1）——决定飞书能否对 `existing`
-   会话安全地读取当前值。M7.0 必须用运行时实验回答。
+1. **~~Web 是否对所有 Agent 安装 selection ref~~**（§6.1）——**已确认（M7.0 运行时
+   实验，2026-08-18）**：会，对任何被触碰的 live Agent 惰性安装（含飞书创建的）；
+   但因 waterfall 先注册者赢、飞书在 setup 先装，冲突时飞书胜出，Web 端在该会话上
+   的切换静默无效。证据：`scripts/m7-web-selection-experiment.mjs` 三个场景（注册序
+   隔离、飞书建-Web 触碰、Web 独有对照）+ Cordis waterfall 源码 + api-proxy
+   `selectionFor` 调用点。**残余风险**：实验的 Web 侧是 api-proxy 语义的逐字回放而
+   非真实 GUI 点击；GUI 打开会话触发 `models` RPC 为静态证据（`ModelSelect.tsx`
+   mount-load）。真实 GUI 复核留待实机。
 2. **`/model` 是否需要"恢复默认"入口**——即清空会话选择、回落 `agentDefaultModel`。
-   倾向做，但等 M7.3 的实际使用反馈。
+   倾向做，但等 M7.3 的实际使用反馈。注意 §6.1 末尾的移交语义：清空不是中性操作，
+   会让已安装的 Web ref（或请求头快照）浮出，须按主动移交设计。
 3. **任务卡 header 是否显示 effort**——weclaw 教训是标题信息密度过高降低可读性
    （lessons.md 追补节已把"第 N 轮"移除换成工作区名）。倾向不加，或只在非默认档位时加。

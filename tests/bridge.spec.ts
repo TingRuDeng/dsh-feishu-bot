@@ -10,7 +10,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import LlmRuntime, { createMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { createMessage, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import UserApproval from '@deepseek-ai/dsh-user-approval'
 import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -269,6 +269,7 @@ async function mountBridge(
   configureFeishu?: (feishu: StubFeishu) => void,
   configureContext?: (ctx: Context) => void | Promise<void>,
   captureBridgeFiber?: (fiber: { uid: number | null; dispose: () => Promise<void> }) => void,
+  defaultSelection?: () => { provider: string; model: string; reasoningEffort?: unknown },
 ): Promise<{
   ctx: Context
   feishu: StubFeishu
@@ -315,7 +316,7 @@ async function mountBridge(
   } as never)
   const archivedSessionIds = new Set<string>()
   ctx.provide('agentDefaultModel', {
-    currentSelection: () => ({ provider: 'mock', model: 'm' }),
+    currentSelection: defaultSelection ?? (() => ({ provider: 'mock', model: 'm' })),
   })
   ctx.provide('workspaceRegistry', {
     get archivedSessionIds() { return [...archivedSessionIds] },
@@ -549,6 +550,90 @@ describe('assembled bridge (M1 acceptance)', () => {
 
     expect(result.issues?.[0]?.message)
       .toContain('agentProvider and agentModel must be configured together')
+  })
+
+  describe('M7.0: default model selection installation', () => {
+    const high = ReasoningEffortId('high')
+    const max = ReasoningEffortId('max')
+    // The adapter default differs from the selection on purpose: without the
+    // bridge-installed selection ref the first request would materialize the
+    // adapter default, so these assertions can only pass through the ref.
+    const reasoningInfo = {
+      efforts: [
+        { id: high, name: 'High' },
+        { id: max, name: 'Max' },
+      ],
+      defaultEffort: max,
+    }
+
+    it('/new-created sessions carry the default reasoningEffort on the first request', { timeout: 20_000 }, async () => {
+      const adapter = new MockAdapter([textResponse('effort 已生效')], reasoningInfo)
+      const { deliver } = await mountBridge(
+        adapter,
+        { agentProvider: undefined, agentModel: undefined },
+        undefined, undefined, undefined, undefined,
+        () => ({ provider: 'mock', model: 'm', reasoningEffort: high }),
+      )
+      await deliver({ text: '/new' })
+      await deliver({ text: '测试 effort' })
+
+      expect(adapter.requests).toHaveLength(1)
+      expect(adapter.requests[0]!.reasoningEffort).toBe(high)
+    })
+
+    it('/use cold recovery installs the default selection on the resumed agent', { timeout: 20_000 }, async () => {
+      const first = await mountBridge(new MockAdapter([]))
+      const coldSessionId = 'cold-use-effort'
+      const session = first.ctx.sessions.create(coldSessionId as never, {
+        seed: [
+          { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+          { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+        ] as never,
+        meta: { cwd: first.root },
+      })
+      await first.ctx.sessions.flush(session)
+      await first.ctx.fiber.dispose()
+
+      const adapter = new MockAdapter([textResponse('恢复后的回答')], reasoningInfo)
+      const second = await mountBridge(
+        adapter,
+        { agentProvider: undefined, agentModel: undefined },
+        first.root, undefined, undefined, undefined,
+        () => ({ provider: 'mock', model: 'm', reasoningEffort: high }),
+      )
+      await second.deliver({ eventId: 'ev_use_effort', text: `/use ${coldSessionId}` })
+      await second.deliver({ text: '恢复后继续' })
+
+      expect(adapter.requests).toHaveLength(1)
+      expect(adapter.requests[0]!.reasoningEffort).toBe(high)
+    })
+
+    it('does not install the selection ref on a live Web-owned agent bound via /use', { timeout: 20_000 }, async () => {
+      // The live agent stands in for a Web-created session; it has no effort
+      // of its own, so the adapter default (max) must materialize. If the
+      // bridge wrongly installed its ref on the `existing` ownership path,
+      // the bridge default (high) would win instead.
+      const probeRoot = await mkdtemp(join(tmpdir(), 'feishu-bridge-'))
+      dirs.push(probeRoot)
+      const adapter = new MockAdapter([textResponse('已有会话的回答')], reasoningInfo)
+      const { deliver } = await mountBridge(
+        adapter,
+        { agentProvider: undefined, agentModel: undefined },
+        probeRoot, undefined, async (ctx) => {
+          await ctx.agents.create({
+            sessionId: 'web-owned-live' as never,
+            meta: { cwd: probeRoot },
+            agentOptions: { provider: 'mock', model: 'm' },
+          })
+        }, undefined,
+        () => ({ provider: 'mock', model: 'm', reasoningEffort: high }),
+      )
+      await deliver({ eventId: 'ev_use_web_owned', text: '/use web-owned-live' })
+      await deliver({ text: '继续已有会话' })
+
+      expect(adapter.requests).toHaveLength(1)
+      expect(adapter.requests[0]!.reasoningEffort).toBe(max)
+    })
   })
 
   it('result-card creation failure falls back to text without losing the answer', { timeout: 20_000 }, async () => {

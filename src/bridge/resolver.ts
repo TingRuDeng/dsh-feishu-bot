@@ -38,12 +38,16 @@ export type ResolveResult =
  * Create the bridge resolver.
  * @param ctx - plugin context with `agents`, `sessions`, `sessionPersistence`.
  * @param agentOptions - per-agent defaults applied on cold resume.
+ * @param installSelection - agent-scope setup applied before any caller setup
+ * on cold resume only; live (`existing`) agents are never touched, so model
+ * selection ownership stays with whichever frontend created the agent.
  * @returns resolve function; concurrent calls for one session share a resume,
  * and only the call that started it receives `created-here` + dispose.
  */
 export function createBridgeAgentResolver(
   ctx: Context,
   agentOptions?: () => AgentOptions,
+  installSelection?: (agentCtx: Context, sessionId: SessionId) => void,
 ): (sessionId: SessionId, setup?: AgentSetup) => Promise<ResolveResult> {
   const resumes = new Map<SessionId, Promise<ResolveResult>>()
 
@@ -79,7 +83,15 @@ export function createBridgeAgentResolver(
         const handle = await ctx.agents.resume({
           resumeSessionId: sessionId,
           ...agentOptions === undefined ? {} : { agentOptions: agentOptions() },
-          ...setup === undefined ? {} : { setup },
+          ...setup === undefined && installSelection === undefined ? {} : {
+            // Selection installs first so a caller setup that observes the
+            // agent scope (binding staging, cursor seeding) already sees the
+            // model selection listeners registered.
+            setup: (agentCtx: Context) => {
+              installSelection?.(agentCtx, sessionId)
+              return setup?.(agentCtx)
+            },
+          },
         })
         return {
           agent: handle.agent,
