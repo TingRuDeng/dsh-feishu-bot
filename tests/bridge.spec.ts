@@ -1833,6 +1833,38 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(nullToast?.toast).toBeDefined()
   })
 
+  it('reuses the same approval panel when a follow-up approval arrives after the first decision', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    const first = ctx.approval.request({ agent, toolName: 'Bash', reason: '第一步' })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('第一步'))) throw new Error('first card missing')
+    }, { timeout: 10_000, interval: 50 })
+    const firstCard = feishu.cards.at(-1)!
+    const firstPending = JSON.parse(JSON.stringify(firstCard.card)).elements
+      .flatMap((element: { actions?: Array<{ value?: { pendingId?: string } }> }) => element.actions ?? [])
+      .map((button: { value?: { pendingId?: string } }) => button.value?.pendingId)
+      .find((pendingId: string | undefined): pendingId is string => pendingId !== undefined)!
+    await feishu.clickCard(OWNER, firstCard.messageId, { pendingId: firstPending, action: 'allow' })
+    expect(await first).toBe('allowed-once')
+    const second = ctx.approval.request({ agent, toolName: 'Write', reason: '第二步' })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(c => JSON.stringify(c.card).includes('第二步'))) throw new Error('second card missing')
+    }, { timeout: 10_000, interval: 50 })
+    const secondCard = feishu.cards.at(-1)!
+    expect(secondCard.messageId).toBe(firstCard.messageId)
+    expect(JSON.stringify(secondCard.card)).toContain('✅ 已允许（本次）')
+    expect(JSON.stringify(secondCard.card)).toContain('第二步')
+    const secondPending = JSON.parse(JSON.stringify(secondCard.card)).elements
+      .flatMap((element: { actions?: Array<{ value?: { pendingId?: string } }> }) => element.actions ?? [])
+      .map((button: { value?: { pendingId?: string } }) => button.value?.pendingId)
+      .find((pendingId: string | undefined): pendingId is string => pendingId !== firstPending)!
+    await feishu.clickCard(OWNER, secondCard.messageId, { pendingId: secondPending, action: 'reject' })
+    expect(await second).toBe('rejected')
+  })
+
   it('parallel approvals collapse into one group card with per-item buttons (M3 UX)', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })

@@ -972,6 +972,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
    */
   interface ApprovalGroup {
     chatId: string
+    sessionId: string
     messageId?: string
     /** A create may have reached Feishu even though no message id came back. */
     createUncertain: boolean
@@ -982,6 +983,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     | { ok: true; operation: 'send' | 'patch'; messageId: string }
     | { ok: false; operation: 'send' | 'patch'; error: unknown }
   const approvalGroups = new Map<string, ApprovalGroup>()
+  /** Recently settled panels remain available for follow-up approvals within the task grace window. */
+  const settledApprovalGroups = new Map<string, { group: ApprovalGroup; expiresAt: number }>()
   /** pendingId -> its group, surviving group rotation (for late settles). */
   const groupOf = new Map<string, ApprovalGroup>()
   const approvalReservations = new Set<string>()
@@ -1027,6 +1030,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     const anyPending = [...group.items.values()].some(item => item.state === 'pending')
     if (!anyPending && approvalGroups.get(group.chatId) === group) {
       approvalGroups.delete(group.chatId)
+      settledApprovalGroups.set(`${group.chatId}:${group.sessionId}`, { group, expiresAt: Date.now() + 120_000 })
     }
   }
 
@@ -1092,7 +1096,10 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     item.state = state
     groupOf.delete(pendingId)
     const anyPending = [...group.items.values()].some(i => i.state === 'pending')
-    if (!anyPending && approvalGroups.get(group.chatId) === group) approvalGroups.delete(group.chatId)
+    if (!anyPending && approvalGroups.get(group.chatId) === group) {
+      approvalGroups.delete(group.chatId)
+      settledApprovalGroups.set(`${group.chatId}:${group.sessionId}`, { group, expiresAt: Date.now() + 120_000 })
+    }
     void trackBackground(pushGroup(group)).then((result) => {
       if (!result.ok) {
         ctx.logger.warn('feishu-audit action=approval-settle-update-failed chat=%s operation=%s',
@@ -1234,12 +1241,21 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (settledDuringInitialization()) return feishuAnswer
     // Join the chat's live group, or open a fresh card.
     let group = approvalGroups.get(boundChatId)
-    if (group === undefined) {
-      group = {
-        chatId: boundChatId, createUncertain: false,
-        items: new Map(), chain: Promise.resolve(),
+    if (group === undefined || group.sessionId !== String(req.agent.session.id)) {
+      const settledKey = `${boundChatId}:${String(req.agent.session.id)}`
+      const settled = settledApprovalGroups.get(settledKey)
+      if (settled !== undefined && settled.expiresAt > Date.now()) {
+        group = settled.group
+        approvalGroups.set(boundChatId, group)
+        settledApprovalGroups.delete(settledKey)
+      } else {
+        if (settled !== undefined) settledApprovalGroups.delete(settledKey)
+        group = {
+          chatId: boundChatId, sessionId: String(req.agent.session.id), createUncertain: false,
+          items: new Map(), chain: Promise.resolve(),
+        }
+        approvalGroups.set(boundChatId, group)
       }
-      approvalGroups.set(boundChatId, group)
     }
     group.items.set(pendingId, { spec, state: 'pending' })
     groupOf.set(pendingId, group)
@@ -1251,6 +1267,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       detachGroupItem(group, pendingId)
       const standalone: ApprovalGroup = {
         chatId: boundChatId,
+        sessionId: String(req.agent.session.id),
         createUncertain: false,
         items: new Map([[pendingId, { spec, state: 'pending' }]]),
         chain: Promise.resolve(),

@@ -65,6 +65,8 @@ pnpm dsh plugin --profile web add /path/to/dsh-feishu-bot
 - `defaultWorkspace` 可省略；配置后必须位于某个 `allowedWorkspaces` 根目录内。
 - `/new <cwd>` 的目标目录也必须位于允许根目录内。
 - 通常不要配置 `agentProvider` / `agentModel`：插件会跟随 Harness 当前的 `agent-default-model`。如需为飞书通道单独覆盖，两个字段必须同时配置。
+- 审批卡按当前 chat + session 收纳多个审批项；第一个审批处理后，后续审批会在短暂收纳窗口内继续 patch 原卡，已处理项保留为“已允许/已拒绝/已在别处决定”等状态，全部完成后才进入终态。
+- Agent 普通工具授权和 sandbox 升权（例如 `danger-full-access`）都通过同一审批通道。若希望 Feishu 接管升权，部署方 Host patch 必须把 `approval.policy` 和 `permission.presets.*.approval` 设为 `ask`；`never` 会在审批 waterfall 前短路，任何 answerer 都无法接管。
 
 常用可靠性配置可以继续放在同一个 `feishu-bridge.config` 下；默认值通常无需修改：
 
