@@ -75,7 +75,7 @@ describe('session list CardKit 2.0 navigation', () => {
 
     expect(card.schema).toBe('2.0')
     expect(card.header.title.content).toBe('project · 会话 · 2/2')
-    expect(buttons(card).map(buttonLabel)).toEqual(['8. 真实会话名称 8', '上一页', '← 返回工作空间'])
+    expect(buttons(card).map(buttonLabel)).toEqual(['8. 【project】真实会话名称 8', '上一页', '← 返回工作空间'])
     expect(buttonValue(buttons(card)[0]!)).toEqual({
       kind: 'session-list', action: 'select', token: 'snapshot-token', workspaceIndex: 2, index: 7,
     })
@@ -112,7 +112,7 @@ describe('session list CardKit 2.0 navigation', () => {
     const content = (card.body!.elements[0] as { content: string }).content
 
     expect(content).toBe([
-      '**Title \\[click\\]\\(https://evil.example\\)**',
+      '**【repo\\_\\#1】Title \\[click\\]\\(https://evil.example\\)**',
       '工作区：repo\\_\\#1',
       '1\\. fake \\- next ˋcodeˋ &lt;admin&gt; \\*\\*bold\\*\\*',
     ].join('\n'))
@@ -134,6 +134,6 @@ describe('session list CardKit 2.0 navigation', () => {
     } as Parameters<typeof sessionCards.renderSessionListCard>[0]) as Card
 
     expect(card.header.title.content).toBe('project 伪造标题 · 会话 · 1/1')
-    expect(buttonLabel(buttons(card)[0]!)).toBe('1. 标题 伪造按钮')
+    expect(buttonLabel(buttons(card)[0]!)).toBe('1. 【project 伪造标题】标题 伪造按钮')
   })
 })

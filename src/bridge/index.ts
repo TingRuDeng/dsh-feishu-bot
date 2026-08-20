@@ -42,6 +42,7 @@ import { authorizeCwd, buildWorkspaceFilter, validateDefaultWorkspace } from './
 import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
 import { createModelSelectionRegistry } from './model-selection.ts'
 import { escapeLarkMarkdownLiteral } from './lark-markdown.ts'
+import { formatSessionDisplayTitle } from './display.ts'
 import {
   MODEL_PAGE_SIZE,
   revalidateEffort,
@@ -131,6 +132,8 @@ export interface Config {
   agentModel?: string
   /** Web GUI base URL shown on approval cards. */
   webUrl: string
+  /** Feishu progress card detail: concise, summary, or full. */
+  progressDetail: 'concise' | 'summary' | 'full'
 }
 
 const ConfigSchema: z<Config> = z.object({
@@ -159,6 +162,7 @@ const ConfigSchema: z<Config> = z.object({
   agentProvider: z.string(),
   agentModel: z.string(),
   webUrl: z.string().default('http://127.0.0.1:3080'),
+  progressDetail: z.union(['concise', 'summary', 'full'] as const).default('summary'),
 })
 
 export const Config: z<Config> = z.transform(ConfigSchema, (config) => {
@@ -458,6 +462,9 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const workspaceLabel = (cwd: string | undefined): string =>
     cwd?.replace(/[/\\]+$/u, '').split(/[/\\]/u).filter(Boolean).at(-1) ?? '未知工作区'
 
+  const displayTitle = (title: string, cwd: string | undefined): string =>
+    formatSessionDisplayTitle(title, workspaceLabel(cwd))
+
   const shortSessionId = (sessionId: string): string => sessionId.length > 18
     ? `${sessionId.slice(0, 15)}…`
     : sessionId
@@ -480,7 +487,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     header: { id: SessionId; cwd: string; createdAt?: number },
   ): Promise<SessionListChoice> => ({
     sessionId: String(header.id),
-    title: await sessionTitle(header),
+    title: formatSessionDisplayTitle(await sessionTitle(header), workspaceLabel(header.cwd)),
     workspace: workspaceLabel(header.cwd),
     timeLabel: header.createdAt === undefined
       ? '未知'
@@ -833,8 +840,12 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           }
         } catch { /* card facts remain valid without token measurement */ }
         const cwd = session.header.cwd
-        const title = cwd === undefined ? undefined : cwd.split('/').filter(Boolean).at(-1)
-        const card = renderTaskCard(snapshot, tokens, title === undefined ? undefined : { title })
+        const workspace = workspaceLabel(cwd)
+        const title = cwd === undefined ? undefined : workspace
+        const card = renderTaskCard(snapshot, tokens, title === undefined ? undefined : {
+          title,
+          progressDetail: config.progressDetail,
+        })
         if (tracker.messageId === undefined) {
           tracker.messageId = await ctx.feishu.sendCard(chatId, card)
         } else {

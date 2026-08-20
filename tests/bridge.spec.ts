@@ -2723,8 +2723,8 @@ describe('assembled bridge (M1 acceptance)', () => {
     const sessionCard = feishu.cards.findLast(item => item.messageId === listing.messageId)!
     expect(JSON.stringify(sessionCard.card)).toContain('Alpha 的真实标题')
     expect(JSON.stringify(sessionCard.card)).not.toContain('Beta 的真实标题')
-    const sessionValue = cardButtonValue(sessionCard.card, '1. Alpha 的真实标题')
-      ?? cardButtonValue(sessionCard.card, '2. Alpha 的真实标题')
+    const sessionValue = cardButtonValue(sessionCard.card, '1. 【alpha】Alpha 的真实标题')
+      ?? cardButtonValue(sessionCard.card, '2. 【alpha】Alpha 的真实标题')
     expect(sessionValue).toMatchObject({
       action: 'select', workspaceIndex: (workspaceValue as { index: number }).index,
       index: expect.any(Number),
@@ -2841,8 +2841,8 @@ describe('assembled bridge (M1 acceptance)', () => {
     await drain()
     const sessions = feishu.cards.findLast(item => item.messageId === listing!.messageId)!
     expect(JSON.stringify(sessions.card)).toContain('排查飞书任务失败')
-    expect(cardButtonValue(sessions.card, '1. 排查飞书任务失败')
-      ?? cardButtonValue(sessions.card, '2. 排查飞书任务失败')).toBeDefined()
+    expect(cardButtonValue(sessions.card, `1. 【${basename(root)}】排查飞书任务失败`)
+      ?? cardButtonValue(sessions.card, `2. 【${basename(root)}】排查飞书任务失败`)).toBeDefined()
     expect(feishu.sessionListDeliveries).toEqual([{
       deliveryId: 'om_in_1',
       stage: 'session-list-card',
@@ -2898,7 +2898,8 @@ describe('assembled bridge (M1 acceptance)', () => {
     await deliver({ text: '/ls' })
 
     expect(feishu.cards).toEqual([])
-    expect(feishu.sent.at(-1)?.text).toContain('[1] 卡片失败时仍可选择')
+    expect(feishu.sent.at(-1)?.text).toContain('[1] 【feishu\\-bridge\\-')
+    expect(feishu.sent.at(-1)?.text).toContain('卡片失败时仍可选择')
     expect(feishu.sent.at(-1)?.text).toContain('/use <编号>')
   })
 
@@ -3193,7 +3194,7 @@ describe('assembled bridge (M1 acceptance)', () => {
 
     expect(ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1'))
       .toMatchObject({ sessionId: 'terminal-patch-target', status: 'active' })
-    expect(feishu.sent.at(-1)?.text).toBe('已绑定「必须收到终态的会话」。直接发送消息即可继续任务。')
+    expect(feishu.sent.at(-1)?.text).toMatch(/^已绑定「【feishu\\-bridge\\-[^】]+】必须收到终态的会话」。直接发送消息即可继续任务。$/u)
   })
 
   it('/use <n> without a prior /ls explains the numbering is stale', async () => {

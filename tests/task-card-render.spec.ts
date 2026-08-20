@@ -83,17 +83,34 @@ describe('renderTaskCard', () => {
     expect(body).not.toContain('LEAK_sensitive_provider_detail')
   })
 
-  it('token line: usage-anchored measurements show the count, others show 未知 (design §6.3)', () => {
+  it('summary is the default: keeps duration but hides token usage', () => {
+    const completed = { ...base, status: 'completed' as const, currentTools: [], durationMs: 65_000 }
+    const json = JSON.stringify(renderTaskCard(completed, { totalTokens: 1234, anchored: true }))
+    expect(json).toContain('1分5秒')
+    expect(json).not.toContain('token')
+    expect(json).not.toContain('1234')
+  })
+
+  it('concise hides both duration and token usage', () => {
+    const completed = { ...base, status: 'completed' as const, currentTools: [], durationMs: 65_000 }
+    const json = JSON.stringify(renderTaskCard(
+      completed, { totalTokens: 1234, anchored: true }, { progressDetail: 'concise' },
+    ))
+    expect(json).not.toContain('耗时')
+    expect(json).not.toContain('token')
+  })
+
+  it('token line: full tier shows usage-anchored count; estimates show 未知', () => {
     const running = { ...base, status: 'running' as const, currentTools: ['Bash'], toolCallCount: 1 }
-    let json = JSON.stringify(renderTaskCard(running, { totalTokens: 1234, anchored: true }))
+    let json = JSON.stringify(renderTaskCard(running, { totalTokens: 1234, anchored: true }, { progressDetail: 'full' }))
     expect(json).toContain('1234')
     expect(json).toContain('token')
     // Estimated baseline: never show the number (no fake precision).
-    json = JSON.stringify(renderTaskCard(running, { totalTokens: 999, anchored: false }))
+    json = JSON.stringify(renderTaskCard(running, { totalTokens: 999, anchored: false }, { progressDetail: 'full' }))
     expect(json).not.toContain('999')
     expect(json).toContain('未知')
     // No measurement available at all: omit the line entirely.
-    json = JSON.stringify(renderTaskCard(running))
+    json = JSON.stringify(renderTaskCard(running, undefined, { progressDetail: 'full' }))
     expect(json).not.toContain('token')
   })
 

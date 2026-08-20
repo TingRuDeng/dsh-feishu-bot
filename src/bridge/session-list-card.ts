@@ -1,4 +1,5 @@
 import { escapeLarkMarkdownLiteral, normalizeLarkPlainText } from './lark-markdown.ts'
+import { formatSessionDisplayTitle } from './display.ts'
 
 /** One session choice rendered on the Feishu `/ls` navigation card. */
 export interface SessionListChoice {
@@ -123,7 +124,7 @@ export function renderSessionListCard(input: SessionListCardInput): SessionListC
   }]
   input.choices.slice(offset, offset + SESSION_LIST_PAGE_SIZE).forEach((choice, localIndex) => {
     const index = offset + localIndex
-    const title = normalizeLarkPlainText(choice.title) || '未命名会话'
+    const title = formatSessionDisplayTitle(normalizeLarkPlainText(choice.title) || '未命名会话', workspaceName)
     elements.push(button(`${index + 1}. ${title}`, {
       kind: 'session-list', action: 'select', token: input.token,
       workspaceIndex: input.workspaceIndex, index,
@@ -153,7 +154,7 @@ export function renderSessionListStatusCard(
     bound: { title: '会话已绑定', template: 'green', detail: '绑定完成，直接发送消息即可继续任务。' },
     failed: { title: '绑定失败', template: 'red', detail: detail ?? '请重新发送 /ls 后再试。' },
   }[status]
-  const title = escapeLarkMarkdownLiteral(choice.title)
+  const title = escapeLarkMarkdownLiteral(formatSessionDisplayTitle(choice.title, choice.workspace))
   const workspace = escapeLarkMarkdownLiteral(choice.workspace)
   const detailText = escapeLarkMarkdownLiteral(presentation.detail)
   return card(presentation.title, [{

@@ -10,6 +10,7 @@
  * 'failed' (the documented default arm).
  */
 
+import { normalizeProgressDetail, type ProgressDetail } from './display.ts'
 import { escapeLarkMarkdownLiteral } from './lark-markdown.ts'
 
 /** One turn's card-facing state, frozen at the terminal turn/end. */
@@ -579,6 +580,8 @@ export interface TokenInfo {
 export interface TaskCardContext {
   /** Card title (the session's workspace basename); falls back to 任务. */
   title?: string
+  /** Presentation tier: summary hides token usage, full includes it. */
+  progressDetail?: ProgressDetail | string
 }
 
 /**
@@ -601,6 +604,7 @@ export interface TaskCardContext {
  */
 export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, context?: TaskCardContext): FeishuCard {
   const { title, template } = STATUS_HEADER[snapshot.status]
+  const detail = normalizeProgressDetail(context?.progressDetail)
   const lines: string[] = []
   if (snapshot.status === 'running') {
     if (snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0) {
@@ -611,10 +615,10 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   } else {
     if (snapshot.status === 'failed') lines.push(formatFailure(snapshot))
     if (snapshot.toolCallCount > 0) lines.push(`共调用工具 ${snapshot.toolCallCount} 次`)
-    if (snapshot.durationMs !== null) lines.push(`耗时 ${formatDuration(snapshot.durationMs)}`)
+    if (detail !== 'concise' && snapshot.durationMs !== null) lines.push(`耗时 ${formatDuration(snapshot.durationMs)}`)
     if (lines.length === 0) lines.push('（无工具调用）')
   }
-  if (tokens !== undefined) {
+  if (detail === 'full' && tokens !== undefined) {
     lines.push(tokens.anchored ? `token 用量：${tokens.totalTokens}` : 'token 用量：未知（provider 未上报）')
   }
   const body = snapshot.status === 'running'

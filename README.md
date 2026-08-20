@@ -67,6 +67,7 @@ Bridge options:
 | `freshnessMs` | `600000` | Maximum age of a newly delivered Feishu event |
 | `listingTtlMs` | `300000` | Lifetime of the latest `/ls` card and ordinal snapshot |
 | `cardThrottleMs` | `1000` | Minimum interval between non-terminal task-card patches |
+| `progressDetail` | `summary` | Feishu task-card detail: `concise` hides duration/token facts, `summary` shows duration but hides token usage, `full` shows both |
 | `recoveryTtlMs` | `86400000` | Maximum age of interrupted inbound work eligible for restart recovery |
 | `bindingCleanupTimeoutMs` | `5000` | Independent timeout for disposing a newly-created session after a failed binding switch |
 | `disposeDrainTimeoutMs` | `5000` | Bridge deadline for admitted chat/card/approval/projection work before storage is closed |
