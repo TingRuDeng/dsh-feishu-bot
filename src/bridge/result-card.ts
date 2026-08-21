@@ -1,13 +1,29 @@
-import type { FeishuCard } from './task-card.ts'
 import { createCardMessageEnvelope, jsonUtf8Bytes } from '../gateway/envelope.ts'
 import { normalizeLarkPlainText } from './lark-markdown.ts'
 
 /** Leave headroom below Feishu's documented card size ceiling. */
 export const RESULT_CARD_SOFT_LIMIT_BYTES = 24 * 1_024
 
+/** CardKit 2.0 payload used only by terminal assistant results. */
+interface ResultCard {
+  schema: '2.0'
+  config: { update_multi: true; wide_screen_mode: true }
+  header: {
+    title: { tag: 'plain_text'; content: string }
+    template: 'green'
+  }
+  body: {
+    direction: 'vertical'
+    elements: [
+      { tag: 'markdown'; content: string },
+      { tag: 'markdown'; content: string },
+    ]
+  }
+}
+
 export interface ResultCardSegment {
   text: string
-  card: FeishuCard
+  card: ResultCard
 }
 
 const LOCAL_MARKDOWN_LINK = /\[([^\]\n]+)\]\(<?(\/[^)>\n]+)>?\)/gu
@@ -23,9 +39,10 @@ function rewriteFeishuLocalMarkdownLinks(content: string): string {
 /** Render one durable assistant-result segment as a green Feishu card. */
 export function renderResultCard(
   workspaceName: string, text: string, segmentIndex: number, segmentCount: number,
-): FeishuCard {
+): ResultCard {
   return {
-    config: { wide_screen_mode: true },
+    schema: '2.0',
+    config: { update_multi: true, wide_screen_mode: true },
     header: {
       title: {
         tag: 'plain_text',
@@ -33,15 +50,18 @@ export function renderResultCard(
       },
       template: 'green',
     },
-    elements: [
-      { tag: 'div', text: { tag: 'lark_md', content: '**任务已完成 · 最终产出**' } },
-      { tag: 'div', text: { tag: 'lark_md', content: text } },
-    ],
+    body: {
+      direction: 'vertical',
+      elements: [
+        { tag: 'markdown', content: '**任务已完成 · 最终产出**' },
+        { tag: 'markdown', content: text },
+      ],
+    },
   }
 }
 
 /** Measure the exact create-message envelope for a rendered result card. */
-export function resultCardEnvelopeBytes(chatId: string, card: FeishuCard): number {
+export function resultCardEnvelopeBytes(chatId: string, card: ResultCard): number {
   // Canonical result cards always carry a 32-character deterministic UUID.
   return jsonUtf8Bytes(createCardMessageEnvelope(chatId, card, '0'.repeat(32)))
 }

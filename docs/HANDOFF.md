@@ -22,7 +22,7 @@
 ### 体验
 
 - `/ls` 默认返回“工作空间 → 真实会话标题”的 CardKit 2.0 两级卡，两级均每页 7 条且不全局截断；卡片与当前工作空间编号快照由 `listingTtlMs` 控制，默认 5 分钟。归档会话不列出，也不能通过点击或完整 id 绕过。
-- 终态结果走绿色结果卡，按完整 create-message envelope 的 24 KiB 软上限分段；只有飞书明确拒绝卡片形态时才降级为同段纯文本。
+- 终态结果走 CardKit 2.0 绿色结果卡，固定完成提示与助手正文均使用 `body.elements` 下的原生 `markdown` 组件，并按完整 create-message envelope 的 24 KiB 软上限分段；插件不解析 Markdown 或转换 HTML，渲染能力以飞书语法子集为准而非完整 CommonMark。只有飞书明确拒绝卡片形态时才降级为同段纯文本。
 - 本地绝对路径 Markdown 链接在分段前改写为可读代码样式，HTTP(S) 链接保持不变。
 - chat 保持绑定期间，每条 Web/飞书直接用户消息只创建一张飞书运行任务卡；同一任务后续的 subagent report/settled continuation turn 只 patch 原卡，任务级 settled 才定格。卡片仅保留一个“思考中……”尾标，终态统一移除；reducer 拒绝旧 sequence，同 callId 原位更新，成功标识为 `✅`。失败卡只显示白名单内的稳定错误码、中文原因和重试次数，不复制 provider 原始错误消息；未知错误码统一显示“未知错误”。
 - `/ls` 导航动作快速返回 toast，标题加载、进入/返回/翻页和绑定在 chat FIFO 中更新原卡；单会话工作空间直接绑定，多会话按标题选择，完成后原卡定格成功/失败。文本 `/use` 保留为当前工作空间编号和卡片拒绝时的兼容兜底。

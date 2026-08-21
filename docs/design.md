@@ -311,7 +311,7 @@ per-chat 队列随后执行：
 
 1. **终态结果卡（canonical delivery + cursor）**：chat 保持绑定期间，投递由飞书或 Web 直接用户消息开启、且已经收口的任务结果；`/release` 后停止该 chat 的同步。不投未提交流式 delta、含 `tool-call` 的过程说明或每个 subagent continuation turn 的阶段文本。启动与实时通知走同一 `catchUpProjection(chat, session)`：
    - 从 `(chat, session)` cursor 后补读日志；`source.kind=user` 且 `source.via=feishu|web` 的直接 `user/message` 稳定 seq 作为任务和 delivery key，后续 `subagent-report`、`subagent-settled` 与 continuation turn 折叠到该任务。当前 turn 已终止且任务启动的直接子代理均 settled 后，只保留最新合格 completed 文本，先写一条完整 canonical delivery，再把 cursor 推进到整个任务已扫描的末尾。两步之间崩溃只会命中同一任务 key，不会把内部 turn 物化成多条回复；cursor 只表示“已物化”，不表示网络已送达；
-   - 发送时才做本地绝对路径展示改写与确定性分段：按完整 create-message envelope 的 UTF-8 JSON 字节数使用 24 KiB 软上限，整行优先，超长单行按 Unicode 码点二分；每段渲染绿色结果卡（标题 `工作区名 · 最终结果 · i/N`）；
+   - 发送时才做本地绝对路径展示改写与确定性分段：按完整 create-message envelope 的 UTF-8 JSON 字节数使用 24 KiB 软上限，整行优先，超长单行按 Unicode 码点二分；每段渲染 CardKit 2.0 绿色结果卡（标题 `工作区名 · 最终结果 · i/N`），固定完成提示和助手正文均使用 `body.elements` 下的原生 `markdown` 组件。改写后的助手正文直接交给飞书，不在插件内解析 Markdown 或转换 HTML；渲染能力以飞书支持的 Markdown 语法子集为准，不承诺完整 CommonMark；
    - 每个 create 的逻辑 identity 为 `deliveryId + stage + segmentIndex`，Gateway 将其 SHA-256 截取为稳定 32 位十六进制 `uuid`。同一形态的即时重试和进程重启复用相同 UUID；
    - HTTP/业务码明确成功后 delivery 才写 `sent` 并清正文。确定性卡片内容/能力拒绝可切到不同 stage 的文本 fallback；429/可重试网络错误复用原形态，timeout、断连、5xx 等模糊结果也只重试原形态/UUID，不跨形态发送；
    - 启动先排入旧 `outboundSegments` pending，用旧 watermark 初始化新 cursor，再把 canonical pending 和 session-log catch-up 依次排入同 chat FIFO。网络发送可在插件 ready 后继续，避免挂起的外部请求导致激活超时；新入站仍不会超过同 chat 的已排队恢复工作。平台对 UUID 的实际去重窗口与迟到完成行为仍需专用飞书 chat 实测，因此这里只承诺稳定 identity 和可恢复状态机，不声明端到端 exactly-once。

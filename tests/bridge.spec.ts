@@ -538,14 +538,16 @@ describe('assembled bridge (M1 acceptance)', () => {
     const result = feishu.cards.find(c => JSON.stringify(c.card).includes('最终结果'))
     expect(result).toBeDefined()
     const card = result!.card as {
+      schema: string
       header: { title: { content: string }; template: string }
-      elements: { text: { content: string } }[]
+      body: { elements: { tag: string; content: string }[] }
     }
+    expect(card.schema).toBe('2.0')
     expect(card.header).toEqual({
       title: { tag: 'plain_text', content: `${basename(root)} · 最终结果 · 1/1` },
       template: 'green',
     })
-    expect(card.elements[1]!.text.content).toBe('模型的回答')
+    expect(card.body.elements[1]).toEqual({ tag: 'markdown', content: '模型的回答' })
   })
 
   it('uses the Harness default model when bridge overrides are omitted', { timeout: 20_000 }, async () => {
@@ -1109,7 +1111,19 @@ describe('assembled bridge (M1 acceptance)', () => {
         .toEqual([expect.objectContaining({ status: 'sent', attempts: 1 })])
     }, { timeout: 5_000, interval: 20 })
     expect(feishu.resultCardAttempts).toHaveLength(1)
-    expect(feishu.sent.some(message => message.text === '不能丢失的回答')).toBe(true)
+    expect(feishu.resultCardAttempts[0]).toMatchObject({
+      schema: '2.0',
+      config: { update_multi: true, wide_screen_mode: true },
+      body: {
+        direction: 'vertical',
+        elements: [
+          { tag: 'markdown', content: '**任务已完成 · 最终产出**' },
+          { tag: 'markdown', content: '不能丢失的回答' },
+        ],
+      },
+    })
+    expect(feishu.resultCardAttempts[0]).not.toHaveProperty('elements')
+    expect(feishu.sent.filter(message => message.text === '不能丢失的回答')).toHaveLength(1)
     const rows = [...delivery!.table('deliveries').entries()]
       .map(([, row]) => row as { status: string; text: string; attempts: number })
     expect(rows).toEqual([{
@@ -1137,6 +1151,11 @@ describe('assembled bridge (M1 acceptance)', () => {
       expect(delivery!.table('deliveries').size).toBe(1)
     }, { timeout: 5_000, interval: 20 })
     expect(feishu.sent.some(message => message.text === '只允许同形态重试')).toBe(false)
+    expect(feishu.resultCardAttempts).toHaveLength(1)
+    expect(feishu.resultCardAttempts[0]).toMatchObject({
+      schema: '2.0',
+      body: { elements: [{ tag: 'markdown' }, { tag: 'markdown', content: '只允许同形态重试' }] },
+    })
     const rows = [...delivery!.table('deliveries').entries()]
       .map(([, row]) => row as { status: string; text: string })
     expect(rows).toEqual([expect.objectContaining({ status: 'pending', text: '只允许同形态重试' })])
@@ -1234,6 +1253,12 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(ctx.storageDomain.get('feishu_bot_delivery')!.table('deliveries').size).toBe(1)
     expect(ctx.storageDomain.get('feishu_bot')!.table('outbound_segments').size).toBe(0)
     for (const result of resultCards) {
+      expect(result.card).toMatchObject({
+        schema: '2.0',
+        config: { update_multi: true, wide_screen_mode: true },
+        body: { direction: 'vertical', elements: [{ tag: 'markdown' }, { tag: 'markdown' }] },
+      })
+      expect(result.card).not.toHaveProperty('elements')
       expect(resultCardEnvelopeBytes('oc_chat_1', result.card as never)).toBeLessThanOrEqual(24 * 1_024)
     }
   })
@@ -3598,7 +3623,20 @@ describe('assembled bridge (M1 acceptance)', () => {
       if (cursor?.sourceEventSeq !== 7) throw new Error('projection cursor has not advanced yet')
     }, { timeout: 5_000, interval: 10 })
     expect(row).toMatchObject({ status: 'sent', text: '', attempts: 1 })
-    expect(second.feishu.cards.some(card => JSON.stringify(card.card).includes('重启后续发'))).toBe(true)
+    const recoveredResult = second.feishu.cards.find(card =>
+      JSON.stringify(card.card).includes('重启后续发'))
+    expect(recoveredResult?.card).toMatchObject({
+      schema: '2.0',
+      config: { update_multi: true, wide_screen_mode: true },
+      body: {
+        direction: 'vertical',
+        elements: [
+          { tag: 'markdown', content: '**任务已完成 · 最终产出**' },
+          { tag: 'markdown', content: '重启后续发' },
+        ],
+      },
+    })
+    expect(recoveredResult?.card).not.toHaveProperty('elements')
     expect(Object.values((recovered.global.get() as { watermarks: Record<string, number> }).watermarks))
       .toContain(7)
     expect(second.ctx.storageDomain.get('feishu_bot_delivery')!
