@@ -103,6 +103,15 @@ describe('session list CardKit 2.0 navigation', () => {
     expect(buttons(failed)).toEqual([])
   })
 
+  it('shows model and reasoning effort after binding succeeds', () => {
+    const bound = sessionCards.renderSessionListStatusCard('bound', sessionChoice(1), undefined, {
+      provider: 'sub2api', model: 'gpt-5.6-sol', effort: 'Xhigh',
+    }) as Card
+    const payload = JSON.stringify(bound)
+    const content = (bound.body!.elements[0] as { content: string }).content
+    expect(content).toContain('sub2api/gpt\\-5.6\\-sol')
+    expect(payload).toContain('推理强度：Xhigh')
+  })
   it('keeps dynamic status facts inert inside the Markdown template', () => {
     const card = sessionCards.renderSessionListStatusCard('failed', {
       ...sessionChoice(1),

@@ -401,6 +401,57 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       selection.provider, selection.model, selection.reasoningEffort,
     )}）`
 
+  /** Read the latest canonical request/header as the Web-owned session's current model selection. */
+  const sessionModelSelection = (sessionId: string): ModelSelection | undefined => {
+    const session = ctx.sessions.list().find(candidate => String(candidate.id) === sessionId)
+    if (session === undefined) return modelSelections.get(sessionId as unknown as SessionId)?.current
+    for (let index = session.events.length - 1; index >= 0; index--) {
+      const event = session.events[index]!
+      if (event.type !== 'request/header') continue
+      const config = (event.data as { header?: { config?: unknown } }).header?.config
+      if (typeof config !== 'object' || config === null) return undefined
+      const value = config as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
+      if (typeof value.provider !== 'string' || typeof value.model !== 'string') return undefined
+      return {
+        provider: value.provider,
+        model: value.model,
+        ...(typeof value.reasoningEffort === 'string' ? { reasoningEffort: ReasoningEffortId(value.reasoningEffort) } : {}),
+      }
+    }
+    return modelSelections.get(sessionId as unknown as SessionId)?.current
+  }
+
+  const bindingModelDisplay = async (sessionId: string): Promise<{
+    provider: string; model: string; effort: string
+  } | undefined> => {
+    const selection = sessionModelSelection(sessionId)
+    if (selection === undefined) return undefined
+    let effort = selection.reasoningEffort === undefined ? '模型默认' : String(selection.reasoningEffort)
+    if (selection.reasoningEffort !== undefined) {
+      try {
+        const info = await ctx.llm.resolveModelInfo(selection.provider, selection.model)
+        effort = info.reasoning?.efforts.find(candidate => candidate.id === selection.reasoningEffort)?.name ?? effort
+      } catch { effort += '（元数据不可用）' }
+    }
+    return {
+      provider: selection.provider,
+      model: selection.model,
+      effort,
+    }
+  }
+
+  const bindingSuccessMessage = async (sessionId: string): Promise<string> => {
+    const model = await bindingModelDisplay(sessionId)
+    return [
+      `已绑定 ${escapeLarkMarkdownLiteral(sessionId)}。`,
+      ...(model === undefined ? [] : [
+        `模型：${escapeLarkMarkdownLiteral(model.provider)}/${escapeLarkMarkdownLiteral(model.model)}`,
+        `推理强度：${escapeLarkMarkdownLiteral(model.effort)}`,
+      ]),
+      '直接发消息即可对话。',
+    ].join('\n')
+  }
+
   /** Recorded cwd of a session: live header first, then persisted header. */
   const sessionCwd = async (sessionId: string): Promise<string | undefined> => {
     for (const session of ctx.sessions.list()) {
@@ -905,6 +956,33 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     scheduleCard(chatId, sessionId, tracker)
   }
 
+  /** Rebuild the currently open Web task as the authoritative Feishu progress card. */
+  const adoptRunningTask = (chatId: string, sessionId: SessionIdString): void => {
+    const session = ctx.sessions.list().find(candidate => String(candidate.id) === String(sessionId))
+    if (session === undefined) return
+    const directMessages = session.events.filter(event =>
+      event.type === 'user/message' && directBoundTaskMessageId(event.data) !== null)
+    const latest = directMessages.at(-1)
+    if (latest === undefined) return
+    const folded = reduceFeishuTask(session.events, latest.seq)
+    if (folded === undefined || folded.settled) return
+    const tracker: CardTracker = {
+      turn: folded.snapshot.turn,
+      taskStartSeq: folded.taskStartSeq,
+      taskMessageId: folded.taskMessageId,
+      sessionId,
+      messageId: undefined,
+      dirty: false,
+      terminalRequested: false,
+      lastPatchAt: 0,
+      frozen: false,
+      timer: undefined,
+      actor: undefined,
+    }
+    cards.set(chatId, tracker)
+    requestCard(chatId, sessionId, tracker, false)
+  }
+
   ctx.on('session/event', (session, event) => {
     if (disposed) return
     if (!CARD_EVENT_TYPES.has(event.type)) return
@@ -962,6 +1040,13 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     settled: boolean
   }
   const pendingApprovals = new Map<string, PendingApproval>()
+  const bindingApprovalWaiters = new Map<string, Set<(chatId: string) => void>>()
+  const notifyApprovalBinding = (sessionId: string, chatId: string): void => {
+    const waiters = bindingApprovalWaiters.get(sessionId)
+    if (waiters === undefined) return
+    bindingApprovalWaiters.delete(sessionId)
+    for (const resolveWaiter of waiters) resolveWaiter(chatId)
+  }
 
   /**
    * Per-chat approval group: every live approval question of a chat rides
@@ -1151,10 +1236,28 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         break
       }
     }
-    if (boundChatId === undefined) return next()
+    let delegatedBeforeBinding: Promise<ApprovalOutcome> | undefined
+    if (boundChatId === undefined) {
+      const sessionId = String(req.agent.session.id)
+      let resolveRebound!: (chatId: string) => void
+      const rebound = new Promise<string>((resolvePromise) => { resolveRebound = resolvePromise })
+      const waiters = bindingApprovalWaiters.get(sessionId) ?? new Set()
+      waiters.add(resolveRebound)
+      bindingApprovalWaiters.set(sessionId, waiters)
+      delegatedBeforeBinding = next()
+      const winner = await Promise.race([
+        delegatedBeforeBinding.then(outcome => ({ kind: 'decision' as const, outcome })),
+        rebound.then(chatId => ({ kind: 'binding' as const, chatId })),
+      ])
+      waiters.delete(resolveRebound)
+      if (waiters.size === 0) bindingApprovalWaiters.delete(sessionId)
+      if (winner.kind === 'decision') return winner.outcome
+      boundChatId = winner.chatId
+    }
+    const delegateApproval = (): Promise<ApprovalOutcome> => delegatedBeforeBinding ?? next()
     const approvalId = pairApprovalId(req.agent.session.events, req.callId as string | undefined, claimedApprovalIds())
     // No pairable asked event (or ambiguity): conservatively step aside.
-    if (approvalId === undefined) return next()
+    if (approvalId === undefined) return delegateApproval()
 
     const pendingId = `pc_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
     const requestAborted = (): boolean => req.signal?.aborted === true
@@ -1163,7 +1266,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       if (requestAborted()) return 'cancelled'
       ctx.logger.warn('feishu-audit action=approval-backpressure approval=%s chat=%s records=%d limit=%d',
         auditHash(approvalId), auditHash(boundChatId), pendingCards.size, config.approvalMaxRecords)
-      return next()
+      return delegateApproval()
     }
     if (disposed) {
       approvalReservations.delete(pendingId)
@@ -1237,7 +1340,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       ctx.logger.error('feishu-bridge approval record write failed: %s', safeErrorFact(error))
       ctx.logger.warn('feishu-audit action=approval-delegated pending=%s approval=%s chat=%s reason=record-write',
         auditHash(pendingId), auditHash(approvalId), auditHash(boundChatId))
-      return next()
+      return delegateApproval()
     }
     if (settledDuringInitialization()) return feishuAnswer
     // Join the chat's live group, or open a fresh card.
@@ -1302,7 +1405,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       ctx.logger.warn('feishu-audit action=approval-delegated pending=%s approval=%s chat=%s reason=card-%s failure=%s',
         auditHash(pendingId), auditHash(approvalId), auditHash(boundChatId),
         presentation.operation, failureKind)
-      return next()
+      return delegateApproval()
     }
     try {
       await trackBackground(pendingCards.update(pendingId as never, currentCard => ({
@@ -1328,7 +1431,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       ctx.logger.error('feishu-bridge approval card id write failed: %s', safeErrorFact(error))
       ctx.logger.warn('feishu-audit action=approval-delegated pending=%s approval=%s chat=%s reason=card-id-write',
         auditHash(pendingId), auditHash(approvalId), auditHash(boundChatId))
-      return next()
+      return delegateApproval()
     }
     if (settledDuringInitialization()) return feishuAnswer
     ctx.logger.info('feishu-audit action=approval-presented pending=%s approval=%s chat=%s session=%s',
@@ -1340,7 +1443,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     // answerer) is NOT a decision — the Feishu card is live, so this channel
     // keeps waiting instead of losing to an empty chain (weclaw: absence of
     // an answer never defaults the outcome).
-    const web = next()
+    const web = delegateApproval()
     const webDecision = web.then((outcome): Promise<ApprovalOutcome> | ApprovalOutcome => {
       if (outcome === 'unavailable') return new Promise<ApprovalOutcome>(() => {})
       // Web decided first: mark our item decided-elsewhere.
@@ -1710,7 +1813,9 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       ctx.logger.info('feishu-audit action=binding-%s chat=%s session=%s sender=%s',
         currentBinding === undefined ? 'created' : 'replaced', auditHash(chatId),
         auditHash(binding.sessionId), auditHash(operatorOpenId))
-      return { ok: true, message: `已绑定 ${escapeLarkMarkdownLiteral(targetId)}。直接发消息即可对话。` }
+      adoptRunningTask(chatId, binding.sessionId)
+      notifyApprovalBinding(String(binding.sessionId), chatId)
+      return { ok: true, message: await bindingSuccessMessage(targetId) }
     }
     // A live Agent existed before this operation, or another resolver won the
     // publication race. It carries no disposal authority; prepare normally.
@@ -1724,7 +1829,9 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     ctx.logger.info('feishu-audit action=binding-%s chat=%s session=%s sender=%s',
       currentBinding === undefined ? 'created' : 'replaced', auditHash(chatId),
       auditHash(binding.sessionId), auditHash(operatorOpenId))
-    return { ok: true, message: `已绑定 ${targetId}。直接发消息即可对话。` }
+    adoptRunningTask(chatId, binding.sessionId)
+    notifyApprovalBinding(String(binding.sessionId), chatId)
+    return { ok: true, message: await bindingSuccessMessage(targetId) }
   }
 
   const bindExistingSession = (
@@ -1822,8 +1929,9 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           }
         }
         listing.state = 'consumed'
+        const modelDisplay = outcome.ok ? await bindingModelDisplay(choice.sessionId) : undefined
         const terminal = outcome.ok
-          ? renderSessionListStatusCard('bound', choice)
+          ? renderSessionListStatusCard('bound', choice, undefined, modelDisplay)
           : renderSessionListStatusCard('failed', choice, outcome.message)
         try {
           await ctx.feishu.patchCard(action.messageId, terminal)

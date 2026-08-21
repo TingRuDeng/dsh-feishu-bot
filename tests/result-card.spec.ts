@@ -10,9 +10,16 @@ describe('result-card capacity preflight', () => {
     const [segment] = segmentResultCards('oc_test', 'workspace', content)
 
     expect(segment!.text).toBe('请检查 login.html（`/home/debian/workspace/login.html:233`）、登录模板（`/home/debian/My Project/login.html:3`），并参考 [上游文档](https://example.com/docs) 与 [项目说明](docs/README.md)。')
-    expect(segment!.card.elements[0]!.text.content).toBe(segment!.text)
+    expect(segment!.card.elements[1]!.text.content).toBe(segment!.text)
   })
 
+  it('uses a structured WeClaw-style result layout instead of a bare text block', () => {
+    const [segment] = segmentResultCards('oc_test', 'workspace', '完成了三项修改')
+    const payload = JSON.stringify(segment!.card)
+    expect(payload).toContain('任务已完成')
+    expect(payload).toContain('最终产出')
+    expect(segment!.card.elements.length).toBeGreaterThan(1)
+  })
   it('normalizes a hostile workspace name in the plain-text header (S4)', () => {
     const [segment] = segmentResultCards('oc_test', '工作区\n[告警](http://evil.example)', '正文')
     expect(segment!.card.header.title.content)
@@ -28,7 +35,7 @@ describe('result-card capacity preflight', () => {
   it('packs whole lines first and measures the full create-message envelope', () => {
     const first = '甲'.repeat(200)
     const second = '乙'.repeat(200)
-    const segments = segmentResultCards('oc_test', 'workspace', `${first}\n${second}`, 1_024)
+    const segments = segmentResultCards('oc_test', 'workspace', `${first}\n${second}`, 1_200)
 
     expect(segments.map(segment => segment.text)).toEqual([first, second])
     expect(segments.map(segment => segment.card.header.title.content)).toEqual([
@@ -36,7 +43,7 @@ describe('result-card capacity preflight', () => {
       'workspace · 最终结果 · 2/2',
     ])
     for (const segment of segments) {
-      expect(resultCardEnvelopeBytes('oc_test', segment.card)).toBeLessThanOrEqual(1_024)
+      expect(resultCardEnvelopeBytes('oc_test', segment.card)).toBeLessThanOrEqual(1_200)
     }
   })
 

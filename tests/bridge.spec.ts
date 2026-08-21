@@ -545,7 +545,7 @@ describe('assembled bridge (M1 acceptance)', () => {
       title: { tag: 'plain_text', content: `${basename(root)} · 最终结果 · 1/1` },
       template: 'green',
     })
-    expect(card.elements[0]!.text.content).toBe('模型的回答')
+    expect(card.elements[1]!.text.content).toBe('模型的回答')
   })
 
   it('uses the Harness default model when bridge overrides are omitted', { timeout: 20_000 }, async () => {
@@ -2080,6 +2080,32 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(uncertain?.cardMessageId).toBeUndefined()
   })
 
+  it('/use adopts an approval already pending in Web', { timeout: 20_000 }, async () => {
+    const mounted = await mountBridge(new MockAdapter(['hang']))
+    const handle = await mounted.ctx.agents.create({
+      sessionId: 'web-pending-approval' as never,
+      meta: { cwd: mounted.root },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    handle.agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Web task awaiting approval' }],
+      source: { kind: 'user', via: 'web' } as never,
+    }))
+    await vi.waitFor(() => {
+      if (!handle.agent.session.events.some(event => event.type === 'turn/start')) throw new Error('turn not open')
+    })
+    mounted.ctx.on('approval/request', () => new Promise(() => {}))
+    void mounted.ctx.approval.request({ agent: handle.agent, toolName: 'Bash', reason: 'dangerous write' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+
+    await mounted.deliver({ text: '/use web-pending-approval' })
+
+    await vi.waitFor(() => {
+      if (!mounted.feishu.cards.some(({ card }) => JSON.stringify(card).includes('dangerous write'))) {
+        throw new Error('pending approval card missing')
+      }
+    }, { timeout: 5_000, interval: 20 })
+  })
   it('approval with no bound chat delegates to the rest of the chain (M3)', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })
@@ -3730,6 +3756,29 @@ describe('assembled bridge (M1 acceptance)', () => {
       .toBe(true)
   })
 
+  it('/use immediately projects an already-running Web task into Feishu', { timeout: 20_000 }, async () => {
+    const mounted = await mountBridge(new MockAdapter(['hang']))
+    const handle = await mounted.ctx.agents.create({
+      sessionId: 'running-web-task' as never,
+      meta: { cwd: mounted.root },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    handle.agent.followup(createUserMessage({
+      content: [{ type: 'text', text: '正在 Web 中执行' }],
+      source: { kind: 'user', via: 'web' } as never,
+    }))
+    await vi.waitFor(() => {
+      if (!handle.agent.session.events.some(event => event.type === 'user/message')) throw new Error('task not started')
+    })
+
+    await mounted.deliver({ text: '/use running-web-task' })
+
+    await vi.waitFor(() => {
+      if (!mounted.feishu.cards.some(({ card }) => JSON.stringify(card).includes('执行中'))) {
+        throw new Error('running task card missing')
+      }
+    }, { timeout: 5_000, interval: 20 })
+  })
   it('/use seeds the projection cursor at the existing log head without replaying history', { timeout: 20_000 }, async () => {
     const mounted = await mountBridge(new MockAdapter([
       textResponse('绑定前的历史结果'),

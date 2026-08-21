@@ -143,11 +143,18 @@ export function renderSessionListCard(input: SessionListCardInput): SessionListC
   return card(`${workspaceName} · 会话 · ${page + 1}/${pageCount}`, elements)
 }
 
+export interface SessionModelDisplay {
+  provider: string
+  model: string
+  effort: string
+}
+
 /** Render the accepted/completed state of one session selection click. */
 export function renderSessionListStatusCard(
   status: 'binding' | 'bound' | 'failed',
   choice: SessionListChoice,
   detail?: string,
+  modelDisplay?: SessionModelDisplay,
 ): SessionListCard {
   const presentation = {
     binding: { title: '正在绑定会话', template: 'blue', detail: '正在恢复并绑定，请稍候……' },
@@ -157,9 +164,15 @@ export function renderSessionListStatusCard(
   const title = escapeLarkMarkdownLiteral(formatSessionDisplayTitle(choice.title, choice.workspace))
   const workspace = escapeLarkMarkdownLiteral(choice.workspace)
   const detailText = escapeLarkMarkdownLiteral(presentation.detail)
+  const modelLines = status === 'bound' && modelDisplay !== undefined
+    ? [
+        `模型：${escapeLarkMarkdownLiteral(modelDisplay.provider)}/${escapeLarkMarkdownLiteral(modelDisplay.model)}`,
+        `推理强度：${escapeLarkMarkdownLiteral(modelDisplay.effort)}`,
+      ]
+    : []
   return card(presentation.title, [{
     tag: 'markdown',
-    content: `**${title}**\n工作区：${workspace}\n${detailText}`,
+    content: [`**${title}**`, `工作区：${workspace}`, ...modelLines, detailText].join('\n'),
     text_size: 'normal',
   }], presentation.template)
 }

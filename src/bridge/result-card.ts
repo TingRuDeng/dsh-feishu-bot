@@ -33,7 +33,10 @@ export function renderResultCard(
       },
       template: 'green',
     },
-    elements: [{ tag: 'div', text: { tag: 'lark_md', content: text } }],
+    elements: [
+      { tag: 'div', text: { tag: 'lark_md', content: '**任务已完成 · 最终产出**' } },
+      { tag: 'div', text: { tag: 'lark_md', content: text } },
+    ],
   }
 }
 
