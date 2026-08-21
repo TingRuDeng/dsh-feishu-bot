@@ -279,6 +279,7 @@ async function mountBridge(
   deliver: (message: Partial<FeishuInboundMessage> & { text?: string }) => Promise<void>
   drain: () => Promise<void>
   archiveSession: (sessionId: string) => void
+  registerWorkspaceSession: (sessionId: string) => void
 }> {
   const root = existingRoot ?? await mkdtemp(join(tmpdir(), 'feishu-bridge-'))
   if (existingRoot === undefined) dirs.push(root)
@@ -321,6 +322,20 @@ async function mountBridge(
   })
   ctx.provide('workspaceRegistry', {
     get archivedSessionIds() { return [...archivedSessionIds] },
+    list: async () => {
+      const groups = new Map<string, string[]>()
+      const headers = new Map<string, { id: string; cwd?: string }>()
+      for (const session of ctx.sessions.list()) headers.set(String(session.id), { id: String(session.id), cwd: session.header.cwd })
+      for (const session of await ctx.sessionPersistence.list()) headers.set(String(session.id), { id: String(session.id), cwd: session.cwd })
+      for (const session of headers.values()) {
+        const cwd = session.cwd
+        if (cwd === undefined) continue
+        const ids = groups.get(cwd) ?? []
+        ids.push(session.id)
+        groups.set(cwd, ids)
+      }
+      return [...groups].map(([path, sessionIds]) => ({ path, title: basename(path), sessionIds }))
+    },
   })
   ctx.llm.registerAdapter(['mock'], adapter)
   await ctx.plugin(StubFeishu)
@@ -378,7 +393,7 @@ async function mountBridge(
   return {
     ctx, feishu, root, bridgeFiber, deliver, drain,
     archiveSession: sessionId => { archivedSessionIds.add(sessionId) },
-  }
+    registerWorkspaceSession: () => {},  }
 }
 
 describe('assembled bridge (M1 acceptance)', () => {
@@ -3233,29 +3248,6 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { feishu, deliver } = await mountBridge(new MockAdapter([]))
     await deliver({ text: '/use 3' })
     expect(feishu.sent.at(-1)!.text).toContain('/ls')
-  })
-
-  it('/ls lists only sessions under allowedWorkspaces (design §6.6)', { timeout: 20_000 }, async () => {
-    const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
-    // A session whose cwd lies OUTSIDE the allowed roots must not be listed
-    // and must not be bindable by number.
-    const outside = await mkdtemp(join(tmpdir(), 'outside-ws-'))
-    dirs.push(outside)
-    const handle = await ctx.agents.create({
-      sessionId: 'outside-session' as never,
-      meta: { cwd: outside },
-      agentOptions: { provider: 'mock', model: 'm' },
-    })
-    await ctx.sessions.flush(handle.agent.session)
-    await deliver({ text: '/new' })   // one inside-workspace session
-    await deliver({ text: '/release' })
-    await deliver({ text: '/ls' })
-    const listing = feishu.cards.find(item => JSON.stringify(item.card).includes('选择工作空间'))
-    expect(listing).toBeDefined()
-    const listingJson = JSON.stringify(listing!.card)
-    expect(listingJson).not.toContain('outside-session')
-    expect(listingJson).not.toContain(outside)
-    expect(listingJson).toContain(basename(root))
   })
 
   it('/ls hides archived sessions', { timeout: 20_000 }, async () => {

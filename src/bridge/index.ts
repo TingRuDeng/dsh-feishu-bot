@@ -223,6 +223,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   } | undefined
   const workspaceRegistry = ctx.get('workspaceRegistry') as {
     readonly archivedSessionIds: readonly SessionId[]
+    list: () => readonly { path: string; title?: string; name?: string; sessionIds: readonly SessionId[] }[] | Promise<readonly { path: string; title?: string; name?: string; sessionIds: readonly SessionId[] }[]>
   } | undefined
   const sessionProjections = ctx.get('sessionProjections' as never) as {
     snapshot: (session: { readonly events: readonly SessionEvent[] }) => {
@@ -2320,27 +2321,29 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         ].join('\n'))
         return
       case 'ls': {
-        // Persisted headers plus live-only sessions (an empty just-created
-        // session has no persistence artifact yet — upstream contract),
-        // scoped to allowedWorkspaces (design §6.6): sessions outside the
-        // roots are neither listed nor numbered.
+        // Mirror the Web workspace browser: workspaceRegistry owns the
+        // authoritative workspace/session membership. Persistence is used only
+        // to hydrate the headers for those registered ids; allowedWorkspaces
+        // remains a safety boundary for binding, not a second discovery index.
         const inWorkspace = await buildWorkspaceFilter(config.allowedWorkspaces)
         const archived = archivedSessionIds()
         const allPersisted = await ctx.sessionPersistence.list()
-        const persisted: typeof allPersisted = []
-        for (const header of allPersisted) {
-          if (!archived.has(String(header.id)) && header.origin !== 'subagent'
-            && await inWorkspace(header.cwd)) persisted.push(header)
+        const persistedById = new Map(allPersisted.map(header => [String(header.id), header]))
+        const liveById = new Map(ctx.sessions.list().map(session => [String(session.id), session.header]))
+        const registryWorkspaces = await workspaceRegistry.list()
+        const headers: typeof allPersisted = []
+        const seen = new Set<string>()
+        for (const workspace of registryWorkspaces) {
+          for (const sessionId of workspace.sessionIds) {
+            const id = String(sessionId)
+            if (seen.has(id) || archived.has(id)) continue
+            const header = liveById.get(id) ?? persistedById.get(id)
+            if (header === undefined || header.origin === 'subagent' || !(await inWorkspace(header.cwd))) continue
+            seen.add(id)
+            headers.push(header)
+          }
         }
-        const seen = new Set(persisted.map(h => String(h.id)))
-        const live: typeof allPersisted = []
-        for (const session of ctx.sessions.list()) {
-          if (!archived.has(String(session.id)) && !seen.has(String(session.id))
-            && session.header.origin !== 'subagent'
-            && await inWorkspace(session.header.cwd)) live.push(session.header)
-        }
-        const headers = [...live, ...persisted]
-          .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+        headers.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
         if (headers.length === 0) {
           listings.delete(chatId)
           await commit('没有可绑定的会话。用 /new 新建。')
