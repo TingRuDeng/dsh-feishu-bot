@@ -26,6 +26,16 @@ describe('renderTaskCard', () => {
     expect(json.split('思考中').length - 1).toBe(1)
   })
 
+  it('running with no progress uses only a session-name plus thinking header', () => {
+    const card = renderTaskCard(
+      { ...base, status: 'running', currentTools: [] },
+      undefined,
+      { title: 'dsh-feishu-bot' },
+    )
+    expect(card.header.title.content).toBe('dsh-feishu-bot · 思考中.....')
+    expect(card.elements).toEqual([])
+    expect(JSON.stringify(card).split('思考中').length - 1).toBe(1)
+  })
   it('running with tools lists current tool names and appends one active thinking hint', () => {
     const card = renderTaskCard({ ...base, status: 'running', currentTools: ['Bash', 'Read'], toolCallCount: 3 })
     const json = JSON.stringify(card)

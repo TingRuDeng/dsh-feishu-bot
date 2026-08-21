@@ -1268,6 +1268,22 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(ctx.storageDomain.get('feishu_bot_delivery')!.table('deliveries').size).toBe(2)
   })
 
+  it('steers supplementary Feishu input into the active task instead of queueing another turn', { timeout: 20_000 }, async () => {
+    const { ctx, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    const agent = [...ctx.sessions.list()].map(session => ctx.agents.get(session.id)).find(Boolean)!
+    await deliver({ text: '开始长任务' })
+    await vi.waitFor(() => {
+      if (agent.status !== 'running') throw new Error('agent not running')
+    })
+    const steer = vi.spyOn(agent, 'steer')
+    const followup = vi.spyOn(agent, 'followup')
+
+    await deliver({ text: '补充引导：优先处理审批收纳' })
+
+    expect(steer).toHaveBeenCalledTimes(1)
+    expect(followup).not.toHaveBeenCalled()
+  })
   it('projects a Web-origin task to the currently bound Feishu chat', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(
       new MockAdapter([textResponse('Web 任务最终结果')]),
@@ -1918,8 +1934,8 @@ describe('assembled bridge (M1 acceptance)', () => {
       if (!j.includes('已处理')) throw new Error('not terminal yet')
     }, { timeout: 10_000, interval: 50 })
     const finalJson = JSON.stringify(feishu.cards.at(-1)!.card)
-    expect(finalJson).toContain('✅ 已允许（本次）')
-    expect(finalJson).toContain('❌ 已拒绝')
+    expect(finalJson).toContain('本轮审批已处理')
+    expect(finalJson).toContain('已处理：2 个')
     expect(finalJson).not.toContain('"allow"')
   })
 
@@ -3774,7 +3790,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     await mounted.deliver({ text: '/use running-web-task' })
 
     await vi.waitFor(() => {
-      if (!mounted.feishu.cards.some(({ card }) => JSON.stringify(card).includes('执行中'))) {
+      if (!mounted.feishu.cards.some(({ card }) => JSON.stringify(card).includes('思考中'))) {
         throw new Error('running task card missing')
       }
     }, { timeout: 5_000, interval: 20 })

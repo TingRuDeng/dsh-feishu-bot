@@ -993,6 +993,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         ? directBoundTaskMessageId(event.data)
         : null
       if (directMessageId !== null) {
+        settledApprovalGroups.delete(`${chatId}:${String(binding.sessionId)}`)
         const precedingStart = [...session.events]
           .reverse()
           .find(candidate => candidate.seq < event.seq && candidate.type === 'turn/start')
@@ -1069,8 +1070,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     | { ok: true; operation: 'send' | 'patch'; messageId: string }
     | { ok: false; operation: 'send' | 'patch'; error: unknown }
   const approvalGroups = new Map<string, ApprovalGroup>()
-  /** Recently settled panels remain available for follow-up approvals within the task grace window. */
-  const settledApprovalGroups = new Map<string, { group: ApprovalGroup; expiresAt: number }>()
+  /** Settled panels stay reusable until the next direct task in that chat/session. */
+  const settledApprovalGroups = new Map<string, { group: ApprovalGroup }>()
   /** pendingId -> its group, surviving group rotation (for late settles). */
   const groupOf = new Map<string, ApprovalGroup>()
   const approvalReservations = new Set<string>()
@@ -1116,7 +1117,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     const anyPending = [...group.items.values()].some(item => item.state === 'pending')
     if (!anyPending && approvalGroups.get(group.chatId) === group) {
       approvalGroups.delete(group.chatId)
-      settledApprovalGroups.set(`${group.chatId}:${group.sessionId}`, { group, expiresAt: Date.now() + 120_000 })
+      settledApprovalGroups.set(`${group.chatId}:${group.sessionId}`, { group })
     }
   }
 
@@ -1184,7 +1185,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     const anyPending = [...group.items.values()].some(i => i.state === 'pending')
     if (!anyPending && approvalGroups.get(group.chatId) === group) {
       approvalGroups.delete(group.chatId)
-      settledApprovalGroups.set(`${group.chatId}:${group.sessionId}`, { group, expiresAt: Date.now() + 120_000 })
+      settledApprovalGroups.set(`${group.chatId}:${group.sessionId}`, { group })
     }
     void trackBackground(pushGroup(group)).then((result) => {
       if (!result.ok) {
@@ -1348,12 +1349,11 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (group === undefined || group.sessionId !== String(req.agent.session.id)) {
       const settledKey = `${boundChatId}:${String(req.agent.session.id)}`
       const settled = settledApprovalGroups.get(settledKey)
-      if (settled !== undefined && settled.expiresAt > Date.now()) {
+      if (settled !== undefined) {
         group = settled.group
         approvalGroups.set(boundChatId, group)
         settledApprovalGroups.delete(settledKey)
       } else {
-        if (settled !== undefined) settledApprovalGroups.delete(settledKey)
         group = {
           chatId: boundChatId, sessionId: String(req.agent.session.id), createUncertain: false,
           items: new Map(), chain: Promise.resolve(),
@@ -2373,13 +2373,16 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       // on kind 'user'; `via` keeps the frontend provenance durable.
       source: { kind: 'user', via: 'feishu' } as never,
     })
-    // Durable commit point BEFORE followup (crash window covered by recovery).
+    // Durable commit point BEFORE delivery (crash window covered by recovery).
     await inboundEvents.put(eventId, {
       ...record,
       target: binding.sessionId,
       messageId: message.id as never,
     })
-    resolved.agent.followup(message)
+    // Supplementary human input guides the active task at its next step,
+    // matching WeClaw's shared-session behavior; idle input starts a new turn.
+    if (resolved.agent.status === 'running') resolved.agent.steer(message)
+    else resolved.agent.followup(message)
     await inboundEvents.put(eventId, {
       ...record,
       status: 'enqueued', text: undefined,

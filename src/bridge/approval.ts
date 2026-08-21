@@ -104,15 +104,27 @@ function itemLines(spec: ApprovalCardSpec): string {
  */
 export function renderApprovalGroupCard(items: readonly ApprovalGroupItem[]): FeishuActionCard {
   const pending = items.filter(item => item.state === 'pending').length
-  const header = pending > 0
-    ? {
-        title: {
-          tag: 'plain_text' as const,
-          content: items.length > 1 ? `审批请求（${pending}/${items.length} 待处理）` : '审批请求',
+  if (pending === 0) {
+    const outcomes = items.map(item => ITEM_STATE_COPY[item.state as Exclude<ApprovalItemState, 'pending'>])
+    return {
+      config: { wide_screen_mode: true },
+      header: { title: { tag: 'plain_text', content: '审批 · 已收纳' }, template: 'green' },
+      elements: [{
+        tag: 'div',
+        text: {
+          tag: 'lark_md',
+          content: `✅ 本轮审批已处理，记录已收纳。\n已处理：${items.length} 个（${outcomes.join('，')}）`,
         },
-        template: 'orange',
-      }
-    : { title: { tag: 'plain_text' as const, content: '审批请求 · 已处理' }, template: 'grey' }
+      }],
+    }
+  }
+  const header = {
+    title: {
+      tag: 'plain_text' as const,
+      content: items.length > 1 ? `审批请求（${pending}/${items.length} 待处理）` : '审批请求',
+    },
+    template: 'orange',
+  }
   const elements: unknown[] = []
   items.forEach((item, index) => {
     if (index > 0) elements.push({ tag: 'hr' })

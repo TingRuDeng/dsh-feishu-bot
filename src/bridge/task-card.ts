@@ -621,13 +621,15 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   if (detail === 'full' && tokens !== undefined) {
     lines.push(tokens.anchored ? `token 用量：${tokens.totalTokens}` : 'token 用量：未知（provider 未上报）')
   }
+  const hasProgress = snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0
+  const titleText = snapshot.status === 'running' && !hasProgress ? '思考中.....' : title
   const body = snapshot.status === 'running'
-    ? appendActiveThinkingIndicator(lines.join('\n'))
+    ? hasProgress ? appendActiveThinkingIndicator(lines.join('\n')) : ''
     : trimActiveThinkingIndicator(lines.join('\n'))
   const name = context?.title ?? '任务'
   return {
     config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: `${name} · ${title}` }, template },
-    elements: [{ tag: 'div', text: { tag: 'lark_md', content: body } }],
+    header: { title: { tag: 'plain_text', content: `${name} · ${titleText}` }, template },
+    elements: body === '' ? [] : [{ tag: 'div', text: { tag: 'lark_md', content: body } }],
   }
 }

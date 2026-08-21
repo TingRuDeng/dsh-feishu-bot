@@ -68,6 +68,18 @@ describe('renderApprovalGroupCard', () => {
     }
   })
 
+  it('archives an all-settled panel into one compact summary', () => {
+    const card = renderApprovalGroupCard([
+      { spec: spec('pc_1', 'Bash'), state: 'allowed' },
+      { spec: spec('pc_2', 'Write'), state: 'rejected' },
+    ])
+    const json = JSON.stringify(card)
+    expect(json).toContain('本轮审批已处理')
+    expect(json).toContain('记录已收纳')
+    expect(json).toContain('已处理：2 个')
+    expect(json).not.toContain('需要执行一条命令')
+    expect(card.elements.length).toBe(1)
+  })
   it('truncates a reason at 500 bytes (UTF-8 safe)', () => {
     const long = '长'.repeat(400)
     const json = JSON.stringify(renderApprovalGroupCard([{ spec: { ...spec('pc_1'), reason: long }, state: 'pending' }]))
