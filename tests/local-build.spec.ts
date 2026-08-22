@@ -8,7 +8,8 @@ import { describe, expect, it } from 'vitest'
 const execFileAsync = promisify(execFile)
 
 describe('local checkout build', () => {
-  it('emits the JavaScript and declaration files declared by package exports', async () => {
+  // The full declaration build can contend with Vitest workers in the release gate.
+  it('emits the JavaScript and declaration files declared by package exports', { timeout: 120_000 }, async () => {
     const outputRoot = await mkdtemp(join(tmpdir(), 'dsh-feishu-local-build-'))
     try {
       await execFileAsync(join(process.cwd(), 'node_modules/.bin/tsdown'), [

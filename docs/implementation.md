@@ -112,7 +112,7 @@ M0–M5 记录最初功能交付；M6 记录 2026-08-15 的发布前可靠性加
 - README 已补 Model Experience：不注入提示词/工具 schema；普通非命令用户消息逐字入会话；审批沿用既有 `approval/asked` / `approval/decided` 审计所有权；
 - README 与设计文档已按当前 schema 列出 gateway / bridge 配置键、默认值、可靠性参数、数据暴露边界和实机验收边界；
 - `feishu-audit` 覆盖入站、命令、binding、outbox、审批与保留清理，原始标识统一稳定哈希，错误只留 class/code，SDK `data` 字段及 `formatErrors` 重复响应体脱敏；
-- DSH 基线已记录：本地 clean checkout `0.1.0-rc.5`，commit `47f943859bef60e4160492346772ded9b24f765a`（2026-08-14）；
+- DSH 当前兼容基线已记录：官方 `0.1.1-rc.2`，`master` commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`（2026-08-22）；本地源码联调 checkout 为 `cc73b14b13a635518cd97570e9fd8af802a3c9f5`；
 - 自动化验证与最终提交证据见 [HANDOFF.md](HANDOFF.md)；飞书实机仍由部署者重启现有 `dsh web` 后执行。
 
 ## M6：发布前可靠性加固（自动化完成，实机待验）

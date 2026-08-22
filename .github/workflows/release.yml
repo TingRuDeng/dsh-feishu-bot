@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: 528c682e061696f5a160f363f236ecbf53cbd006
+          ref: b150a551b8d465e31e418e1b2eaf5e79bbb7d28e
           path: deepseek-harness
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

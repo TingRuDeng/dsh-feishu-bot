@@ -97,7 +97,7 @@ Result-card segmentation uses a fixed 24 KiB soft limit over the complete Feishu
 
 ## Verified DeepSeek Harness baseline
 
-Verified on 2026-08-14 against a clean local `../deepseek-harness` checkout: package version `0.1.0-rc.5`, Git commit `47f943859bef60e4160492346772ded9b24f765a`, branch `master`, using Node `v26.5.1`. This records the source actually used for build and test; it is not a claim about the current remote head.
+The current release baseline is DeepSeek Harness `0.1.1-rc.2` at official `master` commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e` (checked on 2026-08-22). Local source checks use `cc73b14b13a635518cd97570e9fd8af802a3c9f5`, which is one local approval fix ahead of that official baseline; release workflows intentionally build against the official commit.
 
 ## Data exposure model
 
