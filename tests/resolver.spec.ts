@@ -5,7 +5,7 @@
  * created-here agent leaves the registry; missing sessions and
  * subagent-owned sessions reject with stable codes.
  */
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -146,6 +146,30 @@ describe('bridge agent resolver (assembled)', () => {
     const ctx = await mount(root, new MockAdapter([]))
     const resolve = createBridgeAgentResolver(ctx, () => agentOptions)
     const result = await resolve(sessionId)
+    if ('agent' in result) throw new Error('unexpected agent')
+    expect(result.error.code).toBe('agent-busy')
+  })
+
+  it('reclassifies a failed resume after a subagent session wins publication', async () => {
+    const root = await newRoot()
+    const sessionId = SessionId('resolver-subagent-resume-race')
+    await persistCold(root, sessionId)
+    const ctx = await mount(root, new MockAdapter([]))
+    const resolve = createBridgeAgentResolver(ctx, () => agentOptions)
+    const attached = ctx.sessions.prepare(sessionId, { seed: balancedTurn(), meta: { cwd: root, origin: 'subagent' } })
+    const originalGet = ctx.sessions.get.bind(ctx.sessions)
+    let published = false
+    vi.spyOn(ctx.sessions, 'get').mockImplementation(id => (
+      published && id === sessionId ? attached : originalGet(id)
+    ))
+    const resume = vi.spyOn(ctx.agents, 'resume').mockImplementationOnce(async () => {
+      published = true
+      throw new Error('session id already published')
+    })
+
+    const result = await resolve(sessionId)
+
+    expect(resume).toHaveBeenCalledOnce()
     if ('agent' in result) throw new Error('unexpected agent')
     expect(result.error.code).toBe('agent-busy')
   })

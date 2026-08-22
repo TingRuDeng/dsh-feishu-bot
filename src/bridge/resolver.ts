@@ -60,13 +60,17 @@ export function createBridgeAgentResolver(
     return { agent: live, ownership: 'existing' }
   }
 
+  const fencedAttached = (sessionId: SessionId): ResolveResult | undefined => {
+    const attached = ctx.sessions.get(sessionId)
+    if (attached === undefined || !hasApiRemoteSubagentOwner(ctx, attached, undefined)) return undefined
+    return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
+  }
+
   return async (sessionId: SessionId, setup?: AgentSetup): Promise<ResolveResult> => {
     const fenced = fencedLive(sessionId)
     if (fenced !== undefined) return fenced
-    const attached = ctx.sessions.get(sessionId)
-    if (attached !== undefined && hasApiRemoteSubagentOwner(ctx, attached, undefined)) {
-      return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
-    }
+    const attached = fencedAttached(sessionId)
+    if (attached !== undefined) return attached
     const inFlight = resumes.get(sessionId)
     if (inFlight !== undefined) {
       // Joining an in-flight resume: share the agent, not the ownership —
@@ -105,6 +109,8 @@ export function createBridgeAgentResolver(
         // Lost a create/resume race to another frontend: the live agent is fine.
         const fencedRetry = fencedLive(sessionId)
         if (fencedRetry !== undefined) return fencedRetry
+        const attachedRetry = fencedAttached(sessionId)
+        if (attachedRetry !== undefined) return attachedRetry
         return { error: { code: 'internal', message: `resume failed for session "${sessionId}"` } }
       } finally {
         resumes.delete(sessionId)
