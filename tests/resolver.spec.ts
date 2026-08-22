@@ -15,7 +15,7 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import AgentRegistry from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
@@ -168,6 +168,65 @@ describe('bridge agent resolver (assembled)', () => {
     })
 
     const result = await resolve(sessionId)
+
+    expect(resume).toHaveBeenCalledOnce()
+    if ('agent' in result) throw new Error('unexpected agent')
+    expect(result.error.code).toBe('agent-busy')
+  })
+
+  it('rejects an attached subagent found after inspection before resuming', async () => {
+    const root = await newRoot()
+    const sessionId = SessionId('resolver-subagent-inspect-race')
+    await persistCold(root, sessionId)
+    const ctx = await mount(root, new MockAdapter([]))
+    const resolve = createBridgeAgentResolver(ctx, () => agentOptions)
+    const attached = ctx.sessions.prepare(sessionId, { seed: balancedTurn(), meta: { cwd: root, origin: 'subagent' } })
+    const originalGet = ctx.sessions.get.bind(ctx.sessions)
+    let published = false
+    vi.spyOn(ctx.sessions, 'get').mockImplementation(id => (
+      published && id === sessionId ? attached : originalGet(id)
+    ))
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined) throw new Error('session persistence was not mounted')
+    const originalInspect = persistence.inspect.bind(persistence)
+    vi.spyOn(persistence, 'inspect').mockImplementation(async id => {
+      const inspected = await originalInspect(id)
+      published = true
+      return inspected
+    })
+    const resume = vi.spyOn(ctx.agents, 'resume')
+
+    const result = await resolve(sessionId)
+
+    if ('agent' in result) throw new Error('unexpected agent')
+    expect(result.error.code).toBe('agent-busy')
+    expect(resume).not.toHaveBeenCalled()
+  })
+
+  it('fences a subagent winner before setup publication commit', async () => {
+    const root = await newRoot()
+    const sessionId = SessionId('resolver-subagent-setup-commit')
+    await persistCold(root, sessionId)
+    const ctx = await mount(root, new MockAdapter([]))
+    const resolve = createBridgeAgentResolver(ctx, () => agentOptions)
+    const attached = ctx.sessions.prepare(sessionId, { seed: balancedTurn(), meta: { cwd: root, origin: 'subagent' } })
+    const originalGet = ctx.sessions.get.bind(ctx.sessions)
+    let published = false
+    vi.spyOn(ctx.sessions, 'get').mockImplementation(id => (
+      published && id === sessionId ? attached : originalGet(id)
+    ))
+    const resume = vi.spyOn(ctx.agents, 'resume').mockImplementationOnce(async options => {
+      if (options.setup === undefined) throw new Error('setup was not forwarded')
+      const commit = await options.setup(ctx.extend())
+      published = true
+      commit?.commit()
+      return {
+        agent: { id: sessionId, session: attached, status: 'idle', ctx: ctx.extend() } as Agent,
+        dispose: async () => {},
+      }
+    })
+
+    const result = await resolve(sessionId, async () => {})
 
     expect(resume).toHaveBeenCalledOnce()
     if ('agent' in result) throw new Error('unexpected agent')

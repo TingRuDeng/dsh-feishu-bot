@@ -10,7 +10,7 @@
  * cannot drift from the Host resolver's.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { Agent, AgentOptions, AgentSetup } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentOptions, AgentSetup, AgentSetupCommit } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import {
   ApiRemoteSessionNotFound,
@@ -66,6 +66,30 @@ export function createBridgeAgentResolver(
     return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
   }
 
+  const assertNoSubagentOwner = (sessionId: SessionId): void => {
+    const session = ctx.sessions.get(sessionId)
+    const agent = ctx.agents.get(sessionId)
+    if (session !== undefined && hasApiRemoteSubagentOwner(ctx, session, agent)) {
+      throw new Error(`session "${sessionId}" is owned by subagent routing`)
+    }
+  }
+
+  const fencedSetup = (sessionId: SessionId, setup?: AgentSetup): AgentSetup | undefined => {
+    if (setup === undefined && installSelection === undefined) return undefined
+    return async (agentCtx: Context): Promise<AgentSetupCommit> => {
+      installSelection?.(agentCtx, sessionId)
+      const setupCommit = await setup?.(agentCtx)
+      return {
+        commit: () => {
+          // AgentLoop invokes this commit immediately before publication.
+          assertNoSubagentOwner(sessionId)
+          setupCommit?.commit()
+          assertNoSubagentOwner(sessionId)
+        },
+      }
+    }
+  }
+
   return async (sessionId: SessionId, setup?: AgentSetup): Promise<ResolveResult> => {
     const fenced = fencedLive(sessionId)
     if (fenced !== undefined) return fenced
@@ -84,18 +108,16 @@ export function createBridgeAgentResolver(
         if (hasApiRemoteSubagentOwner(ctx, { header: inspected.meta }, undefined)) {
           return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
         }
+        const publishedSession = ctx.sessions.get(sessionId)
+        const publishedAgent = ctx.agents.get(sessionId)
+        if (publishedSession !== undefined && hasApiRemoteSubagentOwner(ctx, publishedSession, publishedAgent)) {
+          return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
+        }
+        const resumeSetup = fencedSetup(sessionId, setup)
         const handle = await ctx.agents.resume({
           resumeSessionId: sessionId,
           ...agentOptions === undefined ? {} : { agentOptions: agentOptions() },
-          ...setup === undefined && installSelection === undefined ? {} : {
-            // Selection installs first so a caller setup that observes the
-            // agent scope (binding staging, cursor seeding) already sees the
-            // model selection listeners registered.
-            setup: (agentCtx: Context) => {
-              installSelection?.(agentCtx, sessionId)
-              return setup?.(agentCtx)
-            },
-          },
+          ...resumeSetup === undefined ? {} : { setup: resumeSetup },
         })
         return {
           agent: handle.agent,
