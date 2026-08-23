@@ -3078,8 +3078,13 @@ describe('assembled bridge (M1 acceptance)', () => {
     await drain()
 
     expect(response?.toast).toBe('正在绑定会话…')
-    expect(ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1'))
-      .toMatchObject({ sessionId: 'click-bind-target', status: 'active', boundBy: OWNER })
+    // The card handler acknowledges immediately; binding runs in the chat FIFO.
+    // Wait for the durable result instead of relying on the generic drain
+    // heuristic, which can settle before a slower CI runner finishes it.
+    await vi.waitFor(() => {
+      expect(ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1'))
+        .toMatchObject({ sessionId: 'click-bind-target', status: 'active', boundBy: OWNER })
+    }, { timeout: 5_000, interval: 20 })
     const finalCard = feishu.cards.findLast(item => item.messageId === listing.messageId)!
     expect(finalCard.card).toMatchObject({ header: { template: 'green' } })
     expect(JSON.stringify(finalCard.card)).toContain('点击即可接手的会话')
