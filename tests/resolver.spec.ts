@@ -60,8 +60,8 @@ async function newRoot(): Promise<string> {
 /** Persist a cold resumable session then drop the writing context. */
 async function persistCold(root: string, sessionId: SessionId): Promise<void> {
   const ctx = await mount(root, new MockAdapter([]))
-  // A resumable target is always project-backed: inspectApiRemoteSession
-  // rejects a cwd-less header as not-found (api/remotes/agent-lookup.ts:103).
+  // A resumable target is always project-backed: the persistence contract
+  // rejects a cwd-less header as not-found.
   const session = ctx.sessions.create(sessionId, { seed: balancedTurn(), meta: { cwd: root } })
   await ctx.sessions.flush(session)
   await ctx.fiber.dispose()
@@ -127,6 +127,29 @@ describe('bridge agent resolver (assembled)', () => {
     const ctx = await mount(await newRoot(), new MockAdapter([]))
     const resolve = createBridgeAgentResolver(ctx, () => agentOptions)
     const result = await resolve(SessionId('resolver-missing'))
+    if ('agent' in result) throw new Error('unexpected agent')
+    expect(result.error.code).toBe('session-not-found')
+  })
+
+  it('maps a latest persistence not-found race to session-not-found', async () => {
+    const root = await newRoot()
+    const sessionId = SessionId('resolver-persistence-not-found-race')
+    const ctx = await mount(root, new MockAdapter([]))
+    const persistence = ctx.get('sessionPersistence')
+    if (persistence === undefined) throw new Error('session persistence was not mounted')
+    vi.spyOn(persistence, 'list').mockResolvedValue([{
+      version: 0,
+      id: sessionId,
+      createdAt: 1,
+      cwd: root,
+    }])
+    const notFound = new Error(`session "${sessionId}" not found`)
+    notFound.name = 'SessionPersistenceNotFoundError'
+    vi.spyOn(persistence, 'inspect').mockRejectedValue(notFound)
+
+    const resolve = createBridgeAgentResolver(ctx, () => agentOptions)
+    const result = await resolve(sessionId)
+
     if ('agent' in result) throw new Error('unexpected agent')
     expect(result.error.code).toBe('session-not-found')
   })

@@ -1,7 +1,7 @@
 # dsh-feishu-bot M0 核验记录
 
 配套：[设计](design.md) · [实施计划](implementation.md)
-当前兼容基线：deepseek-harness 0.1.1-rc.2，官方 `master` commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`（2026-08-22）；本地源码联调 checkout 为 `cc73b14b13a635518cd97570e9fd8af802a3c9f5`。历史核验记录仍以各自记录的版本和日期为准。
+当前兼容基线：deepseek-harness 0.1.2-alpha.1，官方 `master` commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`（2026-08-28）。历史核验记录仍以各自记录的版本和日期为准。
 状态：☑ 已有源码结论 ◐ 源码结论 + 待运行时实验确认 ☐ 未完成。
 
 ## 结论总表

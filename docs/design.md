@@ -60,7 +60,7 @@
 - 独立仓库 `dsh-feishu-bot`（建议 `~/Desktop/mycode/dsh-feishu-bot`），npm 包形态 profile bundle：`package.json` 声明 `dsh.bundle.patch: ./cordis.patch.yml`。
 - 安装 `dsh plugin --profile web add <dir>`；组合层变更需重启 profile 进程。
 - patch 插入四行：`feishu-gateway`、`feishu-bridge`、`invariants` registry、`feishu-invariant`。单包多入口，角色独立演化前不拆包。
-- 锁定已验证 dsh 版本（当前 0.1.1-rc.2，官方 `master` commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`）；升级须重跑 Loader 组合回归。
+- 锁定已验证 dsh 版本（当前 0.1.2-alpha.1，官方 `master` commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`）；升级须重跑 Loader 组合回归。
 
 ### 3.2 插件职责边界
 

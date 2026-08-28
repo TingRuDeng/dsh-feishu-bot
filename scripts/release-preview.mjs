@@ -32,7 +32,6 @@ if (args.size > 0) throw new Error(`unknown release arguments: ${[...args].join(
 const options = { formal, allowDirty, useExistingDeps, skipDshSmoke }
 const cordisName = '@deepseek-ai/cordis'
 const requiredSbomPackages = [
-  '@deepseek-ai/dsh-api-remotes',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-storage',
   '@deepseek-ai/dsh-storage-domain',

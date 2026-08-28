@@ -1,22 +1,64 @@
 /**
- * Bridge-owned agent resolver (design §6.6): the upstream agent-lookup
+ * Bridge-owned agent resolver (design §6.6): the Session persistence
  * semantics — live hit, subagent-ownership fence, cold resume, concurrent
- * dedup — with the ownership surface the upstream result type omits:
+ * dedup — with the ownership surface the Session Controller result omits:
  * `created-here` results carry the AgentHandle's dispose so a failed binding
  * commit can release the agent this call created, while `existing` results
  * must never be disposed by this operation.
  *
- * Fence and inspection reuse the exported upstream helpers, so the rules
- * cannot drift from the Host resolver's.
+ * Inspection uses the current SessionPersistence service contract. The
+ * ownership predicate is intentionally kept local because the latest public
+ * Session Controller package does not export its internal helper.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent, AgentOptions, AgentSetup, AgentSetupCommit } from '@deepseek-ai/dsh-agent'
-import type { SessionId } from '@deepseek-ai/dsh-session'
-import {
-  ApiRemoteSessionNotFound,
-  hasApiRemoteSubagentOwner,
-  inspectApiRemoteSession,
-} from '@deepseek-ai/dsh-api-remotes'
+import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
+import type {} from '@deepseek-ai/dsh-session-persistence'
+
+/** The current persistence backend has no materialized project-backed session. */
+class BridgeSessionNotFound extends Error {}
+
+/**
+ * Mirror the Session Controller's public routing fence without importing its
+ * private agent-controller module.
+ */
+function hasSubagentOwner(
+  ctx: Context,
+  session: Pick<Session, 'header'>,
+  agent: Agent | undefined,
+): boolean {
+  if (session.header.origin === 'subagent') return true
+  const parentId = session.header.parentSession
+  if (parentId === undefined || agent === undefined) return false
+  const parent = ctx.agents.get(parentId)
+  return parent !== undefined && ctx.agents.isOwnedBy(agent.id, parent)
+}
+
+/** Read one project-backed persisted session through the current public service. */
+async function inspectPersistedSession(
+  ctx: Context,
+  sessionId: SessionId,
+): Promise<{ meta: SessionHeader; events: SessionEvent[] }> {
+  const persistence = ctx.get('sessionPersistence')
+  if (persistence === undefined) {
+    throw new Error('session persistence is not configured (load a dsh-session-persistence backend)')
+  }
+  const listed = (await persistence.list()).find(candidate => candidate.id === sessionId)
+  if (listed === undefined || listed.cwd === undefined) {
+    throw new BridgeSessionNotFound(`session "${sessionId}" not found`)
+  }
+  const inspected = await persistence.inspect(sessionId)
+  if (inspected.meta.cwd === undefined) {
+    throw new BridgeSessionNotFound(`session "${sessionId}" not found`)
+  }
+  return { meta: inspected.meta, events: [...inspected.events] }
+}
+
+/** Match a cross-package persistence error without relying on instanceof. */
+function isPersistenceNotFound(error: unknown): boolean {
+  return error instanceof Error
+    && error.name === 'SessionPersistenceNotFoundError'
+}
 
 /** Stable error codes mirrored from the upstream lookup result. */
 export type ResolveErrorCode = 'session-not-found' | 'agent-busy' | 'internal'
@@ -54,7 +96,7 @@ export function createBridgeAgentResolver(
   const fencedLive = (sessionId: SessionId): ResolveResult | undefined => {
     const live = ctx.agents.get(sessionId)
     if (live === undefined) return undefined
-    if (hasApiRemoteSubagentOwner(ctx, live.session, live)) {
+    if (hasSubagentOwner(ctx, live.session, live)) {
       return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
     }
     return { agent: live, ownership: 'existing' }
@@ -62,14 +104,14 @@ export function createBridgeAgentResolver(
 
   const fencedAttached = (sessionId: SessionId): ResolveResult | undefined => {
     const attached = ctx.sessions.get(sessionId)
-    if (attached === undefined || !hasApiRemoteSubagentOwner(ctx, attached, undefined)) return undefined
+    if (attached === undefined || !hasSubagentOwner(ctx, attached, undefined)) return undefined
     return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
   }
 
   const assertNoSubagentOwner = (sessionId: SessionId): void => {
     const session = ctx.sessions.get(sessionId)
     const agent = ctx.agents.get(sessionId)
-    if (session !== undefined && hasApiRemoteSubagentOwner(ctx, session, agent)) {
+    if (session !== undefined && hasSubagentOwner(ctx, session, agent)) {
       throw new Error(`session "${sessionId}" is owned by subagent routing`)
     }
   }
@@ -104,13 +146,13 @@ export function createBridgeAgentResolver(
     }
     const resume = (async (): Promise<ResolveResult> => {
       try {
-        const inspected = await inspectApiRemoteSession(ctx, sessionId)
-        if (hasApiRemoteSubagentOwner(ctx, { header: inspected.meta }, undefined)) {
+        const inspected = await inspectPersistedSession(ctx, sessionId)
+        if (hasSubagentOwner(ctx, { header: inspected.meta }, undefined)) {
           return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
         }
         const publishedSession = ctx.sessions.get(sessionId)
         const publishedAgent = ctx.agents.get(sessionId)
-        if (publishedSession !== undefined && hasApiRemoteSubagentOwner(ctx, publishedSession, publishedAgent)) {
+        if (publishedSession !== undefined && hasSubagentOwner(ctx, publishedSession, publishedAgent)) {
           return { error: { code: 'agent-busy', message: `session "${sessionId}" is owned by subagent routing` } }
         }
         const resumeSetup = fencedSetup(sessionId, setup)
@@ -125,7 +167,7 @@ export function createBridgeAgentResolver(
           dispose: () => handle.dispose(),
         }
       } catch (error: unknown) {
-        if (error instanceof ApiRemoteSessionNotFound) {
+        if (error instanceof BridgeSessionNotFound || isPersistenceNotFound(error)) {
           return { error: { code: 'session-not-found', message: 'session not found' } }
         }
         // Lost a create/resume race to another frontend: the live agent is fine.

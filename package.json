@@ -1,7 +1,7 @@
 {
   "name": "@tingrudeng/dsh-feishu-bot",
   "description": "Feishu (Lark) private-chat frontend for DeepSeek Harness: drive, monitor, and approve local agents from Feishu, sharing sessions with the Web GUI",
-  "version": "0.1.0-rc.10",
+  "version": "0.1.0-rc.11",
   "license": "MIT",
   "keywords": [
     "dsh-plugin",
@@ -70,7 +70,6 @@
   },
   "dependencies": {
     "@deepseek-ai/dsh-agent": "link:../deepseek-harness/packages/core/agent",
-    "@deepseek-ai/dsh-api-remotes": "link:../deepseek-harness/packages/api/remotes",
     "@deepseek-ai/dsh-brand": "link:../deepseek-harness/packages/util/brand",
     "@deepseek-ai/dsh-credentials": "link:../deepseek-harness/packages/credentials/credentials",
     "@deepseek-ai/dsh-invariants": "link:../deepseek-harness/packages/runtime-diagnostics/invariants",

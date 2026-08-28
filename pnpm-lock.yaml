@@ -11,9 +11,6 @@ importers:
       '@deepseek-ai/dsh-agent':
         specifier: link:../deepseek-harness/packages/core/agent
         version: link:../deepseek-harness/packages/core/agent
-      '@deepseek-ai/dsh-api-remotes':
-        specifier: link:../deepseek-harness/packages/api/remotes
-        version: link:../deepseek-harness/packages/api/remotes
       '@deepseek-ai/dsh-brand':
         specifier: link:../deepseek-harness/packages/util/brand
         version: link:../deepseek-harness/packages/util/brand

@@ -2,7 +2,7 @@
 
 Feishu (Lark) private-chat frontend for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): drive, monitor, and approve local agents from Feishu, sharing live and cold sessions with the Web GUI in the same process.
 
-Status: M0–M7 product work and the M6 reliability implementation are covered by automated tests. The stage-6 preview gate builds a self-contained `@tingrudeng/dsh-feishu-bot@0.1.0-rc.10` tarball (Cordis remains a host peer), audits its manifest/files, emits a tarball-bound CycloneDX SBOM, installs outside the checkout, imports all four entry points, and composes in a clean DSH profile. The rc.8 release successfully proved the tag-only OIDC workflow, monotonic npm `latest`, remote-tag-to-commit checks, GitHub/npm provenance verification, and single-tarball GitHub Prerelease plus npm publication. rc.10 carries the rc.9 S4 Markdown escaping unification and M7.0–M7.3 model/effort selection; it remains a local candidate until the preview package passes real Feishu acceptance. Source `link:` dependencies remain intentionally available for local debugging and are removed from the packed manifest. Docs: [中文使用指南](docs/usage.zh.md) · [design](docs/design.md) · [milestone record](docs/implementation.md) · [handoff](docs/HANDOFF.md) · [M0 verification record](docs/m0-record.md) · [weclaw lessons](docs/weclaw-lessons.md).
+Status: M0–M7 product work and the M6 reliability implementation are covered by automated tests. The stage-6 preview gate builds a self-contained `@tingrudeng/dsh-feishu-bot@0.1.0-rc.11` tarball (Cordis remains a host peer), audits its manifest/files, emits a tarball-bound CycloneDX SBOM, installs outside the checkout, imports all four entry points, and composes in a clean DSH profile. The rc.8 release successfully proved the tag-only OIDC workflow, monotonic npm `latest`, remote-tag-to-commit checks, GitHub/npm provenance verification, and single-tarball GitHub Prerelease plus npm publication. rc.11 carries the rc.9 S4 Markdown escaping unification, M7.0–M7.3 model/effort selection, and the DSH `0.1.2-alpha.1` session-persistence ownership fence; it remains a local candidate until the preview package passes real Feishu acceptance. Source `link:` dependencies remain intentionally available for local debugging and are removed from the packed manifest. Docs: [中文使用指南](docs/usage.zh.md) · [design](docs/design.md) · [milestone record](docs/implementation.md) · [handoff](docs/HANDOFF.md) · [M0 verification record](docs/m0-record.md) · [weclaw lessons](docs/weclaw-lessons.md).
 
 ## Commands (private chat)
 
@@ -22,7 +22,7 @@ dsh plugin --profile web add /path/to/dsh-feishu-bot
 dsh --profile web --dump-config   # expect gateway, bridge, registry, and invariant rows
 ```
 
-For a prebuilt local preview, run `pnpm release:preview` from a clean checkout. The single release gate runs frozen install, tests, typecheck, build, tarball/manifest audit, SBOM generation, isolated install, four-entry import, clean-profile composition, and checksum generation. Install the resulting `artifacts/tingrudeng-dsh-feishu-bot-0.1.0-rc.10.tgz` with `dsh plugin --profile web add /absolute/path/to/the.tgz`; verify `artifacts/SHA256SUMS`, and inspect the matching `.cdx.json` plus `release.json` descriptor when provenance matters. This does not publish a tag, GitHub Release, or registry package. Registry installs use the sole supported channel, `@tingrudeng/dsh-feishu-bot@latest`.
+For a prebuilt local preview, run `pnpm release:preview` from a clean checkout. The single release gate runs frozen install, tests, typecheck, build, tarball/manifest audit, SBOM generation, isolated install, four-entry import, clean-profile composition, and checksum generation. Install the resulting `artifacts/tingrudeng-dsh-feishu-bot-0.1.0-rc.11.tgz` with `dsh plugin --profile web add /absolute/path/to/the.tgz`; verify `artifacts/SHA256SUMS`, and inspect the matching `.cdx.json` plus `release.json` descriptor when provenance matters. This does not publish a tag, GitHub Release, or registry package. Registry installs use the sole supported channel, `@tingrudeng/dsh-feishu-bot@latest`.
 
 Profiles that still contain the old unscoped source package must remove it before installing the scoped RC; DSH reconciles bundles by package name and will not replace it automatically:
 
@@ -97,7 +97,7 @@ Result-card segmentation uses a fixed 24 KiB soft limit over the complete Feishu
 
 ## Verified DeepSeek Harness baseline
 
-The current release baseline is DeepSeek Harness `0.1.1-rc.2` at official `master` commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e` (checked on 2026-08-22). Local source checks use `cc73b14b13a635518cd97570e9fd8af802a3c9f5`, which is one local approval fix ahead of that official baseline; release workflows intentionally build against the official commit.
+The current release baseline is DeepSeek Harness `0.1.2-alpha.1` at official `master` commit `cd5ef8148158c3a752a658978873241fdf8e2bbc` (checked on 2026-08-28). Local source checks and release workflows use this clean checkout.
 
 ## Data exposure model
 
