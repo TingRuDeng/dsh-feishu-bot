@@ -39,9 +39,9 @@ chmod 600 ~/.dsh/.credentials.yaml
 pnpm dsh plugin --profile web add /path/to/dsh-feishu-bot
 ```
 
-当前仓库依赖使用相邻 `deepseek-harness` 的 `link:` 路径，这是源码联调方式。阶段 6 已提供预览产物门禁：在干净工作树执行 `pnpm release:preview`，脚本会生成 `artifacts/tingrudeng-dsh-feishu-bot-0.1.0-rc.11.tgz`、`SHA256SUMS`、同名 `.cdx.json` SBOM 与 `release.json` descriptor，并自动检查 packed manifest 无 `link:`/本机路径、隔离安装、四入口导入和干净 DSH Profile 配置组合。安装预览包时使用绝对路径：`dsh plugin --profile web add /absolute/path/to/tingrudeng-dsh-feishu-bot-0.1.0-rc.11.tgz`。重复安装或更换插件版本后，需要重启 `web` Profile。rc.8 已通过 Trusted Publishing OIDC 完成真实 npm/GitHub 发布验收，registry 当前安装 spec 为 `@tingrudeng/dsh-feishu-bot@latest`；rc.11 在正式打 tag 前先以本地预览包完成 DSH alpha.1 兼容性与真实飞书验收。
+当前仓库依赖使用相邻 `deepseek-harness` 的 `link:` 路径，这是源码联调方式。阶段 6 已提供预览产物门禁：在干净工作树执行 `pnpm release:preview`，脚本会生成 `artifacts/tingrudeng-dsh-feishu-bot-0.1.0-rc.11.tgz`、`SHA256SUMS`、同名 `.cdx.json` SBOM 与 `release.json` descriptor，并自动检查 packed manifest 无 `link:`/本机路径、隔离安装、四入口导入和干净 DSH Profile 配置组合。安装预览包时使用绝对路径：`dsh plugin --profile web add /absolute/path/to/tingrudeng-dsh-feishu-bot-0.1.0-rc.11.tgz`。重复安装或更换插件版本后，需要重启 `web` Profile。rc.8 已通过 Trusted Publishing OIDC 完成真实 npm/GitHub 发布验收，registry 当前安装 spec 为 `@tingrudeng/dsh-feishu-bot@latest`；rc.11 在正式打 tag 前先以本地预览包完成 DSH alpha.2 兼容性与真实飞书验收。
 
-当前兼容与发布基线为 `deepseek-harness 0.1.2-alpha.1`、官方 `master` commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`；本机源码联调与正式 workflow 使用同一干净 checkout，发布前仍须重跑本地预览门禁和真实飞书验收。
+当前兼容与发布基线为 `deepseek-harness 0.1.2-alpha.2`、官方 `master` commit `0a53fb55bea101816fa226bb964ae2bed71c343b`；本机源码联调与正式 workflow 使用同一干净 checkout，发布前仍须重跑本地预览门禁和真实飞书验收。
 
 如果现有 `web` Profile 仍安装旧 unscoped 包 `dsh-feishu-bot`，切换到正式 scoped RC 前必须先执行 `dsh plugin --profile web remove dsh-feishu-bot`，再执行 `dsh plugin --profile web add @tingrudeng/dsh-feishu-bot@latest`。DSH 按真实 package name 维护 bundle，直接 add scoped 包不会自动替换旧包，两者并存会重复插入同名 `feishu-*` 行。
 

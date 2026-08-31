@@ -18,6 +18,8 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
@@ -287,6 +289,8 @@ async function mountBridge(
   contexts.push(ctx)
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
+  await ctx.plugin(SessionProjectionRegistry)
+  ctx.sessionProjections.register(titleProjectionDefinition)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
@@ -296,23 +300,14 @@ async function mountBridge(
   await ctx.plugin(Storage)
   await ctx.plugin(StorageJson, { root: join(root, 'storages') })
   await ctx.plugin(StorageDomain, { backend: 'json' })
-  const titleFromEvents = (events: readonly { type: string; data: unknown }[]): string | null => {
-    const event = events.findLast(item => item.type === 'session/title')
-    const title = (event?.data as { title?: unknown } | undefined)?.title
-    return typeof title === 'string' && title.length > 0 ? title : null
-  }
-  ctx.provide('sessionProjections' as never, {
-    snapshot: (session: { events: readonly { type: string; data: unknown }[]; seq: number }) => ({
-      asOfSeq: session.seq - 1,
-      values: { title: titleFromEvents(session.events) },
-    }),
-  } as never)
   ctx.provide('sessionProjectionCache' as never, {
     coldSnapshot: async (sessionId: string) => {
       const stored = await ctx.sessionPersistence.readFrom(sessionId as never, 0)
+      const event = stored.events.findLast(item => item.type === 'session/title')
+      const title = (event?.data as { title?: unknown } | undefined)?.title
       return {
         asOfSeq: stored.events.at(-1)?.seq ?? -1,
-        values: { title: titleFromEvents(stored.events) },
+        values: { title: typeof title === 'string' && title.length > 0 ? title : null },
       }
     },
   } as never)

@@ -43,7 +43,7 @@
 - README 和 design 已列 gateway / bridge 当前配置项、默认值、固定 24 KiB 限制、启动顺序、提交点、恢复/容量语义和 `defaultWorkspace` 授权校验。
 - `feishu-audit` 覆盖入站、命令、binding、delivery、approval、熔断、drain 与清理；日志只保留枚举、计数与标识哈希，不写消息/命令正文、凭据或完整路径。
 - transport error 只记录 error class/code/status；Client/WS logger 递归移除正文，EventDispatcher 与 smoke logger 完全静默。
-- 当前 DSH 兼容与发布基线（2026-08-28）：官方 `master` 版本 `0.1.2-alpha.1`，commit `cd5ef8148158c3a752a658978873241fdf8e2bbc`；本地源码联调与正式 workflow 使用同一干净 checkout。
+- 当前 DSH 兼容与发布基线（2026-08-31）：官方 `master` 版本 `0.1.2-alpha.2`，commit `0a53fb55bea101816fa226bb964ae2bed71c343b`；本地源码联调与正式 workflow 使用同一干净 checkout。
 
 ## 关键实现文件
 
