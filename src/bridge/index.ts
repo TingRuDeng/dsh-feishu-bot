@@ -59,10 +59,15 @@ import {
   directBoundTaskMessageId,
   foldFeishuTaskResults,
   isInternalTaskMessage,
-  reduceFeishuTask,
   renderTaskCard,
+  type FeishuTaskFold,
   type TokenInfo,
 } from './task-card.ts'
+import {
+  feishuTaskFoldOf,
+  feishuTaskProjectionDefinition,
+  type FeishuTaskState,
+} from './task-projection.ts'
 import { renderResultCard, segmentResultCards } from './result-card.ts'
 import {
   danglingActiveBindings, isRecoveryExpired,
@@ -229,6 +234,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     snapshot: (session: Session) => {
       values: { title?: unknown }
     }
+    register: (definition: unknown) => () => void
+    stateOf: (session: Session, key: string) => unknown
   } | undefined
   const sessionProjectionCache = ctx.get('sessionProjectionCache' as never) as {
     coldSnapshot: (sessionId: SessionId) => Promise<{ values: { title?: unknown } }>
@@ -306,6 +313,11 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   try {
     setupSignal.throwIfAborted()
     ctx.effect(() => () => disposeBridge(), 'feishuBridge.lifecycle')
+    // The task fold is log-derived session state, so the projection registry
+    // drives it once per committed event instead of every card update
+    // re-scanning the log. Registered on the owner fiber, after it is active.
+    ctx.effect(() => sessionProjections.register(feishuTaskProjectionDefinition),
+      'feishuBridge.taskProjection')
   } catch (error: unknown) {
     // The Fiber can become inactive in the microtask between the second open
     // and lifecycle registration. Until registration succeeds, rollback is
@@ -400,6 +412,10 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     `${escapeLarkMarkdownLiteral(selection.provider)}/${escapeLarkMarkdownLiteral(selection.model)}（档位：${await describeEffort(
       selection.provider, selection.model, selection.reasoningEffort,
     )}）`
+
+  /** Current task fold for `session`, maintained by the projection registry. */
+  const currentTaskFold = (session: Session): FeishuTaskFold | undefined =>
+    feishuTaskFoldOf(sessionProjections.stateOf(session, 'feishuTask') as FeishuTaskState | undefined)
 
   /** Read the latest canonical request/header as the Web-owned session's current model selection. */
   const sessionModelSelection = (sessionId: string): ModelSelection | undefined => {
@@ -886,8 +902,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       try {
         const session = ctx.sessions.list().find(s => String(s.id) === (sessionId as string))
         if (session === undefined) return
-        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-        const folded = reduceFeishuTask(session.snapshotEvents(), tracker.taskStartSeq)
+        const folded = currentTaskFold(session)
         if (folded === undefined || folded.taskMessageId !== tracker.taskMessageId) return
         const snapshot = folded.snapshot
         // tokenMeter is optional: measurement failure removes only the token line.
@@ -968,13 +983,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const adoptRunningTask = (chatId: string, sessionId: SessionIdString): void => {
     const session = ctx.sessions.list().find(candidate => String(candidate.id) === String(sessionId))
     if (session === undefined) return
-    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-    const events = session.snapshotEvents()
-    const directMessages = events.filter(event =>
-      event.type === 'user/message' && directBoundTaskMessageId(event.data) !== null)
-    const latest = directMessages.at(-1)
-    if (latest === undefined) return
-    const folded = reduceFeishuTask(events, latest.seq)
+    const folded = currentTaskFold(session)
     if (folded === undefined || folded.settled) return
     const tracker: CardTracker = {
       turn: folded.snapshot.turn,
@@ -1004,14 +1013,13 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         : null
       if (directMessageId !== null) {
         settledApprovalGroups.delete(`${chatId}:${String(binding.sessionId)}`)
-        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-        const precedingStart = [...session.snapshotEvents()]
-          .reverse()
-          .find(candidate => candidate.seq < event.seq && candidate.type === 'turn/start')
-        const turn = (precedingStart?.data as { turn?: unknown } | undefined)?.turn
+        // The projection already folded this direct input, so it owns the
+        // task boundary (taskStartSeq) and the turn that opened it.
+        const folded = currentTaskFold(session)
+        if (folded === undefined || folded.taskMessageId !== directMessageId) return
         tracker = {
-          turn: typeof turn === 'number' ? turn : 0,
-          taskStartSeq: precedingStart?.seq ?? event.seq,
+          turn: folded.snapshot.turn,
+          taskStartSeq: folded.taskStartSeq,
           taskMessageId: directMessageId,
           sessionId: binding.sessionId, messageId: undefined,
           dirty: false, terminalRequested: false,

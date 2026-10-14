@@ -3423,7 +3423,11 @@ describe('assembled bridge (M1 acceptance)', () => {
       get: (name: string) => ({
         agentDefaultModel: { currentSelection: () => ({ provider: 'mock', model: 'm' }) },
         workspaceRegistry: { archivedSessionIds: [] },
-        sessionProjections: { snapshot: () => ({ values: {} }) },
+        sessionProjections: {
+          snapshot: () => ({ values: {} }),
+          register: () => () => {},
+          stateOf: () => undefined,
+        },
         sessionProjectionCache: { coldSnapshot: async () => ({ values: {} }) },
       })[name],
       feishu: { markBridgeReady: vi.fn(), markBridgeFailed: vi.fn() },
@@ -3465,7 +3469,11 @@ describe('assembled bridge (M1 acceptance)', () => {
       get: (name: string) => ({
         agentDefaultModel: { currentSelection: () => ({ provider: 'mock', model: 'm' }) },
         workspaceRegistry: { archivedSessionIds: [] },
-        sessionProjections: { snapshot: () => ({ values: {} }) },
+        sessionProjections: {
+          snapshot: () => ({ values: {} }),
+          register: () => () => {},
+          stateOf: () => undefined,
+        },
         sessionProjectionCache: { coldSnapshot: async () => ({ values: {} }) },
       })[name],
       feishu: { markBridgeReady: vi.fn(), markBridgeFailed: vi.fn() },
@@ -4049,5 +4057,26 @@ describe('assembled bridge (M1 acceptance)', () => {
     await expect(mounted.ctx.approval.request({ agent, toolName: 'Bash' }))
       .resolves.toBe('unavailable')
     expect(mounted.feishu.cards.some(card => JSON.stringify(card.card).includes('审批请求'))).toBe(false)
+  })
+
+  it('drives the task fold from the projection registry, not a per-update log scan', { timeout: 20_000 }, async () => {
+    // The card path used to re-fold `session.snapshotEvents()` on every update.
+    // The fold is now projection-owned: assert the registry actually carries it
+    // for a live session, so the read is not silently returning undefined.
+    const mounted = await mountBridge(new MockAdapter([]))
+    const handle = await mounted.ctx.agents.create({
+      sessionId: 'projection-driven' as never,
+      agentOptions: { provider: 'mock', model: 'm' },
+      meta: { cwd: mounted.root },
+    })
+    await mounted.deliver({ text: `/use projection-driven` })
+    await mounted.deliver({ text: '任务输入' })
+
+    const session = handle.agent.session
+    await vi.waitFor(() => {
+      const state = mounted.ctx.sessionProjections.stateOf(session, 'feishuTask')
+      expect(state).toBeDefined()
+      expect(state!.task?.taskMessageId).toBeDefined()
+    }, { timeout: 10_000, interval: 20 })
   })
 })
