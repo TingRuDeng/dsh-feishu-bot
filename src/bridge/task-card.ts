@@ -36,7 +36,7 @@ export interface TaskCardSnapshot {
 }
 
 /** The event fields the reducer reads; structurally satisfied by SessionEvent. */
-interface CardEvent {
+export interface CardEvent {
   seq: number
   time: number
   type: string
@@ -295,74 +295,204 @@ function internalSenderId(data: unknown, kind: string): string | null {
 }
 
 /**
- * Fold one direct Web/Feishu input and all of its internal continuation turns.
- * The fold stops before the next direct human input, so a human follow-up
- * always starts a new task even when an old child never reports settlement.
+ * Event types the task fold consumes.
+ *
+ * Shared with the projection, where the registry drives every committed event
+ * through `apply`: an event outside this set must leave the state reference
+ * untouched, or every unrelated event would look like a change.
  */
-export function reduceFeishuTask(
-  events: readonly CardEvent[], fromSeq: number,
-): FeishuTaskFold | undefined {
-  let taskMessageId: string | null = null
-  let taskStartSeq = -1
-  let scannedThrough = fromSeq - 1
-  let turn = 0
-  let openTurn = false
-  let startedAt: number | null = null
-  let endedAt: number | null = null
-  let terminal: Exclude<TaskCardSnapshot['status'], 'running'> = 'failed'
-  let failureCode: string | null = null
-  let retryCount = 0
-  let toolCallCount = 0
-  let lastSequence = -1
-  let lastTurnEndSeq = -1
-  let lastEndedTurn = 0
-  let boundedByNextTask = false
-  const openTools = new Map<string, string>()
-  const seenCalls = new Set<string>()
-  const recentTools: string[] = []
-  const startedChildren = new Set<string>()
-  const settledChildren = new Set<string>()
-  const resultCandidates = new Map<number, { seq: number; text: string }>()
-  let result: { seq: number; text: string } | undefined
+export const FEISHU_TASK_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'user/message', 'turn/start', 'turn/end', 'step/start', 'step/end',
+  'tool/call', 'tool/result', 'tool/code-dispatch', 'llm/retry', 'assistant/message',
+])
 
-  for (const event of events) {
-    if (event.seq < fromSeq || event.seq <= lastSequence) continue
-    lastSequence = event.seq
+/**
+ * The serialized shape of an in-flight fold.
+ *
+ * This is the shared state machine behind both {@link reduceFeishuTask} (a
+ * range scan) and the `feishuTask` projection (driven one committed event at a
+ * time). Keeping one implementation means the two cannot drift: the projection
+ * supplies the starting state and feeds events; the batch reference loops.
+ *
+ * Every field is JSON-serializable because a projection checkpoint runs
+ * `structuredClone` over the state and re-seeds the fold through `stateSchema`.
+ * The batch fold's `Map`/`Set` bookkeeping is therefore held as records and
+ * arrays here.
+ */
+export interface FeishuTaskFoldState {
+  taskMessageId: string | null
+  taskStartSeq: number
+  scannedThrough: number
+  turn: number
+  openTurn: boolean
+  startedAt: number | null
+  endedAt: number | null
+  terminal: Exclude<TaskCardSnapshot['status'], 'running'>
+  failureCode: string | null
+  retryCount: number
+  toolCallCount: number
+  lastSequence: number
+  lastTurnEndSeq: number
+  lastEndedTurn: number
+  /**
+   * Time of the most recent `turn/start`, regardless of whether it seeded
+   * `startedAt`. A projection restarting at a newer direct input needs the
+   * baseline of the turn that actually opened that input, which `startedAt`
+   * cannot supply once it is pinned to an older turn.
+   */
+  lastTurnStartTime: number | null
+  lastTurnStartTurn: number
+  boundedByNextTask: boolean
+  openTools: Record<string, string>
+  seenCalls: string[]
+  recentTools: string[]
+  startedChildren: string[]
+  settledChildren: string[]
+  resultCandidates: Record<string, { seq: number; text: string }>
+  result?: { seq: number; text: string }
+}
 
-    if (event.type === 'user/message') {
-      const directId = directBoundTaskMessageId(event.data)
-      if (directId !== null) {
-        if (taskMessageId !== null) {
-          boundedByNextTask = true
-          // turn/start precedes user/message, so the first event of the next
-          // human task may already have been tentatively observed. Roll the
-          // ownership boundary back to this task's last terminal event.
-          if (lastTurnEndSeq >= taskStartSeq) {
-            scannedThrough = lastTurnEndSeq
-            turn = lastEndedTurn
-          }
-          openTurn = false
-          break
+/** Fresh fold state for `fromSeq`; events before it are ignored. */
+export function initFeishuTaskFoldState(fromSeq: number): FeishuTaskFoldState {
+  return {
+    taskMessageId: null,
+    taskStartSeq: -1,
+    scannedThrough: fromSeq - 1,
+    turn: 0,
+    openTurn: false,
+    startedAt: null,
+    endedAt: null,
+    terminal: 'failed',
+    failureCode: null,
+    retryCount: 0,
+    toolCallCount: 0,
+    lastSequence: -1,
+    lastTurnEndSeq: -1,
+    lastEndedTurn: 0,
+    lastTurnStartTime: null,
+    lastTurnStartTurn: 0,
+    boundedByNextTask: false,
+    openTools: {},
+    seenCalls: [],
+    recentTools: [],
+    startedChildren: [],
+    settledChildren: [],
+    resultCandidates: {},
+  }
+}
+
+/** One optimistically applied event, plus how it affected the task boundary. */
+export interface FeishuTaskFoldStepResult {
+  /** False when the event was irrelevant, out of range, or belonged to no task. */
+  applied: boolean
+  /** True when this event opened the fold's first task. */
+  opened: boolean
+  /**
+   * True when this direct input bounds the previous task. A range scan stops
+   * here (one card is one task); a projection restarts here instead.
+   */
+  boundsTask: boolean
+}
+
+/**
+ * Fold one committed event into `state`, mutating it in place.
+ *
+ * The batch reference mutates through this same function, so a projection and
+ * a range scan share one definition of the boundary rules. Callers own the
+ * `seq` range decision: `FeishuTaskFoldState.lastSequence` enforces monotonic
+ * progress, but the caller decides which events to offer at all.
+ * @param state - fold state to advance.
+ * @param event - the next event in seq order.
+ * @param fromSeq - inclusive lower bound; earlier events are ignored.
+ * @returns how the event was classified.
+ */
+export function foldFeishuTaskStep(
+  state: FeishuTaskFoldState, event: CardEvent, fromSeq: number = 0,
+): FeishuTaskFoldStepResult {
+  if (event.seq < fromSeq || event.seq <= state.lastSequence) {
+    return { applied: false, opened: false, boundsTask: false }
+  }
+
+  // Only events the fold actually consumes advance the watermark. A projection
+  // drives every committed event through here, so advancing on irrelevant
+  // events would make the state (and its reference) change for no reason.
+  if (!FEISHU_TASK_EVENT_TYPES.has(event.type)) {
+    return { applied: false, opened: false, boundsTask: false }
+  }
+  state.lastSequence = event.seq
+
+  if (event.type === 'user/message') {
+    const directId = directBoundTaskMessageId(event.data)
+    if (directId !== null) {
+      if (state.taskMessageId !== null) {
+        state.boundedByNextTask = true
+        // turn/start precedes user/message, so the first event of the next
+        // human task may already have been tentatively observed. Roll the
+        // ownership boundary back to this task's last terminal event.
+        if (state.lastTurnEndSeq >= state.taskStartSeq) {
+          state.scannedThrough = state.lastTurnEndSeq
+          state.turn = state.lastEndedTurn
         }
-        taskMessageId = directId
-        taskStartSeq = event.seq
-        // A direct user/message is emitted inside an active turn. This also
-        // covers projection windows that begin after the preceding turn/start.
-        openTurn = true
+        state.openTurn = false
+        return { applied: true, opened: false, boundsTask: true }
       }
+      state.taskMessageId = directId
+      state.taskStartSeq = event.seq
+      // A direct user/message is emitted inside an active turn. This also
+      // covers projection windows that begin after the preceding turn/start.
+      state.openTurn = true
+      state.scannedThrough = event.seq
+      return { applied: true, opened: true, boundsTask: false }
     }
+  }
 
-    // Events before the direct user message may include its turn/start and
-    // are retained only for the duration baseline. They never form a task.
-    if (taskMessageId === null) {
-      if (event.type === 'turn/start') {
-        const eventTurn = (event.data as { turn?: unknown }).turn
-        if (typeof eventTurn === 'number') turn = eventTurn
-        startedAt = event.time
-      }
-      continue
+  // Events before the direct user message may include its turn/start and
+  // are retained only for the duration baseline. They never form a task, but
+  // they do mutate the state, so they must not report "not applied": a caller
+  // that discards an unapplied result would lose the duration baseline.
+  if (state.taskMessageId === null) {
+    if (event.type === 'turn/start') {
+      const eventTurn = (event.data as { turn?: unknown }).turn
+      if (typeof eventTurn === 'number') state.turn = eventTurn
+      state.startedAt = event.time
+      state.lastTurnStartTime = event.time
+      state.lastTurnStartTurn = state.turn
+      return { applied: true, opened: false, boundsTask: false }
     }
+    return { applied: false, opened: false, boundsTask: false }
+  }
 
+  applyFeishuTaskEvent(state, event)
+  return { applied: true, opened: false, boundsTask: false }
+}
+
+/** Fold one event already proven to belong to the open task. */
+function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): void {
+  const taskMessageId = state.taskMessageId
+  const taskStartSeq = state.taskStartSeq
+  let scannedThrough = state.scannedThrough
+  let turn = state.turn
+  let openTurn = state.openTurn
+  let startedAt = state.startedAt
+  let endedAt = state.endedAt
+  let terminal = state.terminal
+  let failureCode = state.failureCode
+  let retryCount = state.retryCount
+  let toolCallCount = state.toolCallCount
+  let lastTurnEndSeq = state.lastTurnEndSeq
+  let lastEndedTurn = state.lastEndedTurn
+  let lastTurnStartTime = state.lastTurnStartTime
+  let lastTurnStartTurn = state.lastTurnStartTurn
+  const openTools = new Map(Object.entries(state.openTools))
+  const seenCalls = new Set(state.seenCalls)
+  const recentTools = [...state.recentTools]
+  const startedChildren = new Set(state.startedChildren)
+  const settledChildren = new Set(state.settledChildren)
+  const resultCandidates = new Map(
+    Object.entries(state.resultCandidates).map(([key, value]) => [Number(key), value] as const))
+  let result = state.result
+
+  {
     scannedThrough = event.seq
     const eventTurn = (event.data as { turn?: unknown }).turn
     if (typeof eventTurn === 'number') turn = eventTurn
@@ -371,6 +501,8 @@ export function reduceFeishuTask(
       case 'turn/start':
         openTurn = true
         if (startedAt === null) startedAt = event.time
+        lastTurnStartTime = event.time
+        lastTurnStartTurn = turn
         break
       case 'tool/call': {
         const call = event.data as { callId?: unknown; name?: unknown }
@@ -432,8 +564,44 @@ export function reduceFeishuTask(
     }
   }
 
+  state.taskMessageId = taskMessageId
+  state.taskStartSeq = taskStartSeq
+  state.scannedThrough = scannedThrough
+  state.turn = turn
+  state.openTurn = openTurn
+  state.startedAt = startedAt
+  state.endedAt = endedAt
+  state.terminal = terminal
+  state.failureCode = failureCode
+  state.retryCount = retryCount
+  state.toolCallCount = toolCallCount
+  state.lastTurnEndSeq = lastTurnEndSeq
+  state.lastEndedTurn = lastEndedTurn
+  state.lastTurnStartTime = lastTurnStartTime
+  state.lastTurnStartTurn = lastTurnStartTurn
+  state.openTools = Object.fromEntries(openTools)
+  state.seenCalls = [...seenCalls]
+  state.recentTools = recentTools
+  state.startedChildren = [...startedChildren]
+  state.settledChildren = [...settledChildren]
+  state.resultCandidates = Object.fromEntries(
+    [...resultCandidates].map(([key, value]) => [String(key), value]))
+  state.result = result
+}
+
+/**
+ * Materialize the observable fold from a finished fold state.
+ * @param state - a state that has observed at least one direct input.
+ * @returns the task fold, or undefined when no direct input was seen.
+ */
+export function feishuTaskFoldFromState(state: FeishuTaskFoldState): FeishuTaskFold | undefined {
+  const {
+    taskMessageId, taskStartSeq, scannedThrough, turn, openTurn, startedAt, endedAt,
+    terminal, failureCode, retryCount, toolCallCount, boundedByNextTask, openTools, result,
+  } = state
   if (taskMessageId === null) return undefined
-  const childrenSettled = [...startedChildren].every(id => settledChildren.has(id))
+  const settledChildren = new Set(state.settledChildren)
+  const childrenSettled = state.startedChildren.every(id => settledChildren.has(id))
   const settled = boundedByNextTask || (!openTurn && childrenSettled)
   const status: TaskCardSnapshot['status'] = settled ? terminal : 'running'
   return {
@@ -444,16 +612,34 @@ export function reduceFeishuTask(
     snapshot: {
       turn,
       status,
-      currentTools: [...openTools.values()],
-      recentTools,
+      currentTools: Object.values(openTools),
+      recentTools: state.recentTools,
       toolCallCount,
       durationMs: settled && startedAt !== null && endedAt !== null ? endedAt - startedAt : null,
       startedAt,
       failureCode,
       retryCount,
     },
-    result,
+    ...(result === undefined ? {} : { result }),
   }
+}
+
+/**
+ * Fold one direct Web/Feishu input and all of its internal continuation turns.
+ * The fold stops before the next direct human input, so a human follow-up
+ * always starts a new task even when an old child never reports settlement.
+ */
+export function reduceFeishuTask(
+  events: readonly CardEvent[], fromSeq: number,
+): FeishuTaskFold | undefined {
+  const state = initFeishuTaskFoldState(fromSeq)
+  for (const event of events) {
+    const step = foldFeishuTaskStep(state, event, fromSeq)
+    // A newer direct input bounds this task: the batch reference stops so the
+    // caller sees exactly one task. The projection restarts instead.
+    if (step.boundsTask) break
+  }
+  return feishuTaskFoldFromState(state)
 }
 
 /**
