@@ -96,7 +96,7 @@ persistence.create() + flush()   → list() 返回 1 条
 
    | 行 | 关注点 | projection 化难度 | 现状 |
    |---|---|---|---|
-   | 409 | 倒序扫描 `request/header` 取模型选择 | 中，可注册投影单元 | 待迁移（waiver） |
+   | 409 | 倒序扫描 `request/header` 取模型选择 | 中，可注册投影单元 | **已迁移** |
    | 749 | 按 `fromSeq` 增量 catch-up | **高**，需要分页历史读取而非投影 | 待迁移（waiver） |
    | 890 | 任务卡 `reduceFeishuTask` 折叠 | 中，可注册投影单元 | **已迁移** |
    | 972 / 1008 | 直接消息锚定与 `turn/start` 查找 | 中 | **已迁移** |
@@ -105,7 +105,16 @@ persistence.create() + flush()   → list() 返回 1 条
 
    `feishuTask` 投影单元（`src/bridge/task-projection.ts`）承接了 890 / 972 / 1008
    三处：任务折叠本就是日志派生状态（`taskStartSeq` 由折叠自身算出，tracker 只是
-   缓存），因此归投影所有是语义上的正位，而非权宜。waiver 由 7 处降为 **3 处**。
+   缓存），因此归投影所有是语义上的正位，而非权宜。waiver 由 7 处降为 **2 处**。
+
+   `feishuModelSelection` 投影单元（`src/bridge/model-selection-projection.ts`）
+   承接了 409：会话当前选择是日志派生的——最新一条 `request/header` 记录了上次请求
+   实际使用的 provider/model/effort。状态用 `seen` 显式区分三种情形，因为**参考
+   实现不回退**：
+   - 从未记录过 `request/header` → 回退到桥接层内存选择 ref；
+   - 最新 header 畸形 → 权威的"无选择"，**不会**回退到更早的有效 header；
+   - 有有效选择。
+   用裸 `ModelSelection | undefined` 会把前两种情形合并，因此必须有 `seen`。
 
    `feishuApprovalPairing` 投影单元（`src/bridge/approval-projection.ts`）承接了
    1271：配对输入是日志派生状态。`claimed`（已被其它 pending 条目占用的
@@ -129,7 +138,7 @@ persistence.create() + flush()   → list() 返回 1 条
 
 2. **`user-approval` 的 `undefined.session`** 已证实为下游症状而非独立缺陷：测试用 `ctx.agents.get(...)` 拿不到 agent（因为 `/new` 死锁使其从未发布），修复后自然消失，无需单独处理。
 
-3. **waiver 未能在本机得到正向验证。** 已确认 DSH 的 `no-deprecated` 规则仅在自身 `.oxlintrc.json` 中启用，且测试白名单按**精确源文件路径**（`packages/core/session/src/index.ts`）放行这三个方法。本机用 `oxlint` 直接跑该规则时，即使对本地 `@deprecated` 符号也不报错（type-aware 规则未生效），因此**无法证明 waiver 被消费**。注释按 DSH 原文格式书写，但真实门禁效果待在有 type-aware lint 的环境确认。同理，**已迁移的 4 处无 waiver 是否被门禁认可，也只能在该环境确认**——本地能证明的仅是调用点已消失。
+3. **waiver 未能在本机得到正向验证。** 已确认 DSH 的 `no-deprecated` 规则仅在自身 `.oxlintrc.json` 中启用，且测试白名单按**精确源文件路径**（`packages/core/session/src/index.ts`）放行这三个方法。本机用 `oxlint` 直接跑该规则时，即使对本地 `@deprecated` 符号也不报错（type-aware 规则未生效），因此**无法证明 waiver 被消费**。注释按 DSH 原文格式书写，但真实门禁效果待在有 type-aware lint 的环境确认。同理，**已迁移的 5 处无 waiver 是否被门禁认可，也只能在该环境确认**——本地能证明的仅是调用点已消失。
 
 4. 真实飞书故障矩阵仍待人工验收，自动化通过不能替代。投影化后卡片刷新由
    registry 驱动，`tests` 覆盖折叠等价与装配，但**真实飞书的卡片刷新时序只能由你验收**。
