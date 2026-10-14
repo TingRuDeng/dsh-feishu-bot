@@ -92,12 +92,11 @@ pnpm dsh plugin --profile web add /path/to/dsh-feishu-bot
 pnpm dsh --profile web --dump-config
 ```
 
-应当同时看到以下四行：
+应当同时看到以下三行：
 
 ```text
 feishu-gateway    @tingrudeng/dsh-feishu-bot/gateway
 feishu-bridge     @tingrudeng/dsh-feishu-bot/bridge
-invariants        @deepseek-ai/dsh-invariants
 feishu-invariant  @tingrudeng/dsh-feishu-bot/invariant
 ```
 
@@ -139,9 +138,11 @@ pnpm dsh --profile web
 
 ## 7. 常见问题
 
-### 启动时报 `waiting for service: invariants`
+### 启动时报 `active binding ... points at missing session`
 
-确认 `--dump-config` 同时包含 `invariants` registry 和 `feishu-invariant` companion。若缺少 registry，更新本插件后重新执行安装命令并重启 Profile。
+该检查由 `feishu-invariant` companion 自带，不再依赖 `ctx.invariants`。DSH v0.2.0-rc.2 起已移除 `@deepseek-ai/dsh-invariants` registry 与 `ctx.invariants`，本插件改为通过自身通道在启动时抛出 `BindingInvariantError`（`code: 'FEISHU_BINDING_INVARIANT'`），Loader 会因此让该行启动失败。
+
+出现该错误说明某个飞书 chat 的 active binding 指向的会话既不在实时 SessionStore、也不在 session persistence 中。确认插件版本与 DSH 版本匹配后重启 Profile；若持续出现，检查该会话是否已被 Web 端删除。
 
 ### 机器人收不到消息
 

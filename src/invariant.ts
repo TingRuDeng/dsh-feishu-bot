@@ -1,13 +1,18 @@
 /**
- * Runtime invariant companion for dsh-feishu-bot.
+ * Startup self-check companion for dsh-feishu-bot.
  *
  * Every active Feishu binding must name a session visible either in the live
  * SessionStore or in session persistence. The bridge repairs stale bindings
  * during startup; this companion catches regressions at startup and on every
  * later binding write.
+ *
+ * DSH removed the runtime invariant registry (`@deepseek-ai/dsh-invariants`
+ * and `ctx.invariants`) in v0.2.0-rc.2, so this plugin owns its check and
+ * reports a violation through its own channel: the failure is raised out of
+ * plugin startup so the loader fails the row, exactly as the application
+ * previously observed.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 import type { DomainChanged } from '@deepseek-ai/dsh-storage-domain'
 import type {} from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
@@ -15,16 +20,24 @@ import type {} from '@deepseek-ai/dsh-storage-domain'
 import type { ChatBinding } from './bridge/domain.ts'
 import { auditHash } from './audit.ts'
 
-const PACKAGE_NAME = 'dsh-feishu-bot'
-
 export const name = 'feishu-bot-invariant'
-export const inject = ['invariants', 'feishu']
+export const inject = ['feishu', 'sessions', 'sessionPersistence', 'storageDomain']
 
-const install: InvariantInstaller = Object.assign(async (ctx: Context, fail: InvariantFailure) => {
+/** Raised when an active binding points at a session that does not exist. */
+export class BindingInvariantError extends Error {
+  readonly code = 'FEISHU_BINDING_INVARIANT'
+
+  constructor(message: string) {
+    super(message)
+    this.name = 'BindingInvariantError'
+  }
+}
+
+const install = async (ctx: Context, fail: (reason: string) => never): Promise<void> => {
   await ctx.feishu.whenBridgeReady()
   const known = new Set([
     ...ctx.sessions.list().map(session => String(session.id)),
-    ...(await ctx.sessionPersistence.list()).map(header => String(header.id)),
+    ...(await ctx.sessionPersistence.list()).map(snapshot => String(snapshot.header.id)),
   ])
   const requireValid = (chatId: string, binding: ChatBinding): void => {
     if (binding.status === 'active' && !known.has(binding.sessionId)) {
@@ -43,7 +56,15 @@ const install: InvariantInstaller = Object.assign(async (ctx: Context, fail: Inv
     if (change.domain !== 'feishu_bot' || change.table !== 'bindings' || change.operation !== 'put') return
     requireValid(change.key, change.value as ChatBinding)
   }, { global: true })
-}, { inject: ['feishu', 'sessions', 'sessionPersistence', 'storageDomain'] })
+}
 
-export const apply = (ctx: Context): Promise<() => void> =>
-  Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
+/** Run the binding self-check against `ctx`, reporting violations through `fail`. */
+export async function checkBindings(ctx: Context, fail: (reason: string) => never): Promise<void> {
+  await install(ctx, fail)
+}
+
+export const apply = (ctx: Context): Promise<() => void> => {
+  const fail = (reason: string): never => { throw new BindingInvariantError(reason) }
+  return checkBindings(ctx, fail).then(() => () => {})
+}
+

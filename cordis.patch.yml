@@ -1,9 +1,10 @@
-# The dsh-feishu-bot bundle patch: four plugin rows inserted after the web-app
-# layer. The invariant registry provides `ctx.invariants`; feishu-gateway
-# provides the `ctx.feishu` transport service; feishu-bridge owns all business
-# semantics (bindings, commands, inbound dedup, outbound projection, approval
-# answering); feishu-invariant enforces active binding -> live/persisted
-# session existence.
+# The dsh-feishu-bot bundle patch: three plugin rows inserted after the web-app
+# layer. feishu-gateway provides the `ctx.feishu` transport service;
+# feishu-bridge owns all business semantics (bindings, commands, inbound dedup,
+# outbound projection, approval answering); feishu-invariant enforces active
+# binding -> live/persisted session existence and reports through its own
+# channel (DSH removed the `@deepseek-ai/dsh-invariants` registry in
+# v0.2.0-rc.2).
 #
 # Credentials are credential references resolved by the dsh credentials
 # service; no secrets live in this file or this repository.
@@ -36,9 +37,6 @@
         freshnessMs: 600000
         listingTtlMs: 300000
         cardThrottleMs: 1000
-
-    - id: invariants
-      name: '@deepseek-ai/dsh-invariants'
 
     - id: feishu-invariant
       name: '@tingrudeng/dsh-feishu-bot/invariant'

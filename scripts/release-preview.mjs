@@ -248,7 +248,9 @@ async function main() {
         env,
         capture: true,
       })
-      for (const row of ['feishu-gateway', 'feishu-bridge', 'invariants', 'feishu-invariant']) {
+      // DSH v0.2.0-rc.2 removed the `@deepseek-ai/dsh-invariants` registry, so
+      // the bundle now has three rows: feishu-invariant guards bindings itself.
+      for (const row of ['feishu-gateway', 'feishu-bridge', 'feishu-invariant']) {
         if (!dump.includes(`id: ${row}`)) throw new Error(`clean DSH profile is missing row: ${row}`)
       }
     }

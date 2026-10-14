@@ -19,7 +19,7 @@ For Feishu-console setup, credentials, allowlists, startup, commands, and troubl
 
 ```sh
 dsh plugin --profile web add /path/to/dsh-feishu-bot
-dsh --profile web --dump-config   # expect gateway, bridge, registry, and invariant rows
+dsh --profile web --dump-config   # expect gateway, bridge, and invariant rows
 ```
 
 For a prebuilt local preview, run `pnpm release:preview` from a clean checkout. The single release gate runs frozen install, tests, typecheck, build, tarball/manifest audit, SBOM generation, isolated install, four-entry import, clean-profile composition, and checksum generation. Install the resulting `artifacts/tingrudeng-dsh-feishu-bot-0.1.0-rc.11.tgz` with `dsh plugin --profile web add /absolute/path/to/the.tgz`; verify `artifacts/SHA256SUMS`, and inspect the matching `.cdx.json` plus `release.json` descriptor when provenance matters. This does not publish a tag, GitHub Release, or registry package. Registry installs use the sole supported channel, `@tingrudeng/dsh-feishu-bot@latest`.

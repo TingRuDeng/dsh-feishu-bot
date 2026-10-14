@@ -12,7 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { randomBytes } from 'node:crypto'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import {
   type AgentOptions,
   type ModelSelection,
@@ -226,7 +226,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     list: () => readonly { path: string; title?: string; name?: string; sessionIds: readonly SessionId[] }[] | Promise<readonly { path: string; title?: string; name?: string; sessionIds: readonly SessionId[] }[]>
   } | undefined
   const sessionProjections = ctx.get('sessionProjections' as never) as {
-    snapshot: (session: { readonly events: readonly SessionEvent[] }) => {
+    snapshot: (session: Session) => {
       values: { title?: unknown }
     }
   } | undefined
@@ -405,8 +405,9 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const sessionModelSelection = (sessionId: string): ModelSelection | undefined => {
     const session = ctx.sessions.list().find(candidate => String(candidate.id) === sessionId)
     if (session === undefined) return modelSelections.get(sessionId as unknown as SessionId)?.current
-    for (let index = session.events.length - 1; index >= 0; index--) {
-      const event = session.events[index]!
+    const events = session.snapshotEvents()
+    for (let index = events.length - 1; index >= 0; index--) {
+      const event = events[index]!
       if (event.type !== 'request/header') continue
       const config = (event.data as { header?: { config?: unknown } }).header?.config
       if (typeof config !== 'object' || config === null) return undefined
@@ -457,15 +458,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     for (const session of ctx.sessions.list()) {
       if (String(session.id) === sessionId) return session.header.cwd
     }
-    const header = (await ctx.sessionPersistence.list(setupSignal))
-      .find(h => String(h.id) === sessionId)
-    return header?.cwd
+    const header = (await ctx.sessionPersistence.list({ signal: setupSignal }))
+      .find(h => String(h.header.id) === sessionId)
+    return header?.header.cwd
   }
 
   /** Current live and persisted session identities, without loading agents. */
   const knownSessionIds = async (): Promise<Set<string>> => new Set([
     ...ctx.sessions.list().map(session => String(session.id)),
-    ...(await ctx.sessionPersistence.list(setupSignal)).map(header => String(header.id)),
+    ...(await ctx.sessionPersistence.list({ signal: setupSignal })).map(snapshot => String(snapshot.header.id)),
   ])
 
   interface SessionListing {
@@ -743,11 +744,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       // Do not flush the complete live log on this hot path. Once an
       // assistant result appears, catchUpProjection first persists its full
       // canonical delivery; that row is the durable recovery boundary.
-      return live.events.filter(event => event.seq >= fromSeq)
+      return live.snapshotEvents().filter(event => event.seq >= fromSeq)
     }
-    return (await ctx.sessionPersistence.readFrom(
-      sessionId as unknown as SessionId, fromSeq,
-    )).events
+    const persistence = ctx.sessionPersistence
+    const handle = await persistence.open(sessionId as unknown as SessionId, 'read')
+    try {
+      return (await handle.read(fromSeq)).events
+    } finally {
+      await handle.close()
+    }
   }
 
   let deliveryAdmissionTail: Promise<void> = Promise.resolve()
@@ -879,7 +884,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       try {
         const session = ctx.sessions.list().find(s => String(s.id) === (sessionId as string))
         if (session === undefined) return
-        const folded = reduceFeishuTask(session.events, tracker.taskStartSeq)
+        const folded = reduceFeishuTask(session.snapshotEvents(), tracker.taskStartSeq)
         if (folded === undefined || folded.taskMessageId !== tracker.taskMessageId) return
         const snapshot = folded.snapshot
         // tokenMeter is optional: measurement failure removes only the token line.
@@ -960,11 +965,12 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const adoptRunningTask = (chatId: string, sessionId: SessionIdString): void => {
     const session = ctx.sessions.list().find(candidate => String(candidate.id) === String(sessionId))
     if (session === undefined) return
-    const directMessages = session.events.filter(event =>
+    const events = session.snapshotEvents()
+    const directMessages = events.filter(event =>
       event.type === 'user/message' && directBoundTaskMessageId(event.data) !== null)
     const latest = directMessages.at(-1)
     if (latest === undefined) return
-    const folded = reduceFeishuTask(session.events, latest.seq)
+    const folded = reduceFeishuTask(events, latest.seq)
     if (folded === undefined || folded.settled) return
     const tracker: CardTracker = {
       turn: folded.snapshot.turn,
@@ -994,7 +1000,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         : null
       if (directMessageId !== null) {
         settledApprovalGroups.delete(`${chatId}:${String(binding.sessionId)}`)
-        const precedingStart = [...session.events]
+        const precedingStart = [...session.snapshotEvents()]
           .reverse()
           .find(candidate => candidate.seq < event.seq && candidate.type === 'turn/start')
         const turn = (precedingStart?.data as { turn?: unknown } | undefined)?.turn
@@ -1256,7 +1262,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       boundChatId = winner.chatId
     }
     const delegateApproval = (): Promise<ApprovalOutcome> => delegatedBeforeBinding ?? next()
-    const approvalId = pairApprovalId(req.agent.session.events, req.callId as string | undefined, claimedApprovalIds())
+    const approvalId = pairApprovalId(req.agent.session.snapshotEvents(), req.callId as string | undefined, claimedApprovalIds())
     // No pairable asked event (or ambiguity): conservatively step aside.
     if (approvalId === undefined) return delegateApproval()
 
@@ -2438,11 +2444,11 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         // remains a safety boundary for binding, not a second discovery index.
         const inWorkspace = await buildWorkspaceFilter(config.allowedWorkspaces)
         const archived = archivedSessionIds()
-        const allPersisted = await ctx.sessionPersistence.list()
+        const allPersisted = (await ctx.sessionPersistence.list()).map(snapshot => snapshot.header)
         const persistedById = new Map(allPersisted.map(header => [String(header.id), header]))
         const liveById = new Map(ctx.sessions.list().map(session => [String(session.id), session.header]))
         const registryWorkspaces = await workspaceRegistry.list()
-        const headers: typeof allPersisted = []
+        const headers: SessionHeader[] = []
         const seen = new Set<string>()
         for (const workspace of registryWorkspaces) {
           for (const sessionId of workspace.sessionIds) {
@@ -2472,7 +2478,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           const workspace = workspaceMap.get(key) ?? {
             key,
             name: workspaceLabel(key),
-            sessions: [],
+            sessions: [] as Array<{ id: SessionId; cwd: string; createdAt?: number }>,
           }
           workspace.sessions.push({ id: header.id, cwd: key, createdAt: header.createdAt })
           workspaceMap.set(key, workspace)
@@ -2779,7 +2785,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
             sessionId,
             meta: { cwd: authorized.realpath },
             agentOptions: agentOptions(),
-            setup: async (agentCtx) => {
+            setup: async (agentCtx, agent) => {
               // M7.0: model selection (with reasoning effort) installs in the
               // agent scope before publication, alongside M6's ownership
               // compensation. Ownership is unambiguous here: /new created it.
@@ -2801,7 +2807,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
                   throw new Error('feishu-bridge: /new setup disposed before publication')
                 }
                 try {
-                  const unpublishedSession = agentCtx.agent?.session
+                  const unpublishedSession = agent.session
                   if (unpublishedSession === undefined) {
                     throw new Error('feishu-bridge: unpublished agent missing during /new setup')
                   }
@@ -2812,10 +2818,12 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
                   if (!preparedSwitch.ok) {
                     throw new Error(`feishu-bridge: /new binding preparation failed: ${preparedSwitch.reason}`)
                   }
-                  // Register the empty session's durable metadata before
-                  // publication. session/created will claim this ownerless state;
-                  // no live-only SessionStore.flush is legal inside setup.
-                  await ctx.sessionPersistence.create(unpublishedSession.header)
+                  // AgentLoop already owns this session's durable write handle
+                  // and materializes it at publication (createAgent flushes the
+                  // unstored suffix), so the bridge must not call
+                  // sessionPersistence.create() here: the id is already claimed
+                  // by the open write handle and create() fails with
+                  // SessionAlreadyExistsError, hanging /new inside setup.
                   await throwIfRollbackRequested()
                 } catch (error: unknown) {
                   preparationError = error
@@ -3438,7 +3446,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       reply(record.chatId, `重启前有一条消息未能送达（${resolved.error.code}）。`)
       return
     }
-    const verdict = reconcileMessage(record, resolved.agent.session.events)
+    const verdict = reconcileMessage(record, resolved.agent.session.snapshotEvents())
     switch (verdict.action) {
       case 'enqueued':
         await inboundEvents.put(eventId, { ...record, status: 'enqueued', text: undefined, target: targetId })

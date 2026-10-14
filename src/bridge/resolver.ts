@@ -43,15 +43,20 @@ async function inspectPersistedSession(
   if (persistence === undefined) {
     throw new Error('session persistence is not configured (load a dsh-session-persistence backend)')
   }
-  const listed = (await persistence.list()).find(candidate => candidate.id === sessionId)
-  if (listed === undefined || listed.cwd === undefined) {
+  const listed = (await persistence.list()).find(candidate => candidate.header.id === sessionId)
+  if (listed === undefined || listed.header.cwd === undefined) {
     throw new BridgeSessionNotFound(`session "${sessionId}" not found`)
   }
-  const inspected = await persistence.inspect(sessionId)
-  if (inspected.meta.cwd === undefined) {
-    throw new BridgeSessionNotFound(`session "${sessionId}" not found`)
+  const handle = await persistence.open(sessionId, 'read')
+  try {
+    if (handle.header.cwd === undefined) {
+      throw new BridgeSessionNotFound(`session "${sessionId}" not found`)
+    }
+    const { events } = await handle.read()
+    return { meta: handle.header, events: [...events] }
+  } finally {
+    await handle.close()
   }
-  return { meta: inspected.meta, events: [...inspected.events] }
 }
 
 /** Match a cross-package persistence error without relying on instanceof. */
@@ -118,9 +123,9 @@ export function createBridgeAgentResolver(
 
   const fencedSetup = (sessionId: SessionId, setup?: AgentSetup): AgentSetup | undefined => {
     if (setup === undefined && installSelection === undefined) return undefined
-    return async (agentCtx: Context): Promise<AgentSetupCommit> => {
+    return async (agentCtx: Context, agent: Agent): Promise<AgentSetupCommit> => {
       installSelection?.(agentCtx, sessionId)
-      const setupCommit = await setup?.(agentCtx)
+      const setupCommit = await setup?.(agentCtx, agent)
       return {
         commit: () => {
           // AgentLoop invokes this commit immediately before publication.

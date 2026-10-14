@@ -72,7 +72,6 @@
     "@deepseek-ai/dsh-agent": "link:../deepseek-harness/packages/core/agent",
     "@deepseek-ai/dsh-brand": "link:../deepseek-harness/packages/util/brand",
     "@deepseek-ai/dsh-credentials": "link:../deepseek-harness/packages/credentials/credentials",
-    "@deepseek-ai/dsh-invariants": "link:../deepseek-harness/packages/runtime-diagnostics/invariants",
     "@deepseek-ai/dsh-llm": "link:../deepseek-harness/packages/llm/llm",
     "@deepseek-ai/dsh-session": "link:../deepseek-harness/packages/core/session",
     "@deepseek-ai/dsh-session-persistence": "link:../deepseek-harness/packages/session/session-persistence",
