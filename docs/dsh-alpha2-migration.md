@@ -86,9 +86,28 @@ persistence.create() + flush()   → list() 返回 1 条
 
 1. **`snapshotEvents()` 不是终局形态。** DSH 源码对 `snapshotEvents` / `eventAt` / `ownEvents` 全部标注 `@deprecated`，原文 *"new calls are prohibited"*，指向 Agent Note `2026-09-09-deprecate-synchronous-session-event-reads`。当前运行时仍保留完整日志、行为正确，且 DSH 的 lint 白名单只约束自身仓库、不约束外部插件，所以**能跑**；但架构取向是改用 **projection**。这属于设计层重构，不是机械替换。
 
+   该决策记录同时要求：非测试文件的调用必须带 **line-scoped `typescript/no-deprecated` waiver** 标注为"延期迁移"。`src/bridge/index.ts` 的 **7 处**已全部按 DSH 的写法补齐：
+
+   ```ts
+   // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
+   ```
+
+   7 处对应 5 类关注点，因此**不是同类改写**：
+
+   | 行 | 关注点 | projection 化难度 |
+   |---|---|---|
+   | 409 | 倒序扫描 `request/header` 取模型选择 | 中，可注册投影单元 |
+   | 749 | 按 `fromSeq` 增量 catch-up | **高**，需要分页历史读取而非投影 |
+   | 890 | 任务卡 `reduceFeishuTask` 折叠 | 中，可注册投影单元 |
+   | 972 / 1008 | 直接消息锚定与 `turn/start` 查找 | 中 |
+   | 1271 | `pairApprovalId` 配对 `asked` 事件 | 中 |
+   | 3456 | 崩溃对账 `reconcileMessage` | 中 |
+
 2. **`user-approval` 的 `undefined.session`** 已证实为下游症状而非独立缺陷：测试用 `ctx.agents.get(...)` 拿不到 agent（因为 `/new` 死锁使其从未发布），修复后自然消失，无需单独处理。
 
-3. 真实飞书故障矩阵仍待人工验收，自动化通过不能替代。
+3. **waiver 未能在本机得到正向验证。** 已确认 DSH 的 `no-deprecated` 规则仅在自身 `.oxlintrc.json` 中启用，且测试白名单按**精确源文件路径**（`packages/core/session/src/index.ts`）放行这三个方法。本机用 `oxlint` 直接跑该规则时，即使对本地 `@deprecated` 符号也不报错（type-aware 规则未生效），因此**无法证明 waiver 被消费**。注释按 DSH 原文格式书写，但真实门禁效果待在有 type-aware lint 的环境确认。
+
+4. 真实飞书故障矩阵仍待人工验收，自动化通过不能替代。
 
 ## 七、新会话快速启动
 
