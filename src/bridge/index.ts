@@ -74,7 +74,12 @@ import {
   planDurableRetention, planRetention, pruneProjectionCursors,
   sortPendingOutbox, watermarkKey,
 } from './reliability.ts'
-import { pairApprovalId, renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
+import { renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
+import {
+  approvalPairingProjectionDefinition,
+  approvalPairingView,
+  type ApprovalPairingState,
+} from './approval-projection.ts'
 import {
   renderSessionListCard,
   renderSessionListStatusCard,
@@ -318,6 +323,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     // re-scanning the log. Registered on the owner fiber, after it is active.
     ctx.effect(() => sessionProjections.register(feishuTaskProjectionDefinition),
       'feishuBridge.taskProjection')
+    ctx.effect(() => sessionProjections.register(approvalPairingProjectionDefinition),
+      'feishuBridge.approvalPairing')
   } catch (error: unknown) {
     // The Fiber can become inactive in the microtask between the second open
     // and lifecycle registration. Until registration succeeds, rollback is
@@ -1275,8 +1282,13 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       boundChatId = winner.chatId
     }
     const delegateApproval = (): Promise<ApprovalOutcome> => delegatedBeforeBinding ?? next()
-    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-    const approvalId = pairApprovalId(req.agent.session.snapshotEvents(), req.callId as string | undefined, claimedApprovalIds())
+    // Log-derived pairing comes from the projection; `claimed` stays live
+    // in-memory registry state, which the projection cannot own.
+    const approvalId = approvalPairingView(
+      sessionProjections.stateOf(req.agent.session, 'feishuApprovalPairing') as ApprovalPairingState | undefined,
+      req.callId as string | undefined,
+      claimedApprovalIds(),
+    )
     // No pairable asked event (or ambiguity): conservatively step aside.
     if (approvalId === undefined) return delegateApproval()
 

@@ -18,6 +18,10 @@ interface ApprovalScanEvent {
  * the request (same callId, or both callId-less). Mirrors the upstream
  * apiproxy scan so both channels pair the same audit id for the same
  * request.
+ *
+ * NOT used by the bridge's live path, which reads the `feishuApprovalPairing`
+ * projection instead (see approval-projection.ts). This batch form is kept as
+ * the reference oracle for that projection's equivalence and fuzz tests.
  * @param events - the request agent's session events in log order.
  * @param callId - the request's callId, when the asker had one.
  * @param claimed - approvalIds already held by pending entries (either channel's registry).
