@@ -81,6 +81,11 @@ import {
   type ApprovalPairingState,
 } from './approval-projection.ts'
 import {
+  modelSelectionProjectionDefinition,
+  modelSelectionView,
+  type ModelSelectionState,
+} from './model-selection-projection.ts'
+import {
   renderSessionListCard,
   renderSessionListStatusCard,
   renderSessionWorkspaceCard,
@@ -325,6 +330,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       'feishuBridge.taskProjection')
     ctx.effect(() => sessionProjections.register(approvalPairingProjectionDefinition),
       'feishuBridge.approvalPairing')
+    ctx.effect(() => sessionProjections.register(modelSelectionProjectionDefinition),
+      'feishuBridge.modelSelection')
   } catch (error: unknown) {
     // The Fiber can become inactive in the microtask between the second open
     // and lifecycle registration. Until registration succeeds, rollback is
@@ -424,25 +431,18 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const currentTaskFold = (session: Session): FeishuTaskFold | undefined =>
     feishuTaskFoldOf(sessionProjections.stateOf(session, 'feishuTask') as FeishuTaskState | undefined)
 
-  /** Read the latest canonical request/header as the Web-owned session's current model selection. */
+  /**
+   * The Web-owned session's current model selection, from the projection.
+   *
+   * The in-memory ref is consulted only when the session has logged no
+   * `request/header` at all: a session whose newest header is unusable is
+   * authoritative "no selection", matching the history scan this replaced.
+   */
   const sessionModelSelection = (sessionId: string): ModelSelection | undefined => {
     const session = ctx.sessions.list().find(candidate => String(candidate.id) === sessionId)
     if (session === undefined) return modelSelections.get(sessionId as unknown as SessionId)?.current
-    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-    const events = session.snapshotEvents()
-    for (let index = events.length - 1; index >= 0; index--) {
-      const event = events[index]!
-      if (event.type !== 'request/header') continue
-      const config = (event.data as { header?: { config?: unknown } }).header?.config
-      if (typeof config !== 'object' || config === null) return undefined
-      const value = config as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
-      if (typeof value.provider !== 'string' || typeof value.model !== 'string') return undefined
-      return {
-        provider: value.provider,
-        model: value.model,
-        ...(typeof value.reasoningEffort === 'string' ? { reasoningEffort: ReasoningEffortId(value.reasoningEffort) } : {}),
-      }
-    }
+    const state = sessionProjections.stateOf(session, 'feishuModelSelection') as ModelSelectionState | undefined
+    if (state?.seen === true) return modelSelectionView(state)
     return modelSelections.get(sessionId as unknown as SessionId)?.current
   }
 
