@@ -100,12 +100,20 @@ persistence.create() + flush()   → list() 返回 1 条
    | 749 | 按 `fromSeq` 增量 catch-up | **高**，需要分页历史读取而非投影 | 待迁移（waiver） |
    | 890 | 任务卡 `reduceFeishuTask` 折叠 | 中，可注册投影单元 | **已迁移** |
    | 972 / 1008 | 直接消息锚定与 `turn/start` 查找 | 中 | **已迁移** |
-   | 1271 | `pairApprovalId` 配对 `asked` 事件 | 中 | 待迁移（waiver） |
+   | 1271 | `pairApprovalId` 配对 `asked` 事件 | 中 | **已迁移** |
    | 3456 | 崩溃对账 `reconcileMessage` | 中 | 待迁移（waiver） |
 
    `feishuTask` 投影单元（`src/bridge/task-projection.ts`）承接了 890 / 972 / 1008
    三处：任务折叠本就是日志派生状态（`taskStartSeq` 由折叠自身算出，tracker 只是
-   缓存），因此归投影所有是语义上的正位，而非权宜。waiver 由 7 处降为 4 处。
+   缓存），因此归投影所有是语义上的正位，而非权宜。waiver 由 7 处降为 **3 处**。
+
+   `feishuApprovalPairing` 投影单元（`src/bridge/approval-projection.ts`）承接了
+   1271：配对输入是日志派生状态。`claimed`（已被其它 pending 条目占用的
+   approvalId）**刻意保留为调用方参数**——它是内存注册表状态，不是日志派生的，
+   投影不该也不能拥有它。
+
+   `pairApprovalId` 保留在 `approval.ts` 中作为**参考实现（oracle）**，供等价性
+   与差分测试使用；生产路径已不再调用它。
 
    等价性由**结构**保证而非两份实现互相校对：折叠体被抽成
    `foldFeishuTaskStep`，批量 `reduceFeishuTask` 与投影 `apply` 共用同一状态机。
@@ -125,6 +133,13 @@ persistence.create() + flush()   → list() 返回 1 条
 
 4. 真实飞书故障矩阵仍待人工验收，自动化通过不能替代。投影化后卡片刷新由
    registry 驱动，`tests` 覆盖折叠等价与装配，但**真实飞书的卡片刷新时序只能由你验收**。
+
+5. **差分模糊测试抓到了手写用例漏掉的语义偏差。** 审批配对的参考实现是
+   **位置性**语义：它从日志尾部反扫，每个 `asked` 只与扫描中已见的（即日志中更靠
+   后的）`decided` 比较。因此一条 decision 只压制它**之前**的同 id ask，对**之后**
+   的 ask 无效。手写的 14 个等价用例全部通过，但 2000 组随机日志的差分测试立刻
+   报出 402 处不一致，先后纠正了两个错误模型（只删一个重复项 → 误压制后续 ask）。
+   第一版实现"看起来完全正确"——这是本轮唯一靠随机化才暴露的问题。
 
 ## 七、新会话快速启动
 
