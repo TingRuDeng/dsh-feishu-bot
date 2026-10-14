@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import InvariantRegistry from '@deepseek-ai/dsh-invariants'
 import SessionStore from '@deepseek-ai/dsh-session'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import Storage from '@deepseek-ai/dsh-storage'
@@ -30,7 +29,6 @@ async function setup(ready = true) {
   await ctx.plugin(Storage)
   await ctx.plugin(StorageJson, { root: join(root, 'storages') })
   await ctx.plugin(StorageDomain, { backend: 'json' })
-  await ctx.plugin(InvariantRegistry)
   const domain = await ctx.storageDomain.open(feishuBotDomain)
   ctx.effect(() => () => domain.close())
   if (ready) ctx.provide('feishu', { whenBridgeReady: () => Promise.resolve() } as never)
@@ -99,3 +97,4 @@ describe('dsh-feishu-bot invariant companion', () => {
     })).toThrow(/active binding.*missing/u)
   })
 })
+

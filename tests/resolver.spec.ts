@@ -63,9 +63,15 @@ async function newRoot(): Promise<string> {
 async function persistCold(root: string, sessionId: SessionId): Promise<void> {
   const ctx = await mount(root, new MockAdapter([]))
   // A resumable target is always project-backed: the persistence contract
-  // rejects a cwd-less header as not-found.
-  const session = ctx.sessions.create(sessionId, { seed: balancedTurn(), meta: { cwd: root } })
-  await ctx.sessions.flush(session)
+  // rejects a cwd-less header as not-found. AgentLoop owns the stored handle,
+  // so the session must be created through the agent registry.
+  const handle = await ctx.agents.create({
+    sessionId,
+    agentOptions,
+    seed: balancedTurn(),
+    meta: { cwd: root },
+  })
+  await handle.dispose()
   await ctx.fiber.dispose()
   contexts.splice(contexts.indexOf(ctx), 1)
 }
@@ -99,11 +105,11 @@ describe('bridge agent resolver (assembled)', () => {
     // The resumed agent is functional: a followup is consumed normally.
     const message = createUserMessage({
       content: [{ type: 'text', text: 'after resume' }],
-      source: { kind: 'plugin', plugin: 'feishu-bot' },
+      source: { kind: 'user' },
     })
     result.agent.followup(message)
     await result.agent.whenIdle()
-    expect(result.agent.session.events.some(e => e.type === 'user/message'
+    expect(result.agent.session.snapshotEvents().some(e => e.type === 'user/message'
       && (e.data as { id: string }).id === message.id)).toBe(true)
 
     await result.dispose!()
@@ -140,14 +146,12 @@ describe('bridge agent resolver (assembled)', () => {
     const persistence = ctx.get('sessionPersistence')
     if (persistence === undefined) throw new Error('session persistence was not mounted')
     vi.spyOn(persistence, 'list').mockResolvedValue([{
-      version: 0,
-      id: sessionId,
-      createdAt: 1,
-      cwd: root,
-    }])
+      header: { version: 0, id: sessionId, createdAt: 1, cwd: root },
+      revision: 0,
+    } as never])
     const notFound = new Error(`session "${sessionId}" not found`)
     notFound.name = 'SessionPersistenceNotFoundError'
-    vi.spyOn(persistence, 'inspect').mockRejectedValue(notFound)
+    vi.spyOn(persistence, 'open').mockRejectedValue(notFound)
 
     const resolve = createBridgeAgentResolver(ctx, () => agentOptions)
     const result = await resolve(sessionId)
@@ -160,11 +164,13 @@ describe('bridge agent resolver (assembled)', () => {
     const root = await newRoot()
     const sessionId = SessionId('resolver-subagent')
     const writer = await mount(root, new MockAdapter([]))
-    const session = writer.sessions.create(sessionId, {
+    const handle = await writer.agents.create({
+      sessionId,
+      agentOptions,
       seed: balancedTurn(),
       meta: { cwd: root, origin: 'subagent' },
     })
-    await writer.sessions.flush(session)
+    await handle.dispose()
     await writer.fiber.dispose()
     contexts.splice(contexts.indexOf(writer), 1)
 
@@ -213,11 +219,11 @@ describe('bridge agent resolver (assembled)', () => {
     ))
     const persistence = ctx.get('sessionPersistence')
     if (persistence === undefined) throw new Error('session persistence was not mounted')
-    const originalInspect = persistence.inspect.bind(persistence)
-    vi.spyOn(persistence, 'inspect').mockImplementation(async id => {
-      const inspected = await originalInspect(id)
+    const originalOpen = persistence.open.bind(persistence)
+    vi.spyOn(persistence, 'open').mockImplementation(async (id, access) => {
+      const handle = await originalOpen(id, access)
       published = true
-      return inspected
+      return handle
     })
     const resume = vi.spyOn(ctx.agents, 'resume')
 

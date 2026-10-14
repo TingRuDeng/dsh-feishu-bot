@@ -302,7 +302,9 @@ async function mountBridge(
   await ctx.plugin(StorageDomain, { backend: 'json' })
   ctx.provide('sessionProjectionCache' as never, {
     coldSnapshot: async (sessionId: string) => {
-      const stored = await ctx.sessionPersistence.readFrom(sessionId as never, 0)
+      const handle = await ctx.sessionPersistence.open(sessionId as never, 'read')
+      const stored = await handle.read()
+      await handle.close()
       const event = stored.events.findLast(item => item.type === 'session/title')
       const title = (event?.data as { title?: unknown } | undefined)?.title
       return {
@@ -321,7 +323,7 @@ async function mountBridge(
       const groups = new Map<string, string[]>()
       const headers = new Map<string, { id: string; cwd?: string }>()
       for (const session of ctx.sessions.list()) headers.set(String(session.id), { id: String(session.id), cwd: session.header.cwd })
-      for (const session of await ctx.sessionPersistence.list()) headers.set(String(session.id), { id: String(session.id), cwd: session.cwd })
+      for (const session of await ctx.sessionPersistence.list()) headers.set(String(session.header.id), { id: String(session.header.id), cwd: session.header.cwd })
       for (const session of headers.values()) {
         const cwd = session.cwd
         if (cwd === undefined) continue
@@ -597,14 +599,19 @@ describe('assembled bridge (M1 acceptance)', () => {
     it('/use cold recovery installs the default selection on the resumed agent', { timeout: 20_000 }, async () => {
       const first = await mountBridge(new MockAdapter([]))
       const coldSessionId = 'cold-use-effort'
-      const session = first.ctx.sessions.create(coldSessionId as never, {
+      // AgentLoop owns the durable write handle: seeding through
+      // `sessions.create()` registers no persistence writer, so the cold
+      // session would never reach disk and could not be resumed.
+      const seeded = await first.ctx.agents.create({
+        sessionId: coldSessionId as never,
+        agentOptions: { provider: 'mock', model: 'm' },
         seed: [
           { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
           { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
         ] as never,
         meta: { cwd: first.root },
       })
-      await first.ctx.sessions.flush(session)
+      await first.ctx.sessions.flush(seeded.agent.session)
       await first.ctx.fiber.dispose()
 
       const adapter = new MockAdapter([textResponse('恢复后的回答')], reasoningInfo)
@@ -2128,7 +2135,7 @@ describe('assembled bridge (M1 acceptance)', () => {
       source: { kind: 'user', via: 'web' } as never,
     }))
     await vi.waitFor(() => {
-      if (!handle.agent.session.events.some(event => event.type === 'turn/start')) throw new Error('turn not open')
+      if (!handle.agent.session.snapshotEvents().some(event => event.type === 'turn/start')) throw new Error('turn not open')
     })
     mounted.ctx.on('approval/request', () => new Promise(() => {}))
     void mounted.ctx.approval.request({ agent: handle.agent, toolName: 'Bash', reason: 'dangerous write' })
@@ -2303,14 +2310,19 @@ describe('assembled bridge (M1 acceptance)', () => {
   it('disposes a cold session resumed by /use when the binding write fails', { timeout: 20_000 }, async () => {
     const first = await mountBridge(new MockAdapter([]))
     const coldSessionId = 'cold-use-binding-failure'
-    const session = first.ctx.sessions.create(coldSessionId as never, {
+    // AgentLoop owns the durable write handle: seeding through
+    // `sessions.create()` registers no persistence writer, so the cold
+    // session would never reach disk and could not be resumed.
+    const seeded = await first.ctx.agents.create({
+      sessionId: coldSessionId as never,
+      agentOptions: { provider: 'mock', model: 'm' },
       seed: [
         { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
         { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
       ] as never,
       meta: { cwd: first.root },
     })
-    await first.ctx.sessions.flush(session)
+    await first.ctx.sessions.flush(seeded.agent.session)
     await first.ctx.fiber.dispose()
 
     const second = await mountBridge(new MockAdapter([]), {}, first.root)
@@ -2332,14 +2344,19 @@ describe('assembled bridge (M1 acceptance)', () => {
   it('disposes a cold-resumed target when projection cursor seeding fails before binding', { timeout: 20_000 }, async () => {
     const first = await mountBridge(new MockAdapter([]))
     const coldSessionId = 'cold-use-cursor-failure'
-    const session = first.ctx.sessions.create(coldSessionId as never, {
+    // AgentLoop owns the durable write handle: seeding through
+    // `sessions.create()` registers no persistence writer, so the cold
+    // session would never reach disk and could not be resumed.
+    const seeded = await first.ctx.agents.create({
+      sessionId: coldSessionId as never,
+      agentOptions: { provider: 'mock', model: 'm' },
       seed: [
         { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
         { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
       ] as never,
       meta: { cwd: first.root },
     })
-    await first.ctx.sessions.flush(session)
+    await first.ctx.sessions.flush(seeded.agent.session)
     await first.ctx.fiber.dispose()
 
     const second = await mountBridge(new MockAdapter([]), {}, first.root)
@@ -2370,14 +2387,19 @@ describe('assembled bridge (M1 acceptance)', () => {
   it('disposes a cold-resumed /use target when staging that target fails', { timeout: 20_000 }, async () => {
     const first = await mountBridge(new MockAdapter([]))
     const coldSessionId = 'cold-use-stage-failure'
-    const session = first.ctx.sessions.create(coldSessionId as never, {
+    // AgentLoop owns the durable write handle: seeding through
+    // `sessions.create()` registers no persistence writer, so the cold
+    // session would never reach disk and could not be resumed.
+    const seeded = await first.ctx.agents.create({
+      sessionId: coldSessionId as never,
+      agentOptions: { provider: 'mock', model: 'm' },
       seed: [
         { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
         { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
       ] as never,
       meta: { cwd: first.root },
     })
-    await first.ctx.sessions.flush(session)
+    await first.ctx.sessions.flush(seeded.agent.session)
     await first.ctx.fiber.dispose()
 
     const second = await mountBridge(new MockAdapter([]), {}, first.root)
@@ -2414,14 +2436,19 @@ describe('assembled bridge (M1 acceptance)', () => {
   it('keeps a cold /use agent unpublished until its binding is durable across chats', { timeout: 20_000 }, async () => {
     const first = await mountBridge(new MockAdapter([]))
     const coldSessionId = 'cold-use-cross-chat-adoption'
-    const session = first.ctx.sessions.create(coldSessionId as never, {
+    // AgentLoop owns the durable write handle: seeding through
+    // `sessions.create()` registers no persistence writer, so the cold
+    // session would never reach disk and could not be resumed.
+    const seeded = await first.ctx.agents.create({
+      sessionId: coldSessionId as never,
+      agentOptions: { provider: 'mock', model: 'm' },
       seed: [
         { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
         { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
       ] as never,
       meta: { cwd: first.root },
     })
-    await first.ctx.sessions.flush(session)
+    await first.ctx.sessions.flush(seeded.agent.session)
     await first.ctx.fiber.dispose()
 
     const second = await mountBridge(new MockAdapter([]), {}, first.root)
@@ -2494,14 +2521,19 @@ describe('assembled bridge (M1 acceptance)', () => {
   it('removes a late binding write after cold setup is disposed', { timeout: 20_000 }, async () => {
     const first = await mountBridge(new MockAdapter([]))
     const coldSessionId = 'cold-use-dispose-late-write'
-    const session = first.ctx.sessions.create(coldSessionId as never, {
+    // AgentLoop owns the durable write handle: seeding through
+    // `sessions.create()` registers no persistence writer, so the cold
+    // session would never reach disk and could not be resumed.
+    const seeded = await first.ctx.agents.create({
+      sessionId: coldSessionId as never,
+      agentOptions: { provider: 'mock', model: 'm' },
       seed: [
         { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
         { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
       ] as never,
       meta: { cwd: first.root },
     })
-    await first.ctx.sessions.flush(session)
+    await first.ctx.sessions.flush(seeded.agent.session)
     await first.ctx.fiber.dispose()
 
     const second = await mountBridge(new MockAdapter([]), {}, first.root)
@@ -2750,7 +2782,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     for (const sessionId of ctx.sessions.list().map(s => s.id)) {
       const agent = ctx.agents.get(sessionId)
       if (agent === undefined) continue
-      for (const event of agent.session.events) {
+      for (const event of agent.session.snapshotEvents()) {
         if (event.type !== 'user/message') continue
         const data = event.data as { content?: { type: string; text?: string }[]; source?: { kind?: string } }
         if (data.content?.some(b => b.text === '来自手机的消息')) {
@@ -3482,7 +3514,7 @@ describe('assembled bridge (M1 acceptance)', () => {
             value: async (...args: Parameters<typeof originalList>) => {
               if (!blocked) {
                 blocked = true
-                setupSignal = args[0]
+                setupSignal = args[0]?.signal
                 signalListStarted()
                 if (setupSignal === undefined) throw new Error('startup list is missing its abort signal')
                 await Promise.race([
@@ -3530,7 +3562,7 @@ describe('assembled bridge (M1 acceptance)', () => {
         bridgeContext = ctx
         const handle = await ctx.agents.create({
           sessionId: 'startup-approval-agent' as never,
-          meta: { cwd: (await ctx.sessionPersistence.list())[0]?.cwd },
+          meta: { cwd: (await ctx.sessionPersistence.list())[0]?.header.cwd },
           agentOptions: { provider: 'mock', model: 'm' },
         })
         liveAgent = handle.agent
@@ -3541,7 +3573,7 @@ describe('assembled bridge (M1 acceptance)', () => {
           value: async (...args: Parameters<typeof originalList>) => {
             if (!blocked) {
               blocked = true
-              const signal = args[0]
+              const signal = args[0]?.signal
               if (signal === undefined) throw new Error('startup list is missing its abort signal')
               signalListStarted()
               await new Promise<never>((_resolve, reject) => {
@@ -3822,7 +3854,7 @@ describe('assembled bridge (M1 acceptance)', () => {
       source: { kind: 'user', via: 'web' } as never,
     }))
     await vi.waitFor(() => {
-      if (!handle.agent.session.events.some(event => event.type === 'user/message')) throw new Error('task not started')
+      if (!handle.agent.session.snapshotEvents().some(event => event.type === 'user/message')) throw new Error('task not started')
     })
 
     await mounted.deliver({ text: '/use running-web-task' })
@@ -3849,7 +3881,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     }))
     await handle.agent.whenIdle()
     await mounted.ctx.sessions.flush(handle.agent.session)
-    const existingHead = handle.agent.session.events.at(-1)!.seq
+    const existingHead = handle.agent.session.snapshotEvents().at(-1)!.seq
 
     await mounted.deliver({ text: '/use existing-with-history' })
 

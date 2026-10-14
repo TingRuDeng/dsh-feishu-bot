@@ -51,7 +51,7 @@ async function mount(root: string, adapter: MockAdapter): Promise<Context> {
 function feishuMessage(text: string) {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: 'feishu-bot' },
+    source: { kind: 'user' },
   })
 }
 
@@ -74,8 +74,9 @@ async function newRoot(): Promise<string> {
 /** Remount from disk and read the persisted log for the session. */
 async function persistedEvents(root: string, sessionId: SessionId) {
   const ctx = await mount(root, new MockAdapter([]))
-  const inspection = await ctx.sessionPersistence.inspect(sessionId)
-  const events = [...inspection.events]
+  const handle = await ctx.sessionPersistence.open(sessionId, 'read')
+  const events = [...(await handle.read()).events]
+  await handle.close()
   await ctx.fiber.dispose()
   return events
 }
@@ -156,8 +157,11 @@ describe('assembled crash-window reconciliation (M1 gate)', () => {
     const root = await newRoot()
     const sessionId = SessionId('feishu-crash-d')
     const ctx = await mount(root, new MockAdapter([]))
-    const session = ctx.sessions.create(sessionId, { seed: balancedTurn() })
-    await ctx.sessions.flush(session)
+    // AgentLoop owns the durable write handle, so the seeded log must be
+    // created through the agent registry: `ctx.sessions.create()` alone
+    // registers no persistence writer, which makes `sessions.flush()` a no-op.
+    const handle = await ctx.agents.create({ sessionId, agentOptions, seed: balancedTurn() })
+    await ctx.sessions.flush(handle.agent.session)
     const message = feishuMessage('never sent') // minted, never followed up
     await ctx.fiber.dispose()
 
@@ -171,8 +175,8 @@ describe('assembled crash-window reconciliation (M1 gate)', () => {
     const sessionId = SessionId('feishu-crash-e')
     // Crash round: mint + nothing else (scenario D shape).
     let ctx = await mount(root, new MockAdapter([]))
-    const seeded = ctx.sessions.create(sessionId, { seed: balancedTurn() })
-    await ctx.sessions.flush(seeded)
+    const seeded = await ctx.agents.create({ sessionId, agentOptions, seed: balancedTurn() })
+    await ctx.sessions.flush(seeded.agent.session)
     await ctx.fiber.dispose()
 
     // Recovery round: resume, re-followup with a fresh id, consume, verify.
@@ -182,7 +186,7 @@ describe('assembled crash-window reconciliation (M1 gate)', () => {
     resumed.agent.followup(retry)
     await resumed.agent.whenIdle()
     await ctx.sessions.flush(resumed.agent.session)
-    const events = [...resumed.agent.session.events]
+    const events = [...resumed.agent.session.snapshotEvents()]
     await ctx.fiber.dispose()
 
     const consumed = events.filter(e => e.type === 'user/message'

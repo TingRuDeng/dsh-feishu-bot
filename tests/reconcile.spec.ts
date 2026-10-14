@@ -22,7 +22,7 @@ function spliced(data: {
 function userMessage(id: string): SessionEvent {
   return {
     type: 'user/message', seq: seq++, time: Date.now(),
-    data: { id, role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'plugin', plugin: 'feishu-bot' } },
+    data: { id, role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'user' } },
   } as unknown as SessionEvent
 }
 
