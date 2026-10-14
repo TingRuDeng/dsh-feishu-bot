@@ -405,6 +405,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const sessionModelSelection = (sessionId: string): ModelSelection | undefined => {
     const session = ctx.sessions.list().find(candidate => String(candidate.id) === sessionId)
     if (session === undefined) return modelSelections.get(sessionId as unknown as SessionId)?.current
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const events = session.snapshotEvents()
     for (let index = events.length - 1; index >= 0; index--) {
       const event = events[index]!
@@ -744,6 +745,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       // Do not flush the complete live log on this hot path. Once an
       // assistant result appears, catchUpProjection first persists its full
       // canonical delivery; that row is the durable recovery boundary.
+      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
       return live.snapshotEvents().filter(event => event.seq >= fromSeq)
     }
     const persistence = ctx.sessionPersistence
@@ -884,6 +886,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       try {
         const session = ctx.sessions.list().find(s => String(s.id) === (sessionId as string))
         if (session === undefined) return
+        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
         const folded = reduceFeishuTask(session.snapshotEvents(), tracker.taskStartSeq)
         if (folded === undefined || folded.taskMessageId !== tracker.taskMessageId) return
         const snapshot = folded.snapshot
@@ -965,6 +968,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const adoptRunningTask = (chatId: string, sessionId: SessionIdString): void => {
     const session = ctx.sessions.list().find(candidate => String(candidate.id) === String(sessionId))
     if (session === undefined) return
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const events = session.snapshotEvents()
     const directMessages = events.filter(event =>
       event.type === 'user/message' && directBoundTaskMessageId(event.data) !== null)
@@ -1000,6 +1004,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         : null
       if (directMessageId !== null) {
         settledApprovalGroups.delete(`${chatId}:${String(binding.sessionId)}`)
+        // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
         const precedingStart = [...session.snapshotEvents()]
           .reverse()
           .find(candidate => candidate.seq < event.seq && candidate.type === 'turn/start')
@@ -1262,6 +1267,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       boundChatId = winner.chatId
     }
     const delegateApproval = (): Promise<ApprovalOutcome> => delegatedBeforeBinding ?? next()
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const approvalId = pairApprovalId(req.agent.session.snapshotEvents(), req.callId as string | undefined, claimedApprovalIds())
     // No pairable asked event (or ambiguity): conservatively step aside.
     if (approvalId === undefined) return delegateApproval()
@@ -3446,6 +3452,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       reply(record.chatId, `重启前有一条消息未能送达（${resolved.error.code}）。`)
       return
     }
+    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
     const verdict = reconcileMessage(record, resolved.agent.session.snapshotEvents())
     switch (verdict.action) {
       case 'enqueued':
