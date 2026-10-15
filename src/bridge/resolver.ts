@@ -15,6 +15,43 @@ import type { Agent, AgentOptions, AgentSetup, AgentSetupCommit } from '@deepsee
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 
+/**
+ * The agent-preset registry as this module uses it. Structural rather than an
+ * imported type: the registry is an OPTIONAL capability (the `web-app` bundle
+ * mounts it; a headless composition need not), so a profile without it must
+ * degrade to a preset-free agent instead of failing to load this plugin.
+ */
+interface AgentPresetRegistry {
+  resolve(id?: string): Promise<{ id: string }>
+  mount(ctx: Context, id?: string): Promise<{ id: string }>
+}
+
+/**
+ * Mount the deployment's default agent preset on a newly created or resumed
+ * Agent, returning the mounted id (or undefined when the capability is absent).
+ *
+ * Tools reach an Agent only through a preset. The profile patch wires the tool
+ * plugins into the composition, but a preset is what gives one Agent its tool
+ * surface: a Session Controller agent mounts the configured default and gets
+ * `bash`, `read`, and the rest, while an Agent created without one sees only
+ * the base-scoped tools — in practice just `working_directory`. A Feishu
+ * session created without a preset can therefore change directory but cannot
+ * read a file or run a command.
+ * @param ctx - context owning the optional `agentPresets` capability.
+ * @param agentCtx - the Agent's own scope, which receives the preset.
+ * @returns the mounted preset id, or undefined when the capability is absent.
+ */
+export async function mountDefaultAgentPreset(
+  ctx: Context,
+  agentCtx: Context,
+): Promise<string | undefined> {
+  const presets = ctx.get('agentPresets') as AgentPresetRegistry | undefined
+  if (presets === undefined) return undefined
+  const resolved = await presets.resolve(undefined)
+  await presets.mount(agentCtx, resolved.id)
+  return resolved.id
+}
+
 /** The current persistence backend has no materialized project-backed session. */
 class BridgeSessionNotFound extends Error {}
 
@@ -121,9 +158,12 @@ export function createBridgeAgentResolver(
     }
   }
 
-  const fencedSetup = (sessionId: SessionId, setup?: AgentSetup): AgentSetup | undefined => {
-    if (setup === undefined && installSelection === undefined) return undefined
+  const fencedSetup = (sessionId: SessionId, setup?: AgentSetup): AgentSetup => {
     return async (agentCtx: Context, agent: Agent): Promise<AgentSetupCommit> => {
+      // Mount the agent preset FIRST: it installs the Agent's tool surface, and
+      // any caller setup below may rely on those tools existing. Absent the
+      // capability this is a no-op, leaving the composition's own surface.
+      await mountDefaultAgentPreset(ctx, agentCtx)
       installSelection?.(agentCtx, sessionId)
       const setupCommit = await setup?.(agentCtx, agent)
       return {

@@ -21,6 +21,10 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import Group from '@deepseek-ai/cordis-plugin-group'
+import AgentPresets from '@deepseek-ai/dsh-agent-preset-registry'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import Storage from '@deepseek-ai/dsh-storage'
 import * as StorageJson from '@deepseek-ai/dsh-storage-json'
 import * as StorageDomain from '@deepseek-ai/dsh-storage-domain'
@@ -523,6 +527,42 @@ describe('assembled bridge (M1 acceptance)', () => {
     await deliver({ text: '/new /etc' })
     expect(feishu.sent).toHaveLength(1)
     expect(feishu.sent[0]!.text).toContain('outside-workspaces')
+  })
+
+  it('/new gives the session the preset tool surface (regression: only working_directory)', { timeout: 20_000 }, async () => {
+    // A Feishu /new session once received `working_directory` and nothing else,
+    // because tools reach an Agent only through an AGENT PRESET and the bridge
+    // never mounted one. Assert on the tool surface the Agent actually gets.
+    const { ctx, feishu, deliver } = await mountBridge(
+      new MockAdapter([textResponse('ok')]),
+      {},
+      undefined,
+      undefined,
+      async (ctx) => {
+        await ctx.plugin(Loader)
+        ctx.loader.builtins.group = Group
+        await ctx.plugin(AgentPresets, { default: 'standard' })
+        await ctx.plugin({
+          inject: ['agentPresets'],
+          async* apply(child: Context) {
+            yield await child.agentPresets.register({
+              id: 'standard',
+              plugins: [{
+                id: 'tool-todo',
+                name: '@deepseek-ai/dsh-tool-todo',
+                config: { allowParallelInProgress: true },
+              }],
+            })
+          },
+        })
+      },
+    )
+    await deliver({ text: '/new' })
+    expect(feishu.sent[0]!.text).toContain('已创建并绑定')
+
+    const bound = [...ctx.agents.list()][0]
+    const names = ctx.tools.schemas(scopeOf(bound.ctx)).map(schema => schema.name)
+    expect(names).toContain('todo_write')
   })
 
   it('full loop: /new binds, text reaches the model, reply reaches the chat', { timeout: 20_000 }, async () => {

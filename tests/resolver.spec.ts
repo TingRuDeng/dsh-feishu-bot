@@ -19,6 +19,10 @@ import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import Group from '@deepseek-ai/cordis-plugin-group'
+import AgentPresets from '@deepseek-ai/dsh-agent-preset-registry'
+import { scopeOf } from '@deepseek-ai/dsh-scope'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 import { createBridgeAgentResolver } from '../src/bridge/resolver.ts'
 
@@ -45,6 +49,36 @@ async function mount(root: string, adapter: MockAdapter): Promise<Context> {
 }
 
 const agentOptions = { provider: 'mock', model: 'm' }
+
+/**
+ * Mount the real agent-preset registry with a `standard` preset that declares
+ * real tool plugins, mirroring how the shipped web profile composes agents.
+ * Tools reach an agent ONLY through such a preset, which is why a session
+ * created without one has almost none.
+ */
+async function mountPresetRegistry(ctx: Context): Promise<void> {
+  await ctx.plugin(Loader)
+  ctx.loader.builtins.group = Group
+  await ctx.plugin(AgentPresets, { default: 'standard' })
+  await ctx.plugin({
+    inject: ['agentPresets'],
+    async* apply(child: Context) {
+      yield await child.agentPresets.register({
+        id: 'standard',
+        plugins: [
+          // `tool-todo` needs only `tools` + `sessionProjections`, both already
+          // in this fixture; `tool-bash`/`tool-fs` additionally need `shell`/`fs`
+          // services the fixture does not mount.
+          {
+            id: 'tool-todo',
+            name: '@deepseek-ai/dsh-tool-todo',
+            config: { allowParallelInProgress: true },
+          },
+        ],
+      })
+    },
+  })
+}
 
 function balancedTurn(): SessionEvent[] {
   return [
@@ -280,4 +314,46 @@ describe('bridge agent resolver (assembled)', () => {
     expect(second.agent).not.toBe(first.agent)
     await second.dispose!()
   })
+
+  it('the preset fixture itself supplies tools (control)', async () => {
+    // Proves the fixture below is not measuring a broken preset: hand-mounting
+    // the same preset on an agent that has nothing to do with the bridge must
+    // add its declared tool. Without this, a green test would be no evidence.
+    const root = await newRoot()
+    const ctx = await mount(root, new MockAdapter([]))
+    await mountPresetRegistry(ctx)
+    const probe = await ctx.agents.create({ sessionId: SessionId('resolver-preset-control') })
+    expect(ctx.tools.schemas(scopeOf(probe.agent.ctx)).map(s => s.name))
+      .not.toContain('todo_write')
+    await ctx.agentPresets.mount(probe.agent.ctx, 'standard')
+    expect(ctx.tools.schemas(scopeOf(probe.agent.ctx)).map(s => s.name))
+      .toContain('todo_write')
+    await probe.dispose()
+  })
+
+  it('a bridge-resolved agent receives the profile preset\'s tools', async () => {
+    // Tools are mounted by an AGENT PRESET, not by the profile patch: the Web
+    // GUI composes agents through the preset registry, and a session created
+    // without one gets only the base-scoped tools. A Feishu /new session could
+    // read and change directory but not run a command or read a file, so the
+    // bridge must mount the same preset the GUI would.
+    const root = await newRoot()
+    const sessionId = SessionId('resolver-preset-tools')
+    await persistCold(root, sessionId)
+    const ctx = await mount(root, new MockAdapter([]))
+    await mountPresetRegistry(ctx)
+    const resolve = createBridgeAgentResolver(ctx, () => agentOptions)
+
+    const resolved = await resolve(sessionId)
+    if ('error' in resolved) throw new Error(`unexpected ${resolved.error.code}`)
+
+    // Read the tool surface the model would actually receive for this agent.
+    const names = new Set(
+      ctx.tools.schemas(scopeOf(resolved.agent.ctx)).map(schema => schema.name),
+    )
+    // The preset declares this; without mounting the preset it is absent.
+    expect(names.has('todo_write')).toBe(true)
+    await resolved.dispose!()
+  })
+
 })

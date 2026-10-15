@@ -39,7 +39,7 @@ import {
 } from './domain.ts'
 import { parseCommand } from './commands.ts'
 import { authorizeCwd, buildWorkspaceFilter, validateDefaultWorkspace } from './workspace.ts'
-import { createBridgeAgentResolver, type ResolveResult } from './resolver.ts'
+import { createBridgeAgentResolver, mountDefaultAgentPreset, type ResolveResult } from './resolver.ts'
 import { createModelSelectionRegistry } from './model-selection.ts'
 import { escapeLarkMarkdownLiteral } from './lark-markdown.ts'
 import { formatSessionDisplayTitle } from './display.ts'
@@ -2848,6 +2848,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
             meta: { cwd: authorized.realpath },
             agentOptions: agentOptions(),
             setup: async (agentCtx, agent) => {
+              // Mount the agent preset FIRST so this session's Agent receives
+              // the deployment's tool surface. Without it a /new session sees
+              // almost no tools and cannot read a file or run a command.
+              const presetId = await mountDefaultAgentPreset(ctx, agentCtx)
+              if (presetId === undefined) {
+                ctx.logger.info(
+                  'feishu-bridge: no agent-preset capability; /new session keeps the composition default tools',
+                )
+              }
               // M7.0: model selection (with reasoning effort) installs in the
               // agent scope before publication, alongside M6's ownership
               // compensation. Ownership is unambiguous here: /new created it.
