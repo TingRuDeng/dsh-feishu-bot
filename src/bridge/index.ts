@@ -89,6 +89,7 @@ import {
   reconciliationProjectionDefinition,
   type ReconciliationState,
 } from './reconcile-projection.ts'
+import { readSessionEventsFrom } from './session-read.ts'
 import {
   renderSessionListCard,
   renderSessionListStatusCard,
@@ -775,24 +776,37 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     return true
   }
 
+  /**
+   * Read committed events from `fromSeq` to the end, in bounded pages.
+   *
+   * Delivery catch-up needs a historical window, not the session's current
+   * state, so a projection does not fit: a head-state fold would drop the
+   * older settled tasks a lagging delivery cursor still owes. Pagination is
+   * the path DSH prescribes for on-demand history.
+   *
+   * A LIVE session still reads its own in-memory log, deliberately. Its newest
+   * events sit in the persistence backend's write buffer (`enqueueLive`), not
+   * in storage, so paging storage would miss them; and a session the runtime
+   * holds without a durable writer would lose its results entirely. Bounded
+   * paging is therefore used only for the storage branch, where the events are
+   * genuinely absent from memory.
+   */
   const sessionEventsFrom = async (
     sessionId: SessionIdString, fromSeq: number,
   ): Promise<readonly SessionEvent[]> => {
     const live = ctx.sessions.list().find(session => String(session.id) === (sessionId as string))
     if (live !== undefined) {
-      // Do not flush the complete live log on this hot path. Once an
-      // assistant result appears, catchUpProjection first persists its full
-      // canonical delivery; that row is the durable recovery boundary.
-      // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-      return live.snapshotEvents().filter(event => event.seq >= fromSeq)
+      // Bounded window over the live log: from `fromSeq` to the current head.
+      // This is a tail read of state the runtime already holds, not an
+      // arbitrary historical lookup.
+      // oxlint-disable-next-line typescript/no-deprecated -- Live in-memory tail read; see the note above.
+      return live.snapshotEvents(fromSeq as never, live.seq)
     }
-    const persistence = ctx.sessionPersistence
-    const handle = await persistence.open(sessionId as unknown as SessionId, 'read')
-    try {
-      return (await handle.read(fromSeq)).events
-    } finally {
-      await handle.close()
-    }
+    return readSessionEventsFrom(
+      async id => ctx.sessionPersistence.open(id, 'read'),
+      sessionId as unknown as SessionId,
+      fromSeq,
+    )
   }
 
   let deliveryAdmissionTail: Promise<void> = Promise.resolve()

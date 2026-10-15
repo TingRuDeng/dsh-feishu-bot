@@ -97,7 +97,7 @@ persistence.create() + flush()   → list() 返回 1 条
    | 行 | 关注点 | projection 化难度 | 现状 |
    |---|---|---|---|
    | 409 | 倒序扫描 `request/header` 取模型选择 | 中，可注册投影单元 | **已迁移** |
-   | 749 | 按 `fromSeq` 增量 catch-up | **高**，需要分页历史读取而非投影 | 待迁移（waiver） |
+   | 749 | 按 `fromSeq` 增量 catch-up | **高**，需要分页历史读取而非投影 | 冷路径**已迁移**；live 尾部保留 1 处 waiver |
    | 890 | 任务卡 `reduceFeishuTask` 折叠 | 中，可注册投影单元 | **已迁移** |
    | 972 / 1008 | 直接消息锚定与 `turn/start` 查找 | 中 | **已迁移** |
    | 1271 | `pairApprovalId` 配对 `asked` 事件 | 中 | **已迁移** |
@@ -105,7 +105,18 @@ persistence.create() + flush()   → list() 返回 1 条
 
    `feishuTask` 投影单元（`src/bridge/task-projection.ts`）承接了 890 / 972 / 1008
    三处：任务折叠本就是日志派生状态（`taskStartSeq` 由折叠自身算出，tracker 只是
-   缓存），因此归投影所有是语义上的正位，而非权宜。waiver 由 7 处降为 **1 处**。
+   缓存），因此归投影所有是语义上的正位，而非权宜。waiver 由 7 处降为 **1 处**（仅剩 749 的 live 尾部读取，理由见下）。
+
+   749 的结论与本表其他行不同，单独记录在
+   [`design-incremental-catchup-read.md`](design-incremental-catchup-read.md)：它需要的是
+   **历史窗口**而非当前状态，投影会把游标落后期间欠投的 settled 结果静默丢掉。数据
+   证据还推翻了一个更激进的做法——live 会话改走持久化读取会让**没有 writer 的会话
+   静默丢结果**（`flush` 静默 no-op，随后读取抛 `SessionPersistenceNotFoundError`），
+   该回归由 `tests/bridge.spec.ts` 的任务折叠用例捕获。因此 live 路径保留内存读取，
+   只把冷路径改为有界分页（这也修掉了原实现 `read(fromSeq)` 的**无界**读）。
+
+   新增 `tests/session-read.spec.ts`（7 例）锁定分页边界，变异测试证实载荷
+   （去掉短页早退 → 1 例失败；跳过首页 → 5 例失败）。
 
    `feishuReconciliation` 投影单元（`src/bridge/reconcile-projection.ts`）承接了
    3456：五行恢复表所需的事实全部来自日志。上游已有 `inbox` 投影持有 pending
