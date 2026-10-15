@@ -799,7 +799,14 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       // Bounded window over the live log: from `fromSeq` to the current head.
       // This is a tail read of state the runtime already holds, not an
       // arbitrary historical lookup.
-      // oxlint-disable-next-line typescript/no-deprecated -- Live in-memory tail read; see the note above.
+      //
+      // No projection or paged reader can replace it. A projection tracks the
+      // session's CURRENT state and would drop the older settled tasks a lagging
+      // delivery cursor still owes; the paged reader above reads storage, which
+      // does not yet contain a live session's newest events (they are buffered
+      // by `enqueueLive` until flush) and which a session without a durable
+      // writer does not reach at all.
+      // oxlint-disable-next-line typescript/no-deprecated -- Live in-memory tail read; no projection or paged reader can serve a live session's buffered tail.
       return live.snapshotEvents(fromSeq as never, live.seq)
     }
     return readSessionEventsFrom(

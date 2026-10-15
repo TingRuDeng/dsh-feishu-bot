@@ -115,8 +115,10 @@ persistence.create() + flush()   → list() 返回 1 条
    该回归由 `tests/bridge.spec.ts` 的任务折叠用例捕获。因此 live 路径保留内存读取，
    只把冷路径改为有界分页（这也修掉了原实现 `read(fromSeq)` 的**无界**读）。
 
-   新增 `tests/session-read.spec.ts`（7 例）锁定分页边界，变异测试证实载荷
-   （去掉短页早退 → 1 例失败；跳过首页 → 5 例失败）。
+   新增 `tests/session-read.spec.ts`（8 例）锁定分页边界与"页尾任务必须能折进投递
+   结果"，变异测试证实载荷（去掉短页早退 → 1 例失败；跳过首页 → 5 例失败；
+   单页读取 → 3 例失败）。桥接层另有一条重启长日志用例，但它**不**隔离分页
+   （填充轮次在重启前已被物化投递），已在测试名与注释中如实标注。
 
    `feishuReconciliation` 投影单元（`src/bridge/reconcile-projection.ts`）承接了
    3456：五行恢复表所需的事实全部来自日志。上游已有 `inbox` 投影持有 pending

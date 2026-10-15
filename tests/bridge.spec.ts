@@ -3850,6 +3850,49 @@ describe('assembled bridge (M1 acceptance)', () => {
       .toBe(true)
   })
 
+  it('restart catches up a long stored log and delivers its final settled task', { timeout: 30_000 }, async () => {
+    // Restart catch-up over a log several pages long. NOTE: this does not
+    // isolate the paged read — the padding turns are folded and delivered live,
+    // so the decisive result reaches the restart as a durable delivery row
+    // rather than being found by paging. It pins end-to-end restart behaviour
+    // over a long log; the page-boundary contract itself is pinned by
+    // tests/session-read.spec.ts.
+    const first = await mountBridge(new MockAdapter([textResponse('翻页之后才可见的结果')]))
+    const handle = await first.ctx.agents.create({
+      sessionId: 'long-paged-offline' as never,
+      meta: { cwd: first.root },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    await first.deliver({ text: '/use long-paged-offline' })
+    const agent = handle.agent
+    // Only the bridge goes away; the agent keeps committing to a real log.
+    await first.bridgeFiber.dispose()
+
+    // Padding committed through real turns, so the log is several pages deep.
+    for (let round = 0; round < 130; round++) {
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: '填充' }],
+        source: { kind: 'user', via: 'feishu' } as never,
+      }))
+      await agent.whenIdle()
+    }
+    // The decisive task, now far beyond the first page.
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: '翻页之后才可见的结果' }],
+      source: { kind: 'user', via: 'feishu' } as never,
+    }))
+    await agent.whenIdle()
+    await first.ctx.sessions.flush(agent.session)
+    await first.ctx.fiber.dispose()
+
+    const second = await mountBridge(new MockAdapter([]), {}, first.root)
+    await vi.waitFor(() => {
+      if (!second.feishu.cards.some(card => JSON.stringify(card.card).includes('翻页之后才可见的结果'))) {
+        throw new Error('a result beyond the first read window has not been delivered yet')
+      }
+    }, { timeout: 20_000, interval: 20 })
+  })
+
   it('/use immediately projects an already-running Web task into Feishu', { timeout: 20_000 }, async () => {
     const mounted = await mountBridge(new MockAdapter(['hang']))
     const handle = await mounted.ctx.agents.create({

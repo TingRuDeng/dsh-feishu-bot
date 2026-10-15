@@ -24,8 +24,10 @@ import AgentRegistry from '@deepseek-ai/dsh-agent'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { MockAdapter } from './mock-adapter.ts'
+import { MockAdapter, textResponse } from './mock-adapter.ts'
 import { SESSION_READ_PAGE, readSessionEventsFrom } from '../src/bridge/session-read.ts'
+import { foldFeishuTaskResults } from '../src/bridge/task-card.ts'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const dirs: string[] = []
 const roots: Context[] = []
@@ -42,7 +44,7 @@ async function mount(): Promise<{ ctx: Context; root: string }> {
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions') })
-  ctx.llm.registerAdapter(['mock'], new MockAdapter([]))
+  ctx.llm.registerAdapter(['mock'], new MockAdapter([textResponse('填充回复'), textResponse('页尾的最终结果')]))
   return { ctx, root }
 }
 
@@ -94,6 +96,47 @@ describe('bounded paged session reader', () => {
         id => ctx.sessionPersistence.open(id, 'read'), sessionId, fromSeq)
       expect(read.map(event => event.seq), `fromSeq=${fromSeq}`).toEqual(expected.map(event => event.seq))
     }
+    await dispose()
+  })
+
+  it('a task starting beyond the first page still reaches the delivery fold', async () => {
+    // The reason paging the stored log matters: delivery catch-up folds the
+    // window it reads. If a read stopped after the first page, a task whose
+    // start lies past that page would never be folded and never be delivered.
+    // This drives the real fold over a paged read of a real long log.
+    const { ctx } = await mount()
+    const sessionId = SessionId('paged-fold')
+    const handle = await ctx.agents.create({
+      sessionId, agentOptions: { provider: 'mock', model: 'm' },
+    })
+    const session = handle.agent.session
+    // Commit real turns through the loop so the log is a valid event sequence.
+    for (let round = 0; round < 130; round++) {
+      handle.agent.followup(createUserMessage({
+        content: [{ type: 'text', text: '填充' }],
+        source: { kind: 'user', via: 'feishu' } as never,
+      }))
+      await handle.agent.whenIdle()
+    }
+    handle.agent.followup(createUserMessage({
+      content: [{ type: 'text', text: '页尾的最终结果' }],
+      source: { kind: 'user', via: 'feishu' } as never,
+    }))
+    await handle.agent.whenIdle()
+    await ctx.sessions.flush(session)
+
+    const all = session.snapshotEvents()
+    expect(all.length).toBeGreaterThan(SESSION_READ_PAGE)
+
+    const read = await readSessionEventsFrom(
+      id => ctx.sessionPersistence.open(id, 'read'), sessionId, 0)
+    // The paged read must carry every event the fold needs, including the
+    // decisive task that begins past the first page.
+    expect(read.map(event => event.seq)).toEqual(all.map(event => event.seq))
+    const inMemory = foldFeishuTaskResults(all as never, 0)
+    const paged = foldFeishuTaskResults(read as never, 0)
+    expect(paged.results).toEqual(inMemory.results)
+    expect(JSON.stringify(paged.results)).toContain('页尾的最终结果')
     await dispose()
   })
 
