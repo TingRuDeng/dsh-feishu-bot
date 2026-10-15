@@ -1770,6 +1770,56 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(result?.toast).toContain('已撤回')
   })
 
+  it('a turn cancelled with an approval pending withdraws it, and the click says 已撤回', { timeout: 20_000 }, async () => {
+    // The reported dead end. A tool call passes its execution signal to
+    // approval.request(); cancelling the turn (the Web GUI's stop button, an
+    // interruption) aborts that signal, so the bridge withdraws the card. A
+    // later click used to answer "该审批已失效或已在别处决定", which sent the
+    // operator hunting for a decision in the Web GUI that never happened.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    agent.session.append('approval/asked', { id: 'cancel-withdrawn-1' as never, toolName: 'Bash' })
+
+    // The signal a real tool call would hand the approval request.
+    const toolSignal = new AbortController()
+    const outcome = ctx.approval.request({
+      agent, toolName: 'Bash', signal: toolSignal.signal,
+    })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('审批请求'))) {
+        throw new Error('approval card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('审批请求'))!
+    const pendingValue = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]
+    expect(pendingValue).toBeDefined()
+
+    // Stop the turn while the approval waits: this is what session.cancel()
+    // does to the Agent's phase signal, which the tool call inherits.
+    agent.cancel({ kind: 'user' }, { keepInbox: true })
+    toolSignal.abort(new Error('stopped'))
+
+    await expect(outcome).resolves.toBe('cancelled')
+    // The withdraw is published as the group's final, collapsed card. This
+    // stub records every card version it is handed, so the earlier
+    // "审批请求" snapshot stays in the list; the LAST card is the live one.
+    await vi.waitFor(() => {
+      const last = JSON.stringify(feishu.cards.filter(
+        c => JSON.stringify(c.card).includes('审批'),
+      ).at(-1)?.card)
+      if (!last.includes('已撤回')) throw new Error(`approval group not withdrawn yet: ${last.slice(0, 200)}`)
+    }, { timeout: 5_000, interval: 20 })
+
+    // The click must name the real fate, never a phantom human decision.
+    const result = await feishu.clickCard(OWNER, sent.messageId, {
+      pendingId: pendingValue, action: 'allow',
+    })
+    expect(result?.toast).toContain('已撤回')
+    expect(result?.toast).not.toContain('已在别处决定')
+  })
+
   it('does not publish an approval whose signal already aborted before bridge initialization', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })
