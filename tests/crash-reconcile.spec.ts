@@ -5,7 +5,7 @@
  *
  * Each scenario drives a real agent to a chosen point, disposes the whole
  * fiber tree (the crash), remounts from disk, and asserts the verdict
- * {@link reconcileMessage} returns over the REAL persisted log — proving the
+ * {@link reconcileMessageFromLog} returns over the REAL persisted log — proving the
  * five-row table's inputs actually appear on disk the way the design assumes:
  *   A. followup durable-logged but crash before claim   → enqueued via inbox
  *   B. followup claimed into user/message before crash  → enqueued via user-message
@@ -29,7 +29,11 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
-import { reconcileMessage } from '../src/bridge/inbound.ts'
+import { reconcileMessage, reconcileMessageFromLog } from '../src/bridge/inbound.ts'
+import {
+  reconciliationProjectionDefinition,
+  type ReconciliationState,
+} from '../src/bridge/reconcile-projection.ts'
 
 const dirs: string[] = []
 afterEach(async () => { for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true }) })
@@ -39,6 +43,7 @@ async function mount(root: string, adapter: MockAdapter): Promise<Context> {
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SessionProjectionRegistry)
+  ctx.sessionProjections.register(reconciliationProjectionDefinition)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AgentRegistry)
@@ -71,14 +76,37 @@ async function newRoot(): Promise<string> {
   return root
 }
 
-/** Remount from disk and read the persisted log for the session. */
+/**
+ * Remount from disk, read the persisted log, and fold it through the REAL
+ * projection registry. Returning both lets each scenario assert that the
+ * projection's incremental verdict matches the batch reference over the same
+ * on-disk history — the closest automated stand-in for a live recovery.
+ */
 async function persistedEvents(root: string, sessionId: SessionId) {
   const ctx = await mount(root, new MockAdapter([]))
   const handle = await ctx.sessionPersistence.open(sessionId, 'read')
   const events = [...(await handle.read()).events]
   await handle.close()
+  // Resume the session so the registry has a Session to fold: the projection
+  // then materializes over the restored log. `resume` (not `create`) because
+  // the session already exists on disk.
+  const resumed = await ctx.agents.resume({ resumeSessionId: sessionId, agentOptions })
+  const state = ctx.sessionProjections.stateOf(
+    resumed.agent.session, 'feishuReconciliation',
+  ) as ReconciliationState | undefined
   await ctx.fiber.dispose()
-  return events
+  return { events, state }
+}
+
+/** Assert the projected verdict equals the batch reference for one message id. */
+function expectAgrees(
+  loaded: { events: SessionEvent[]; state: ReconciliationState | undefined },
+  messageId: unknown,
+): ReturnType<typeof reconcileMessageFromLog> {
+  const batch = reconcileMessageFromLog({ messageId: messageId as never }, loaded.events)
+  const projected = reconcileMessage({ messageId: messageId as never }, loaded.state)
+  expect(projected).toEqual(batch)
+  return batch
 }
 
 describe('assembled crash-window reconciliation (M1 gate)', () => {
@@ -95,8 +123,8 @@ describe('assembled crash-window reconciliation (M1 gate)', () => {
     await ctx.sessions.flush(handle.agent.session)
     await ctx.fiber.dispose() // crash
 
-    const events = await persistedEvents(root, sessionId)
-    const verdict = reconcileMessage({ messageId: message.id as never }, events)
+    const loaded = await persistedEvents(root, sessionId)
+    const verdict = expectAgrees(loaded, message.id)
     // Depending on how far the loop ran before dispose, the message is either
     // still in the folded inbox or already claimed — both are 'enqueued'.
     expect(verdict.action).toBe('enqueued')
@@ -113,8 +141,8 @@ describe('assembled crash-window reconciliation (M1 gate)', () => {
     await ctx.sessions.flush(handle.agent.session)
     await ctx.fiber.dispose() // crash after full consumption
 
-    const events = await persistedEvents(root, sessionId)
-    expect(reconcileMessage({ messageId: message.id as never }, events))
+    const loaded = await persistedEvents(root, sessionId)
+    expect(expectAgrees(loaded, message.id))
       .toEqual({ action: 'enqueued', via: 'user-message' })
   })
 
@@ -137,10 +165,10 @@ describe('assembled crash-window reconciliation (M1 gate)', () => {
     await ctx.sessions.flush(handle.agent.session)
     await ctx.fiber.dispose()
 
-    const events = await persistedEvents(root, sessionId)
-    const consumed = events.some(e => e.type === 'user/message'
+    const loaded = await persistedEvents(root, sessionId)
+    const consumed = loaded.events.some(e => e.type === 'user/message'
       && (e.data as { id: string }).id === message.id)
-    const verdict = reconcileMessage({ messageId: message.id as never }, events)
+    const verdict = expectAgrees(loaded, message.id)
     if (consumed) {
       expect(verdict).toEqual({ action: 'enqueued', via: 'user-message' })
     } else {
@@ -165,8 +193,8 @@ describe('assembled crash-window reconciliation (M1 gate)', () => {
     const message = feishuMessage('never sent') // minted, never followed up
     await ctx.fiber.dispose()
 
-    const events = await persistedEvents(root, sessionId)
-    expect(reconcileMessage({ messageId: message.id as never }, events))
+    const loaded = await persistedEvents(root, sessionId)
+    expect(expectAgrees(loaded, message.id))
       .toEqual({ action: 'refollowup' })
   })
 
@@ -187,12 +215,17 @@ describe('assembled crash-window reconciliation (M1 gate)', () => {
     await resumed.agent.whenIdle()
     await ctx.sessions.flush(resumed.agent.session)
     const events = [...resumed.agent.session.snapshotEvents()]
+    // Read the projection from the LIVE session before disposal, so agreement
+    // is checked against the same log the batch reference sees.
+    const state = ctx.sessionProjections.stateOf(
+      resumed.agent.session, 'feishuReconciliation',
+    ) as ReconciliationState | undefined
     await ctx.fiber.dispose()
 
     const consumed = events.filter(e => e.type === 'user/message'
       && (e.data as { id: string }).id === retry.id)
     expect(consumed).toHaveLength(1)
-    expect(reconcileMessage({ messageId: retry.id as never }, events))
+    expect(expectAgrees({ events, state }, retry.id))
       .toEqual({ action: 'enqueued', via: 'user-message' })
   })
 })

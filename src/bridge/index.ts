@@ -86,6 +86,10 @@ import {
   type ModelSelectionState,
 } from './model-selection-projection.ts'
 import {
+  reconciliationProjectionDefinition,
+  type ReconciliationState,
+} from './reconcile-projection.ts'
+import {
   renderSessionListCard,
   renderSessionListStatusCard,
   renderSessionWorkspaceCard,
@@ -332,6 +336,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       'feishuBridge.approvalPairing')
     ctx.effect(() => sessionProjections.register(modelSelectionProjectionDefinition),
       'feishuBridge.modelSelection')
+    ctx.effect(() => sessionProjections.register(reconciliationProjectionDefinition),
+      'feishuBridge.reconciliation')
   } catch (error: unknown) {
     // The Fiber can become inactive in the microtask between the second open
     // and lifecycle registration. Until registration succeeds, rollback is
@@ -427,9 +433,18 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       selection.provider, selection.model, selection.reasoningEffort,
     )}）`
 
+  /**
+   * Read one projection's state for `session`.
+   *
+   * The registry is narrowed non-undefined above; wrapping the read keeps that
+   * narrowing available inside nested async closures too.
+   */
+  const projectionState = <T>(session: Session, key: string): T | undefined =>
+    sessionProjections.stateOf(session, key) as T | undefined
+
   /** Current task fold for `session`, maintained by the projection registry. */
   const currentTaskFold = (session: Session): FeishuTaskFold | undefined =>
-    feishuTaskFoldOf(sessionProjections.stateOf(session, 'feishuTask') as FeishuTaskState | undefined)
+    feishuTaskFoldOf(projectionState<FeishuTaskState>(session, 'feishuTask'))
 
   /**
    * The Web-owned session's current model selection, from the projection.
@@ -441,7 +456,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const sessionModelSelection = (sessionId: string): ModelSelection | undefined => {
     const session = ctx.sessions.list().find(candidate => String(candidate.id) === sessionId)
     if (session === undefined) return modelSelections.get(sessionId as unknown as SessionId)?.current
-    const state = sessionProjections.stateOf(session, 'feishuModelSelection') as ModelSelectionState | undefined
+    const state = projectionState<ModelSelectionState>(session, 'feishuModelSelection')
     if (state?.seen === true) return modelSelectionView(state)
     return modelSelections.get(sessionId as unknown as SessionId)?.current
   }
@@ -1285,7 +1300,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     // Log-derived pairing comes from the projection; `claimed` stays live
     // in-memory registry state, which the projection cannot own.
     const approvalId = approvalPairingView(
-      sessionProjections.stateOf(req.agent.session, 'feishuApprovalPairing') as ApprovalPairingState | undefined,
+      projectionState<ApprovalPairingState>(req.agent.session, 'feishuApprovalPairing'),
       req.callId as string | undefined,
       claimedApprovalIds(),
     )
@@ -3472,8 +3487,12 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       reply(record.chatId, `重启前有一条消息未能送达（${resolved.error.code}）。`)
       return
     }
-    // oxlint-disable-next-line typescript/no-deprecated -- Existing Session history read; migration deferred.
-    const verdict = reconcileMessage(record, resolved.agent.session.snapshotEvents())
+    // Log-derived recovery facts come from the projection; row 1 (no
+    // messageId) short-circuits inside reconcileMessage before any state read.
+    const verdict = reconcileMessage(
+      record,
+      projectionState<ReconciliationState>(resolved.agent.session, 'feishuReconciliation'),
+    )
     switch (verdict.action) {
       case 'enqueued':
         await inboundEvents.put(eventId, { ...record, status: 'enqueued', text: undefined, target: targetId })

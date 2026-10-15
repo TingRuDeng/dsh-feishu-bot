@@ -16,19 +16,10 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 // Declaration-merge import: dsh-agent contributes 'agent/inbox/spliced' to SessionEventMap.
 import type {} from '@deepseek-ai/dsh-agent'
 import type { DshMessageId, InboundMessage } from './domain.ts'
+import { reconciliationView, type ReconciliationState, type ReconcileVerdict } from './reconcile-projection.ts'
 
-/** Reconciliation verdict for one recovering inbound message record. */
-export type ReconcileVerdict =
-  /** No messageId — followup provably never ran; rebuild and route anew. */
-  | { action: 'reroute' }
-  /** The message reached `user/message` — it was consumed; mark enqueued. */
-  | { action: 'enqueued'; via: 'user-message' }
-  /** The message sits in the folded inbox — accepted; mark enqueued. */
-  | { action: 'enqueued'; via: 'inbox' }
-  /** A canceled splice discarded it — mark rejected with the discard reason. */
-  | { action: 'rejected'; via: 'canceled-splice' }
-  /** No trace in the log — followup never spliced; re-followup with a NEW id. */
-  | { action: 'refollowup' }
+// Re-exported so callers keep importing the verdict from the lifecycle module.
+export type { ReconcileVerdict }
 
 /** Inbox splice payload subset the fold needs (mirrors agent/inbox/spliced). */
 interface SplicedData {
@@ -65,12 +56,34 @@ export function foldInbox(events: readonly SessionEvent[]): {
 
 /**
  * Decide the recovery action for one interrupted inbound message record
- * against the target session's event log (design §6.1 five-row table).
+ * (design §6.1 five-row table), reading the log-derived facts from the
+ * `feishuReconciliation` projection.
+ *
+ * Row 1 (no messageId) precedes the log, so it short-circuits here; the other
+ * rows come from folded state. Keeping the production entry point in this
+ * module keeps the table stated in one place.
+ * @param record - the recovering inbound message record.
+ * @param state - the target session's folded recovery state.
+ * @returns the verdict; caller performs the corresponding durable write.
+ */
+export function reconcileMessage(
+  record: Pick<InboundMessage, 'messageId'>,
+  state: ReconciliationState | undefined,
+): ReconcileVerdict {
+  const messageId = record.messageId as DshMessageId | undefined
+  if (messageId === undefined) return { action: 'reroute' }
+  return reconciliationView(state, messageId)
+}
+
+/**
+ * Batch reference for the recovery table: the same verdicts computed from a
+ * whole session log. Kept as the oracle for the projection's equivalence and
+ * differential tests; the live path uses {@link reconcileMessage}.
  * @param record - the recovering inbound message record.
  * @param events - the bound session's event log (empty when unavailable).
  * @returns the verdict; caller performs the corresponding durable write.
  */
-export function reconcileMessage(
+export function reconcileMessageFromLog(
   record: Pick<InboundMessage, 'messageId'>,
   events: readonly SessionEvent[],
 ): ReconcileVerdict {

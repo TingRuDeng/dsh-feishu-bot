@@ -7,7 +7,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { foldInbox, reconcileMessage } from '../src/bridge/inbound.ts'
+import { foldInbox, reconcileMessageFromLog } from '../src/bridge/inbound.ts'
 
 let seq = 0
 function spliced(data: {
@@ -41,9 +41,9 @@ describe('foldInbox', () => {
   })
 })
 
-describe('reconcileMessage: the five-row table', () => {
+describe('reconcileMessageFromLog: the five-row table', () => {
   it('row 1: no messageId — followup provably never ran — reroute', () => {
-    expect(reconcileMessage({}, [])).toEqual({ action: 'reroute' })
+    expect(reconcileMessageFromLog({}, [])).toEqual({ action: 'reroute' })
   })
 
   it('row 2: user/message hit — consumed — enqueued', () => {
@@ -52,7 +52,7 @@ describe('reconcileMessage: the five-row table', () => {
       spliced({ target: 'next-turn', start: 0, removedCount: 1, inserted: [] }),
       userMessage('m1'),
     ]
-    expect(reconcileMessage({ messageId: 'm1' as never }, events))
+    expect(reconcileMessageFromLog({ messageId: 'm1' as never }, events))
       .toEqual({ action: 'enqueued', via: 'user-message' })
   })
 
@@ -60,7 +60,7 @@ describe('reconcileMessage: the five-row table', () => {
     const events = [
       spliced({ target: 'next-turn', start: 0, removedCount: 0, inserted: [{ id: 'm2' }] }),
     ]
-    expect(reconcileMessage({ messageId: 'm2' as never }, events))
+    expect(reconcileMessageFromLog({ messageId: 'm2' as never }, events))
       .toEqual({ action: 'enqueued', via: 'inbox' })
   })
 
@@ -69,12 +69,12 @@ describe('reconcileMessage: the five-row table', () => {
       spliced({ target: 'next-turn', start: 0, removedCount: 0, inserted: [{ id: 'm3' }] }),
       spliced({ target: 'next-turn', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' }),
     ]
-    expect(reconcileMessage({ messageId: 'm3' as never }, events))
+    expect(reconcileMessageFromLog({ messageId: 'm3' as never }, events))
       .toEqual({ action: 'rejected', via: 'canceled-splice' })
   })
 
   it('row 5: no trace — followup never spliced — refollowup', () => {
-    expect(reconcileMessage({ messageId: 'm4' as never }, [userMessage('other')]))
+    expect(reconcileMessageFromLog({ messageId: 'm4' as never }, [userMessage('other')]))
       .toEqual({ action: 'refollowup' })
   })
 
@@ -83,7 +83,7 @@ describe('reconcileMessage: the five-row table', () => {
       spliced({ target: 'next-turn', start: 0, removedCount: 0, inserted: [{ id: 'm5' }] }),
       userMessage('m5'),
     ]
-    expect(reconcileMessage({ messageId: 'm5' as never }, events))
+    expect(reconcileMessageFromLog({ messageId: 'm5' as never }, events))
       .toEqual({ action: 'enqueued', via: 'user-message' })
   })
 })
