@@ -1628,6 +1628,42 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(JSON.stringify(frozen.card)).toContain('已允许')
   })
 
+  it('marks the Feishu card decided-elsewhere when another answerer decides first', { timeout: 20_000 }, async () => {
+    // The Web GUI registers its own answerer on the SAME `approval/request`
+    // waterfall, so a session bound to Feishu shows a dialog in BOTH
+    // frontends. The bridge delegates via next() and races the two; when the
+    // Web answers first the Feishu card must freeze as decided-elsewhere
+    // rather than stay clickable. This ordering had no test at all.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    agent.session.append('approval/asked', {
+      id: 'bridge-elsewhere-1' as never,
+      toolName: 'Bash',
+    })
+    // Stands in for the Web GUI: sits after the bridge (registered first with
+    // prepend) and answers as soon as the bridge delegates to it.
+    ctx.on('approval/request', () => Promise.resolve('allowed-once' as const))
+
+    const outcome = await ctx.approval.request({ agent, toolName: 'Bash' })
+    expect(outcome).toBe('allowed-once')
+
+    await vi.waitFor(() => {
+      expect(JSON.stringify(feishu.cards.at(-1)?.card)).toContain('已在别处决定')
+    }, { timeout: 5_000, interval: 20 })
+    // Bounded wait instead of an immediate read: the row delete is backgrounded.
+    let size = -1
+    try {
+      await vi.waitFor(() => {
+        size = ctx.storageDomain.get('feishu_bot')!.table('pending_cards').size
+        if (size !== 0) throw new Error(`pending_cards still ${size}`)
+      }, { timeout: 5_000, interval: 50 })
+    } catch {
+      throw new Error(`LEAK CONFIRMED: pending_cards=${size} after 5s`)
+    }
+  })
+
   it('settles the bridge approval waterfall as cancelled when a visible ask aborts', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })
@@ -1659,6 +1695,79 @@ describe('assembled bridge (M1 acceptance)', () => {
       expect(ctx.storageDomain.get('feishu_bot')!.table('pending_cards').size).toBe(0)
       expect(JSON.stringify(feishu.cards.at(-1)?.card)).toContain('已撤回')
     }, { timeout: 2_000, interval: 20 })
+  })
+
+  it('clicking a card whose request aborted answers stale, not decided-elsewhere-by-a-human', { timeout: 20_000 }, async () => {
+    // The reported symptom: a Feishu approval said "已在别处决定" although the
+    // user decided NOWHERE, leaving the channel stuck until someone clicked in
+    // the Web GUI. A withdrawn item (aborted tool signal) is settled, so a
+    // later click on its card must be reported as stale rather than as another
+    // human having decided elsewhere.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    agent.session.append('approval/asked', { id: 'stale-click-1' as never, toolName: 'Bash' })
+    const controller = new AbortController()
+    const outcome = ctx.waterfall(
+      'approval/request',
+      { agent, toolName: 'Bash', signal: controller.signal },
+      () => Promise.resolve('unavailable' as const),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('审批请求'))) {
+        throw new Error('approval card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // The tool call goes away (turn end / interruption) with no human decision.
+    controller.abort()
+    await expect(outcome).resolves.toBe('cancelled')
+
+    // The card must show withdrawn, NOT decided-elsewhere: nobody decided.
+    await vi.waitFor(() => {
+      const last = JSON.stringify(feishu.cards.at(-1)?.card)
+      expect(last).toContain('已撤回')
+    }, { timeout: 5_000, interval: 20 })
+    expect(JSON.stringify(feishu.cards.at(-1)?.card)).not.toContain('已在别处决定')
+  })
+
+  it('a click on a withdrawn item reports the real fate instead of a phantom elsewhere', { timeout: 20_000 }, async () => {
+    // Reproduces the reported dead end end-to-end: the user clicks 允许 in
+    // Feishu after the item already settled for a NON-human reason, and the
+    // only feedback is a toast. Whichever branch answers, the toast must not
+    // claim a human decided elsewhere, and the click must not be silently
+    // dropped: the outcome that unblocked the agent has to be observable.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    agent.session.append('approval/asked', { id: 'stale-click-2' as never, toolName: 'Bash' })
+    const controller = new AbortController()
+    const outcome = ctx.waterfall(
+      'approval/request',
+      { agent, toolName: 'Bash', signal: controller.signal },
+      () => Promise.resolve('unavailable' as const),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('审批请求'))) {
+        throw new Error('approval card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('审批请求'))!
+    const pendingValue = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]
+    expect(pendingValue).toBeDefined()
+
+    // Settle it out from under the click, with no human anywhere.
+    controller.abort()
+    await expect(outcome).resolves.toBe('cancelled')
+
+    const result = await feishu.clickCard(OWNER, sent.messageId, {
+      pendingId: pendingValue, action: 'allow',
+    })
+    // Reports the item's real fate (withdrawn), not a phantom human decision.
+    expect(result?.toast).toContain('已撤回')
   })
 
   it('does not publish an approval whose signal already aborted before bridge initialization', { timeout: 20_000 }, async () => {

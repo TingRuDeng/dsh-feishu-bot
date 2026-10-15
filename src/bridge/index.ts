@@ -74,7 +74,7 @@ import {
   planDurableRetention, planRetention, pruneProjectionCursors,
   sortPendingOutbox, watermarkKey,
 } from './reliability.ts'
-import { renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
+import { ITEM_STATE_COPY, renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
 import {
   approvalPairingProjectionDefinition,
   approvalPairingView,
@@ -1257,6 +1257,29 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     })
   }
 
+  /**
+   * Explain a click on an item that is no longer pending, using that item's
+   * ACTUAL settled state.
+   *
+   * The previous wording ("该审批已失效或已在别处决定") asserted a human decision
+   * in another frontend for every settled item. When the owner's own tool call
+   * ends first — a turn boundary, an interruption, a restart — nothing was
+   * decided anywhere, and the message sent the operator hunting for a decision
+   * in the Web GUI that did not exist. Only `elsewhere` may claim another
+   * frontend; the remaining states report themselves.
+   * @param pendingId - item the click named.
+   * @returns toast copy naming the item's real state.
+   */
+  const settledItemToast = (pendingId: string): string => {
+    const item = groupOf.get(pendingId)?.items.get(pendingId)
+      ?? [...settledApprovalGroups.values()]
+        .map(settled => settled.group.items.get(pendingId))
+        .find(candidate => candidate !== undefined)
+    const state = item?.state
+    if (state === undefined || state === 'pending') return '该审批已失效'
+    return `该审批${ITEM_STATE_COPY[state]}`
+  }
+
   /** One idempotent terminal path owns Promise, registry, durable row, and card state. */
   const finishApproval = (
     pendingId: string,
@@ -1570,7 +1593,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (entry === undefined || entry.settled) {
       ctx.logger.info('feishu-audit action=approval-click-rejected operator=%s message=%s pending=%s reason=not-pending',
         auditHash(action.operatorOpenId), auditHash(action.messageId), auditHash(pendingId))
-      return { toast: '该审批已失效或已在别处决定' }
+      return { toast: settledItemToast(pendingId) }
     }
     const sourceCardMessageId = groupOf.get(pendingId)?.messageId
     if (action.chatId !== entry.chatId || sourceCardMessageId === undefined
@@ -1600,7 +1623,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (!finishApproval(
       pendingId, outcome, verb === 'allow' ? 'allowed' : 'rejected', 'decided',
     )) {
-      return { toast: '该审批已失效或已在别处决定' }
+      return { toast: settledItemToast(pendingId) }
     }
     ctx.logger.info('feishu-audit action=approval-click-decided operator=%s message=%s pending=%s approval=%s outcome=%s',
       auditHash(action.operatorOpenId), auditHash(action.messageId), auditHash(pendingId),

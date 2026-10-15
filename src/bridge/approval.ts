@@ -76,7 +76,13 @@ export interface ApprovalGroupItem {
   state: ApprovalItemState
 }
 
-const ITEM_STATE_COPY: Record<Exclude<ApprovalItemState, 'pending'>, string> = {
+/**
+ * Human copy for one settled item state. Exported so a click on an already
+ * settled card explains the SAME thing the card itself shows, instead of
+ * guessing at a cause (a card withdrawn because its tool call went away is
+ * not a human decision made "elsewhere").
+ */
+export const ITEM_STATE_COPY: Record<Exclude<ApprovalItemState, 'pending'>, string> = {
   allowed: '✅ 已允许（本次）',
   rejected: '❌ 已拒绝',
   elsewhere: '已在别处决定',
