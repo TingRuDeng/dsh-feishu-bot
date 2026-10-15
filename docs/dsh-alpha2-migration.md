@@ -101,11 +101,17 @@ persistence.create() + flush()   → list() 返回 1 条
    | 890 | 任务卡 `reduceFeishuTask` 折叠 | 中，可注册投影单元 | **已迁移** |
    | 972 / 1008 | 直接消息锚定与 `turn/start` 查找 | 中 | **已迁移** |
    | 1271 | `pairApprovalId` 配对 `asked` 事件 | 中 | **已迁移** |
-   | 3456 | 崩溃对账 `reconcileMessage` | 中 | 待迁移（waiver） |
+   | 3456 | 崩溃对账 `reconcileMessage` | 中 | **已迁移** |
 
    `feishuTask` 投影单元（`src/bridge/task-projection.ts`）承接了 890 / 972 / 1008
    三处：任务折叠本就是日志派生状态（`taskStartSeq` 由折叠自身算出，tracker 只是
-   缓存），因此归投影所有是语义上的正位，而非权宜。waiver 由 7 处降为 **2 处**。
+   缓存），因此归投影所有是语义上的正位，而非权宜。waiver 由 7 处降为 **1 处**。
+
+   `feishuReconciliation` 投影单元（`src/bridge/reconcile-projection.ts`）承接了
+   3456：五行恢复表所需的事实全部来自日志。上游已有 `inbox` 投影持有 pending
+   列表，但它**不记录被 canceled splice 丢弃过的 id**——而那正是第 4 行。所以这里
+   把三个事实折在同一个单元里，而不是让一个判定跨两个 key，precedence 也因此
+   显式可读：consumed > pending > discarded。
 
    `feishuModelSelection` 投影单元（`src/bridge/model-selection-projection.ts`）
    承接了 409：会话当前选择是日志派生的——最新一条 `request/header` 记录了上次请求
@@ -138,12 +144,19 @@ persistence.create() + flush()   → list() 返回 1 条
 
 2. **`user-approval` 的 `undefined.session`** 已证实为下游症状而非独立缺陷：测试用 `ctx.agents.get(...)` 拿不到 agent（因为 `/new` 死锁使其从未发布），修复后自然消失，无需单独处理。
 
-3. **waiver 未能在本机得到正向验证。** 已确认 DSH 的 `no-deprecated` 规则仅在自身 `.oxlintrc.json` 中启用，且测试白名单按**精确源文件路径**（`packages/core/session/src/index.ts`）放行这三个方法。本机用 `oxlint` 直接跑该规则时，即使对本地 `@deprecated` 符号也不报错（type-aware 规则未生效），因此**无法证明 waiver 被消费**。注释按 DSH 原文格式书写，但真实门禁效果待在有 type-aware lint 的环境确认。同理，**已迁移的 5 处无 waiver 是否被门禁认可，也只能在该环境确认**——本地能证明的仅是调用点已消失。
+3. **waiver 未能在本机得到正向验证。** 已确认 DSH 的 `no-deprecated` 规则仅在自身 `.oxlintrc.json` 中启用，且测试白名单按**精确源文件路径**（`packages/core/session/src/index.ts`）放行这三个方法。本机用 `oxlint` 直接跑该规则时，即使对本地 `@deprecated` 符号也不报错（type-aware 规则未生效），因此**无法证明 waiver 被消费**。注释按 DSH 原文格式书写，但真实门禁效果待在有 type-aware lint 的环境确认。同理，**已迁移的 6 处无 waiver 是否被门禁认可，也只能在该环境确认**——本地能证明的仅是调用点已消失。
 
 4. 真实飞书故障矩阵仍待人工验收，自动化通过不能替代。投影化后卡片刷新由
    registry 驱动，`tests` 覆盖折叠等价与装配，但**真实飞书的卡片刷新时序只能由你验收**。
 
-5. **差分模糊测试抓到了手写用例漏掉的语义偏差。** 审批配对的参考实现是
+5. **崩溃对账的验证强度高于其他几处：它对照的是磁盘上的真实日志。**
+   `tests/crash-reconcile.spec.ts` 一直是"真跑一遍 → 崩掉 → 从磁盘重挂 → 断言"，
+   本轮把断言升级为**同时**跑批量参考实现与投影单元，要求两者对同一份真实持久化
+   日志给出相同判定。变异测试确认这不是空转：故意丢弃 `user/message` 消费记录后，
+   A / B / E 三个真实日志用例连同单元用例一起失败。这是自动化能做到的、最接近
+   真实崩溃恢复的证据。
+
+6. **差分模糊测试抓到了手写用例漏掉的语义偏差。** 审批配对的参考实现是
    **位置性**语义：它从日志尾部反扫，每个 `asked` 只与扫描中已见的（即日志中更靠
    后的）`decided` 比较。因此一条 decision 只压制它**之前**的同 id ask，对**之后**
    的 ask 无效。手写的 14 个等价用例全部通过，但 2000 组随机日志的差分测试立刻
