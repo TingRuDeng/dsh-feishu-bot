@@ -3,6 +3,8 @@
 > **结论先行**：属实，且是**插件缺陷**，不是权限问题。
 > 根因：**工具只通过 agent preset 挂载**，而 bridge 从未挂载 preset。
 > 两个创建路径（`/new` 与冷 resume）都已修复并补测试；501 测试通过。
+> **真机已验证**：重启后飞书 `/new` 会话的工具由 1 个变为 **31 个**，
+> 且 `bash` 实际执行成功（见第七节）。
 
 ## 一、现象
 
@@ -98,11 +100,34 @@ session-controller 的方式挂载同一个 preset。
 `tests/bridge.spec.ts` 的夹具**没有挂 preset registry**，与真实 profile 的装配不同。
 所以「会话是否有工具」这件事在测试里根本没有被测到 —— 这正是补第 3 条端到端测试的原因。
 
-## 七、遗留边界（诚实说明）
+## 七、真机验证（重启后，2026-10-15 18:11）
 
-- **仅验证到「工具面被挂载」**。工具**实际可用**还取决于各自的服务依赖
-  （`tool-bash` 需要 `shell`、`tool-fs` 需要 `fs`）；真实 profile 里这些都在，
-  但需要用户重启后在飞书实测确认。
+用户重启 DSH 后，在飞书执行 `/new` 并发送「列一下当前目录的文件」。
+
+**工具面**（`request/header` 里真正发给模型的清单）：
+
+| | 工具数 | 内容 |
+|---|---|---|
+| 修复前（17:14 / 17:28） | **1** | 只有 `working_directory` |
+| 修复后（18:11） | **31** | `bash`、`read`、`write`、`edit`、`glob`、`grep` … |
+
+31 个与同 profile 下的 Web GUI 会话**完全一致**，两个前端的工具面已经对齐。
+
+**工具不只是被列出，而是真的可用**：
+
+```
+via=feishu:  '列一下当前目录的文件'
+tool/call:   bash {"command":"ls -la","description":"List files in current directory"}
+assistant:   当前目录 /Users/dengtingru/Desktop/mycode 的内容：| 目录（22 个）| …
+```
+
+`bash` 真实执行、返回结果、渲染成回复 —— 这就关闭了下方「实际可用性待实测」
+那条边界：`tool-bash` 依赖的 `shell` 服务链在真实 profile 中确实可用。
+
+## 八、遗留边界（诚实说明）
+
+- ~~仅验证到「工具面被挂载」，实际可用性待实测~~ → **已由第七节的真机测试关闭**（`bash` 实测可用）。
+  其余 30 个工具仍**未逐个实测**，只验证了它们出现在发给模型的清单里。
 - 测试夹具里的 preset 只声明**一个**工具（`tool-todo`，依赖最少：只有
   `tools` + `sessionProjections`）。真实 `standard` preset 声明的 20+ 个插件
   未在测试中逐个验证。
