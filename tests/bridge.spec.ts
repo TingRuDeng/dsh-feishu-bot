@@ -5062,6 +5062,68 @@ describe('assembled bridge (M1 acceptance)', () => {
   // persists. tests/zz-cold-resume.spec.ts pins the FOLD against a real log;
   // it does not cover the wiring, so the integration still needs a live check.
 
+  it('reports the last task result when switching to an IDLE session', { timeout: 20_000 }, async () => {
+    // The reported need: /ls onto a session that is NOT running must say what
+    // that session last did, so the operator knows what they are returning to.
+    // Adoption only handled the RUNNING case, so an idle session said nothing
+    // about its previous task.
+    const { ctx, feishu, deliver } = await mountBridge(
+      new MockAdapter([textResponse('上次任务的结论：构建已通过')]),
+    )
+    await deliver({ text: '/new' })
+    const sessionId = String([...ctx.sessions.list()][0]!.id)
+    await deliver({ text: '跑一下构建' })
+    const agent = ctx.agents.get([...ctx.sessions.list()][0]!.id)!
+    await agent.whenIdle()
+
+    // Now switch to that (idle) session and expect its last result to be shown.
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('上次任务的结论'))) {
+        throw new Error('the previous result was never projected at all')
+      }
+    }, { timeout: 5_000, interval: 20 })
+    const before = feishu.sent.length
+
+    await deliver({ text: `/use ${sessionId}` })
+    await vi.waitFor(() => {
+      if (feishu.sent.length <= before) {
+        throw new Error('switching to an idle session reported nothing about its last task')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    const after = feishu.sent.slice(before).map(({ text }) => text).join('\n')
+    expect(after).toContain('上次任务的结论')
+  })
+  it('shows the running progress when switching to a session that IS working', { timeout: 20_000 }, async () => {
+    // The other half of the same need: /ls onto a session with a task in flight
+    // must show that task's progress, so the switch answers "what is this doing
+    // right now?" as well as "what did it last do?".
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    const sessionId = String([...ctx.sessions.list()][0]!.id)
+    const agent = [...ctx.sessions.list()]
+      .map(session => ctx.agents.get(session.id))
+      .find(candidate => candidate !== undefined)!
+
+    // Start a task from the WEB side and leave it running.
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'web 侧长任务' }],
+      source: { kind: 'user', via: 'web' } as never,
+    }))
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('思考中'))) {
+        throw new Error('the web task never got a progress card')
+      }
+    }, { timeout: 5_000, interval: 20 })
+    const before = feishu.cards.length
+
+    await deliver({ text: `/use ${sessionId}` })
+    await vi.waitFor(() => {
+      const resumed = feishu.cards.slice(before)
+        .some(({ card }) => JSON.stringify(card).includes('思考中'))
+      if (!resumed) throw new Error('switching to a busy session showed no progress')
+    }, { timeout: 5_000, interval: 20 })
+  })
 })
 
 /** The button style of each option on a question card, keyed by label. */

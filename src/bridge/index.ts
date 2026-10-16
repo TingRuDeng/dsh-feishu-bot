@@ -1116,6 +1116,68 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     scheduleCard(chatId, sessionId, tracker)
   }
 
+  /**
+   * Tell the chat what a session was last doing when it is NOT running.
+   *
+   * Switching to an idle session used to say nothing at all, so the operator
+   * could not tell whether it had just finished something, failed, or had never
+   * been used. That context is exactly what the switch is for: `/ls` onto a
+   * session should answer "what was this working on?".
+   *
+   * Only the session's own last task is reported, from the fold the projection
+   * already maintains. Nothing is sent for a session that has no task yet.
+   */
+  const reportIdleSession = (chatId: string, sessionId: SessionIdString): void => {
+    const session = ctx.sessions.list().find(candidate => String(candidate.id) === String(sessionId))
+    if (session === undefined) return
+    const folded = currentTaskFold(session)
+    // A running task is handled by adoption; only settled tasks are reported
+    // here, so the two never both fire for one switch.
+    if (folded === undefined || !folded.settled) return
+    const result = folded.result?.text
+    const status = folded.snapshot.status
+    const lines = [
+      status === 'failed'
+        ? '这个会话上一个任务失败了。'
+        : status === 'stopped'
+          ? '这个会话上一个任务被中止了。'
+          : '这个会话当前空闲，上一个任务已完成。',
+      ...(result === undefined ? [] : [result]),
+      '直接发消息即可开始新任务。',
+    ]
+    void ctx.feishu.sendText(chatId, lines.join('\n')).catch((error: unknown) => {
+      ctx.logger.warn('feishu-bridge idle summary failed: %s', safeErrorFact(error))
+    })
+  }
+
+  /**
+   * Report a freshly-bound session's state to its chat.
+   *
+   * One entry point for both cases, so a switch can never report the running
+   * case and forget the idle one: a live task becomes a progress card, and a
+   * settled task becomes a short summary of what it last did.
+   */
+  const reportBoundSession = (chatId: string, sessionId: SessionIdString): void => {
+    // A live tracker already showing this very session's task answers the
+    // question, but the switch should still re-put that card in front of the
+    // operator: they just asked what this session is doing, and the answer is
+    // on screen somewhere above. Re-request rather than stay silent, and never
+    // open a second card (the tracker keeps its messageId).
+    const existing = cards.get(chatId)
+    if (existing !== undefined && !existing.frozen
+      && String(existing.sessionId) === String(sessionId)) {
+      requestCard(chatId, sessionId, existing, false)
+      return
+    }
+    adoptRunningTask(chatId, sessionId)
+    // Adoption opens a card only for a task still in flight. Anything else is
+    // an idle session, and the operator still needs to know what it last did.
+    const tracker = cards.get(chatId)
+    if (tracker !== undefined && !tracker.frozen
+      && String(tracker.sessionId) === String(sessionId)) return
+    reportIdleSession(chatId, sessionId)
+  }
+
   /** Rebuild the currently open Web task as the authoritative Feishu progress card. */
   const adoptRunningTask = (
     chatId: string, sessionId: SessionIdString, coldFold?: FeishuTaskFold,
@@ -2417,7 +2479,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       ctx.logger.info('feishu-audit action=binding-%s chat=%s session=%s sender=%s',
         currentBinding === undefined ? 'created' : 'replaced', auditHash(chatId),
         auditHash(binding.sessionId), auditHash(operatorOpenId))
-      adoptRunningTask(chatId, binding.sessionId)
+      reportBoundSession(chatId, binding.sessionId)
       notifyApprovalBinding(String(binding.sessionId), chatId)
       return { ok: true, message: await bindingSuccessMessage(targetId) }
     }
@@ -2433,7 +2495,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     ctx.logger.info('feishu-audit action=binding-%s chat=%s session=%s sender=%s',
       currentBinding === undefined ? 'created' : 'replaced', auditHash(chatId),
       auditHash(binding.sessionId), auditHash(operatorOpenId))
-    adoptRunningTask(chatId, binding.sessionId)
+    reportBoundSession(chatId, binding.sessionId)
     notifyApprovalBinding(String(binding.sessionId), chatId)
     return { ok: true, message: await bindingSuccessMessage(targetId) }
   }
