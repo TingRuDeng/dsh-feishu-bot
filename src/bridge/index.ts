@@ -1900,12 +1900,27 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       return next()
     }
 
+    // Feishu must not STEAL the question from the Web GUI. Both channels serve
+    // the same request, so the Web answerer is asked concurrently and whichever
+    // the operator answers first wins — the same race the approval channel
+    // runs. Claiming the request outright (returning without next()) would
+    // leave a Web-only operator staring at a turn that never asks anything.
+    const web = next()
+    const webAnswer = web.then((answer): Promise<AskUserQuestionAnswer> | AskUserQuestionAnswer => {
+      // The Web GUI is showing this question, so retire the Feishu card: the
+      // operator should not be able to answer it twice from two places.
+      settleQuestion(pendingId, { kind: 'abandon', reason: 'answered-in-web' })
+      ctx.logger.info('feishu-audit action=question-answered-elsewhere chat=%s pending=%s',
+        auditHash(boundChatId), auditHash(pendingId))
+      return answer
+    }, (): Promise<AskUserQuestionAnswer> => new Promise<AskUserQuestionAnswer>(() => {}))
     // A free-text reply is the answer; see `answerPendingQuestionWithText`.
     return Promise.race([
       answered,
       skipped.then((reason): AskUserQuestionAnswer => {
         throw new UserQuestionError(`question was not answered in Feishu (${reason})`, 'ASK_ABORTED')
       }),
+      webAnswer,
     ])
   }, { prepend: true })
 

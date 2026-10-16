@@ -4908,6 +4908,57 @@ describe('assembled bridge (M1 acceptance)', () => {
       answers: [{ id: 'q1', selected: ['typecheck'] }],
     })
   })
+  it('lets the Web GUI answer the same question instead of stealing it', { timeout: 20_000 }, async () => {
+    // Reported regression: after Feishu gained question support, the Web GUI
+    // stopped showing prompts entirely. The bridge registered { prepend: true }
+    // and, for a bound chat, returned without calling next() — so the remote
+    // (Web) answerer was never consulted. Both channels must be offered the
+    // request and whichever answers first must win.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '谁来回答？' }] },
+      () => Promise.resolve({ answers: [{ id: 'q1', selected: ['web-gui'] }] }),
+    )
+
+    // The Web answer stands even though a Feishu card was also published.
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: ['web-gui'] }],
+    })
+    // The Feishu card must be retired, so the question cannot be answered twice.
+    await vi.waitFor(() => {
+      const settled = feishu.cards.filter(c => JSON.stringify(c.card).includes('谁来回答')).at(-1)
+      expect(JSON.stringify(settled?.card)).toContain('未作答')
+    }, { timeout: 5_000, interval: 20 })
+  })
+
+  it('still answers from Feishu when the Web GUI never answers', { timeout: 20_000 }, async () => {
+    // The race must not make Feishu unusable when the Web answerer stays silent
+    // (that is the phone-only case the channel exists for).
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '只从飞书答？', options: [{ label: 'OK' }] }] },
+      () => new Promise(() => {}),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('只从飞书答'))) {
+        throw new Error('question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    const card = feishu.cards.findLast(c => JSON.stringify(c.card).includes('只从飞书答'))!
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'OK'))
+    await expect(outcome).resolves.toEqual({ answers: [{ id: 'q1', selected: ['OK'] }] })
+  })
 })
 
 /** The button style of each option on a question card, keyed by label. */
