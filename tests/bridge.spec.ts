@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import LlmRuntime, { createMessage, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -286,6 +286,9 @@ async function mountBridge(
   drain: () => Promise<void>
   archiveSession: (sessionId: string) => void
   registerWorkspaceSession: (sessionId: string) => void
+  workspaces: readonly { id: string; path: string; title: string; sessionIds: readonly string[] }[]
+  attachedSessions: ReadonlyMap<string, string[]>
+  createWorkspace: (path: string, title?: string) => Promise<{ id: string; path: string }>
 }> {
   const root = existingRoot ?? await mkdtemp(join(tmpdir(), 'feishu-bridge-'))
   if (existingRoot === undefined) dirs.push(root)
@@ -318,24 +321,88 @@ async function mountBridge(
     },
   } as never)
   const archivedSessionIds = new Set<string>()
+  // Mirrors the real registry: a Workspace is an entity, and membership is
+  // driven by attachSession (+ the cwd check), NOT derived from cwd alone.
+  // Recording attaches is what makes "did /new join a workspace?" observable.
+  const attachedSessions = new Map<string, string[]>()
+  const workspaces: {
+    id: string
+    path: string
+    title: string
+    createdAt: string
+    updatedAt: string
+    sessionIds: readonly string[]
+    attachSession: (sessionId: string) => Promise<void>
+  }[] = []
+  const makeWorkspace = (path: string, title: string) => {
+    const ids: string[] = []
+    const workspace = {
+      id: `ws-${workspaces.length + 1}`,
+      path,
+      title,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      get sessionIds(): readonly string[] { return ids },
+      attachSession: async (sessionId: string): Promise<void> => {
+        // The real entity refuses a session whose stored cwd is absent, does
+        // not resolve, is not a directory, or differs from the workspace path.
+        const header = ctx.sessions.list().find(session => String(session.id) === sessionId)?.header
+        const stored = header?.cwd
+          ?? (await ctx.sessionPersistence.list())
+            .find(session => String(session.header.id) === sessionId)?.header.cwd
+        if (stored === undefined) {
+          throw new Error(`cannot attach session '${sessionId}': its stored header carries no cwd`)
+        }
+        const resolved = await realpath(stored)
+        const expected = await realpath(path)
+        if (resolved !== expected) {
+          throw new Error(`cannot attach session '${sessionId}': its cwd resolves to '${resolved}'`)
+        }
+        if (!ids.includes(sessionId)) ids.unshift(sessionId)
+        attachedSessions.set(sessionId, [...ids])
+      },
+    }
+    return workspace
+  }
   ctx.provide('agentDefaultModel', {
     currentSelection: defaultSelection ?? (() => ({ provider: 'mock', model: 'm' })),
   })
   ctx.provide('workspaceRegistry', {
     get archivedSessionIds() { return [...archivedSessionIds] },
+    // The real registry canonicalizes with realpath before comparing, and the
+    // bridge hands it an already-resolved cwd. Comparing raw strings would
+    // miss on macOS, where a temp dir is /var/... but resolves to /private/var.
+    resolveByPath: async (path: string) => {
+      const canonical = await realpath(path)
+      return workspaces.find(workspace => workspace.path === canonical)
+        ?? workspaces.find(workspace => workspace.path === path)
+    },
+    create: async (path: string, title?: string) => {
+      const workspace = makeWorkspace(path, title ?? basename(path))
+      workspaces.push(workspace)
+      return workspace
+    },
     list: async () => {
-      const groups = new Map<string, string[]>()
-      const headers = new Map<string, { id: string; cwd?: string }>()
-      for (const session of ctx.sessions.list()) headers.set(String(session.id), { id: String(session.id), cwd: session.header.cwd })
-      for (const session of await ctx.sessionPersistence.list()) headers.set(String(session.header.id), { id: String(session.header.id), cwd: session.header.cwd })
-      for (const session of headers.values()) {
-        const cwd = session.cwd
-        if (cwd === undefined) continue
-        const ids = groups.get(cwd) ?? []
-        ids.push(session.id)
-        groups.set(cwd, ids)
+      // The real registry projects `sessionIds` from attach membership, but a
+      // caller that never attached (as these tests' direct ctx.agents.create
+      // calls do) still has a cwd to group by. Mirror both so /ls keeps working.
+      const derived = new Map<string, string[]>()
+      const headers = new Map<string, string | undefined>()
+      for (const session of ctx.sessions.list()) headers.set(String(session.id), session.header.cwd)
+      for (const session of await ctx.sessionPersistence.list()) {
+        headers.set(String(session.header.id), session.header.cwd)
       }
-      return [...groups].map(([path, sessionIds]) => ({ path, title: basename(path), sessionIds }))
+      for (const [id, cwd] of headers) {
+        if (cwd === undefined) continue
+        const ids = derived.get(cwd) ?? []
+        ids.push(id)
+        derived.set(cwd, ids)
+      }
+      const seen = new Set(workspaces.map(workspace => workspace.path))
+      const extra = [...derived]
+        .filter(([cwd]) => !seen.has(cwd))
+        .map(([cwd, sessionIds]) => ({ ...makeWorkspace(cwd, basename(cwd)), sessionIds }))
+      return [...workspaces, ...extra]
     },
   })
   ctx.llm.registerAdapter(['mock'], adapter)
@@ -394,7 +461,20 @@ async function mountBridge(
   return {
     ctx, feishu, root, bridgeFiber, deliver, drain,
     archiveSession: sessionId => { archivedSessionIds.add(sessionId) },
-    registerWorkspaceSession: () => {},  }
+    registerWorkspaceSession: (sessionId: string) => {
+      const workspace = makeWorkspace(root, basename(root))
+      workspaces.push(workspace)
+      void workspace.attachSession(sessionId)
+    },
+    // Observation helpers for the workspace-membership tests.
+    workspaces,
+    attachedSessions,
+    createWorkspace: async (path: string, title?: string) => {
+      const workspace = makeWorkspace(await realpath(path), title ?? basename(path))
+      workspaces.push(workspace)
+      return workspace
+    },
+  }
 }
 
 describe('assembled bridge (M1 acceptance)', () => {
@@ -565,8 +645,69 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(names).toContain('todo_write')
   })
 
-  it('full loop: /new binds, text reaches the model, reply reaches the chat', { timeout: 20_000 }, async () => {
-    const { feishu, root, deliver } = await mountBridge(new MockAdapter([textResponse('模型的回答')]))
+  it('/new attaches the session to the workspace for its cwd, not Ungrouped', { timeout: 20_000 }, async () => {
+    // Reported: a Feishu /new session never appears under its workspace in the
+    // Web GUI and lands in Ungrouped instead. Web grouping is driven by
+    // Workspace ENTITY membership (workspace.sessionIds), which is populated
+    // by attachSession — not derived from a session's cwd. The bridge created
+    // the session with the right cwd but never joined it to the workspace.
+    const { ctx, feishu, deliver, workspaces, root } = await mountBridge(
+      new MockAdapter([textResponse('ok')]),
+    )
+    // A workspace for the configured default directory already exists, as it
+    // would after the user opened that folder in the Web GUI.
+    expect(workspaces.some(candidate => candidate.path === root)).toBe(false)
+    await deliver({ text: '/new' })
+    expect(feishu.sent[0]!.text).toContain('已创建并绑定')
+
+    const bound = [...ctx.agents.list()][0]
+    const sessionId = String(bound.session.id)
+    const workspace = workspaces.find(candidate => candidate.sessionIds.includes(sessionId))
+    expect(workspace).toBeDefined()
+    expect(workspace!.sessionIds).toContain(sessionId)
+  })
+
+  it('/new joins the workspace that ALREADY exists for its directory', { timeout: 20_000 }, async () => {
+    // The reported case: the folder is already open in the Web GUI, so the
+    // entity predates the Feishu session. Reusing it (rather than minting a
+    // second entity for the same path) is what makes the session appear under
+    // the existing workspace instead of a duplicate or Ungrouped.
+    const { ctx, feishu, deliver, workspaces, root, createWorkspace } = await mountBridge(
+      new MockAdapter([textResponse('ok')]),
+    )
+    const canonicalRoot = await realpath(root)
+    await createWorkspace(canonicalRoot, 'mycode')
+    const preexisting = workspaces.find(candidate => candidate.path === canonicalRoot)
+    expect(preexisting).toBeDefined()
+
+    await deliver({ text: '/new' })
+    expect(feishu.sent[0]!.text).toContain('已创建并绑定')
+    const sessionId = String([...ctx.agents.list()][0].session.id)
+    // Joined to the pre-existing entity; no duplicate workspace for the path.
+    expect(preexisting!.sessionIds).toContain(sessionId)
+    expect(workspaces.filter(candidate => candidate.path === canonicalRoot)).toHaveLength(1)
+  })
+
+  it('/new still succeeds when no workspace can be resolved (best-effort attach)', { timeout: 20_000 }, async () => {
+    // Grouping is cosmetic: a registry that cannot be joined must not fail a
+    // session that is otherwise usable, and must not leave the chat unbound.
+    const { ctx, feishu, deliver } = await mountBridge(
+      new MockAdapter([textResponse('ok')]),
+      {},
+      undefined,
+      undefined,
+      (ctx) => {
+        const registry = ctx.get('workspaceRegistry') as Record<string, unknown>
+        delete registry.resolveByPath
+        delete registry.create
+      },
+    )
+    await deliver({ text: '/new' })
+    expect(feishu.sent[0]!.text).toContain('已创建并绑定')
+    expect([...ctx.agents.list()]).toHaveLength(1)
+  })
+
+  it('full loop: /new binds, text reaches the model, reply reaches the chat', { timeout: 20_000 }, async () => {    const { feishu, root, deliver } = await mountBridge(new MockAdapter([textResponse('模型的回答')]))
     await deliver({ text: '/new' })
     expect(feishu.sent).toHaveLength(1)
     expect(feishu.sent[0]!.text).toContain('已创建并绑定')

@@ -245,6 +245,20 @@ export function apply(ctx: Context, config: Config): Promise<void> {
   ).finally(stopSetupCancellation)
 }
 
+/**
+ * Minimal structural view of a Workspace entity.
+ *
+ * The registry is an optional capability and its concrete type lives in a
+ * package the bridge must not import, so only the members actually used are
+ * declared.
+ */
+interface WorkspaceHandle {
+  readonly id: unknown
+  readonly path: string
+  readonly sessionIds: readonly SessionId[]
+  attachSession: (sessionId: SessionId) => Promise<void>
+}
+
 async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Promise<boolean> {
   await validateDefaultWorkspace(config.defaultWorkspace, config.allowedWorkspaces)
   setupSignal.throwIfAborted()
@@ -254,6 +268,9 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const workspaceRegistry = ctx.get('workspaceRegistry') as {
     readonly archivedSessionIds: readonly SessionId[]
     list: () => readonly { path: string; title?: string; name?: string; sessionIds: readonly SessionId[] }[] | Promise<readonly { path: string; title?: string; name?: string; sessionIds: readonly SessionId[] }[]>
+    /** Optional: absent registries simply leave sessions unattached. */
+    resolveByPath?: (path: string) => Promise<WorkspaceHandle | undefined>
+    create?: (path: string, title?: string) => Promise<WorkspaceHandle>
   } | undefined
   const sessionProjections = ctx.get('sessionProjections' as never) as {
     snapshot: (session: Session) => {
@@ -413,6 +430,39 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const agentOptions = (): AgentOptions => defaultSelection()
   const archivedSessionIds = (): Set<string> =>
     new Set(workspaceRegistry.archivedSessionIds.map(String))
+
+  /**
+   * Join one session to the Workspace that owns its directory.
+   *
+   * The Web GUI groups sessions by Workspace ENTITY membership
+   * (`workspace.sessionIds`), which is filled in by `attachSession` — it is
+   * NOT derived from a session's cwd. A bridge-created session therefore
+   * stayed in the GUI's Ungrouped bucket no matter how correct its cwd was,
+   * even when the matching Workspace already existed for that folder.
+   *
+   * Best-effort on purpose: grouping is cosmetic, and a session that is
+   * already usable must not be failed (or rolled back) because the registry
+   * could not be joined. A workspace is created only when the directory has
+   * no entity yet, matching what opening the folder in the GUI would do.
+   * @param sessionId - the session to place.
+   * @param cwd - its authorized directory; also the workspace path.
+   */
+  const attachSessionToWorkspace = async (sessionId: SessionId, cwd: string): Promise<void> => {
+    const registry = workspaceRegistry
+    if (registry.resolveByPath === undefined) return
+    try {
+      const workspace = await registry.resolveByPath(cwd)
+        ?? await registry.create?.(cwd)
+      if (workspace === undefined) return
+      if (workspace.sessionIds.some(existing => String(existing) === String(sessionId))) return
+      await workspace.attachSession(sessionId)
+      ctx.logger.info('feishu-audit action=session-workspace-attached session=%s workspace=%s path=%s',
+        auditHash(sessionId), auditHash(String(workspace.id)), auditHash(cwd))
+    } catch (error: unknown) {
+      ctx.logger.warn('feishu-audit action=session-workspace-attach-failed session=%s path=%s error=%s',
+        auditHash(sessionId), auditHash(cwd), safeErrorFact(error))
+    }
+  }
   // M7.3: the registry keeps one ref per bridge-owned session; entries die
   // with their agent scope (model-selection.ts). `install` is handed to the
   // resolver for cold resumes and called directly in the /new setup.
@@ -3049,6 +3099,11 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         }
         ctx.logger.info('feishu-audit action=binding-created chat=%s session=%s sender=%s',
           auditHash(chatId), auditHash(binding.sessionId), auditHash(record.senderOpenId))
+        // Grouping in the Web GUI follows Workspace membership, so join the
+        // new session to the workspace for its directory. Done after
+        // publication: attachSession reads the session's STORED header, which
+        // only exists once the creation flush has happened.
+        await attachSessionToWorkspace(sessionId, authorized.realpath)
         await commit(`已创建并绑定会话 ${String(sessionId)}（cwd: ${escapeLarkMarkdownLiteral(authorized.realpath)}）。`)
         return
       }
