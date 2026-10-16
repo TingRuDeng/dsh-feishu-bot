@@ -887,6 +887,13 @@ export interface TaskCardContext {
   title?: string
   /** Presentation tier: summary hides token usage, full includes it. */
   progressDetail?: ProgressDetail | string
+  /**
+   * True when this card was recovered from the durable log after a restart
+   * rather than streamed live. It says so on the card, because a resumed card
+   * is otherwise indistinguishable from one this process has been updating all
+   * along — the operator cannot tell whether the history is complete.
+   */
+  resumed?: boolean
 }
 
 /**
@@ -911,6 +918,10 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   const { title, template } = STATUS_HEADER[snapshot.status]
   const detail = normalizeProgressDetail(context?.progressDetail)
   const lines: string[] = []
+  // A recovered card is incomplete by nature: it knows only what the log holds,
+  // not whether the task has moved on since. Saying so prevents the operator
+  // from mistaking a resumed card for a live one.
+  if (context?.resumed === true) lines.push('🔄 已从重启前的记录恢复，下方为当时进度')
   if (snapshot.status === 'running') {
     if (snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0) {
       // Prefer what the call is DOING over its bare name: "运行 pnpm test"

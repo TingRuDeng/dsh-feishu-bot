@@ -999,6 +999,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
      * render a card for a session the runtime has not resumed yet.
      */
     coldFold?: FeishuTaskFold
+    /** True when the card was recovered from the durable log after a restart. */
+    resumed?: boolean
     messageId: string | undefined
     /** A newer session snapshot has been accepted by this actor. */
     dirty: boolean
@@ -1051,9 +1053,10 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         const cwd = session?.header.cwd
         const workspace = workspaceLabel(cwd)
         const title = cwd === undefined ? undefined : workspace
-        const card = renderTaskCard(snapshot, tokens, title === undefined ? undefined : {
-          title,
+        const card = renderTaskCard(snapshot, tokens, {
+          ...(title === undefined ? {} : { title }),
           progressDetail: config.progressDetail,
+          ...(tracker.resumed === true ? { resumed: true } : {}),
         })
         if (tracker.messageId === undefined) {
           tracker.messageId = await ctx.feishu.sendCard(chatId, card)
@@ -1127,7 +1130,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       taskStartSeq: folded.taskStartSeq,
       taskMessageId: folded.taskMessageId,
       sessionId,
-      ...(coldFold === undefined ? {} : { coldFold }),
+      ...(coldFold === undefined ? {} : { coldFold, resumed: true }),
       messageId: undefined,
       dirty: false,
       terminalRequested: false,

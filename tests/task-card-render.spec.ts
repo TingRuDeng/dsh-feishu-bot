@@ -218,3 +218,36 @@ describe('renderTaskCard', () => {
     expect(JSON.stringify(renderTaskCard(snap))).toBe(JSON.stringify(renderTaskCard(snap)))
   })
 })
+
+describe('a card recovered after a restart', () => {
+  const running = {
+    turn: 3,
+    status: 'running' as const,
+    currentTools: ['bash'],
+    recentTools: [],
+    toolCallCount: 1,
+    durationMs: null,
+    startedAt: 0,
+    failureCode: null,
+    retryCount: 0,
+  }
+
+  it('says it was recovered, because it cannot know the task is still current', () => {
+    const card = renderTaskCard(running, undefined, { resumed: true })
+    expect(JSON.stringify(card)).toContain('已从重启前的记录恢复')
+  })
+
+  it('does not claim a live card was recovered', () => {
+    const card = renderTaskCard(running, undefined, {})
+    expect(JSON.stringify(card)).not.toContain('已从重启前的记录恢复')
+  })
+
+  it('still reports the progress it does know about', () => {
+    const card = renderTaskCard(running, undefined, { resumed: true })
+    const body = JSON.stringify(card)
+    expect(body).toContain('已从重启前的记录恢复')
+    // The marker adds a line; it must not replace the actual progress.
+    expect(body).toContain('bash')
+    expect(body).toContain('已调用工具 1 次')
+  })
+})
