@@ -191,11 +191,71 @@ export function sortPendingOutbox<K extends string, V extends OutboundLike>(
       || leftKey.localeCompare(rightKey))
 }
 
+export interface ApprovalAuditRetentionConfig {
+  auditRetentionMs: number
+  auditMaxRecords: number
+}
+
+export interface ApprovalAuditRetentionPlan {
+  auditDelete: string[]
+  /** True when protected audit rows still exceed the configured limit. */
+  auditOverCapacity: boolean
+}
+
+/**
+ * Plan cleanup for the durable approval audit trail.
+ *
+ * Audit rows are terminal facts: unlike pending cards they protect no live
+ * work, so age and capacity are the only rules. Capacity removes the oldest
+ * rows first, and a limit that cannot be satisfied with the rows present is
+ * reported as backpressure rather than met by deleting a fact the operator
+ * may still need.
+ * @param rows - keyed audit rows carrying their creation stamp.
+ * @param now - current wall-clock time.
+ * @param config - retention window and hard row cap.
+ * @returns keys to delete plus whether capacity is still exceeded.
+ */
+export function planApprovalAuditRetention(
+  rows: Iterable<readonly [string, { createdAt: number }]>,
+  now: number,
+  config: ApprovalAuditRetentionConfig,
+): ApprovalAuditRetentionPlan {
+  const all = [...rows]
+  const auditDelete = new Set<string>()
+
+  for (const [key, row] of all) {
+    if (now - row.createdAt > config.auditRetentionMs) auditDelete.add(key)
+  }
+  // Capacity may only trim rows that are already past their retention window.
+  // Deleting a still-fresh row to satisfy a cap would destroy the forensic
+  // record the trail exists for; the caller sees `auditOverCapacity` and
+  // applies backpressure instead.
+  const expired = all.filter(([key]) => auditDelete.has(key))
+  let excess = all.length - expired.length - config.auditMaxRecords
+  if (excess > 0) {
+    const deletable = expired
+      .sort(([, left], [, right]) => left.createdAt - right.createdAt)
+    for (const [key] of deletable) {
+      if (excess-- <= 0) break
+      auditDelete.add(key)
+    }
+  }
+
+  return {
+    // Oldest first: deterministic, and the order an operator reads a trail in.
+    auditDelete: [...auditDelete].sort((left, right) => {
+      const at = new Map(all)
+      return (at.get(left)?.createdAt ?? 0) - (at.get(right)?.createdAt ?? 0)
+        || left.localeCompare(right)
+    }),
+    auditOverCapacity: all.length - auditDelete.size > config.auditMaxRecords,
+  }
+}
+
 /**
  * Plan deterministic cleanup. Recoverable inbound rows and fresh pending
  * outbox rows are never deleted merely to satisfy a capacity limit.
- */
-export function planRetention(
+ */export function planRetention(
   inboundRows: Iterable<readonly [string, InboundLike]>,
   outboundRows: Iterable<readonly [string, OutboundLike]>,
   now: number,

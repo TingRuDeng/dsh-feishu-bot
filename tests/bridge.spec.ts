@@ -1820,6 +1820,79 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(result?.toast).not.toContain('已在别处决定')
   })
 
+  it('records a durable audit row naming why a pending approval was withdrawn', { timeout: 20_000 }, async () => {
+    // Diagnosis for "Feishu kept saying something was decided elsewhere" was
+    // impossible after the fact: the approval audit lines reach ctx.logger
+    // only, and log files are not retained. A withdrawn approval must leave a
+    // durable row stating WHICH path withdrew it.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    agent.session.append('approval/asked', { id: 'audit-withdraw-1' as never, toolName: 'Bash' })
+
+    const toolSignal = new AbortController()
+    const outcome = ctx.approval.request({ agent, toolName: 'Bash', signal: toolSignal.signal })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('审批请求'))) {
+        throw new Error('approval card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    toolSignal.abort(new Error('stopped'))
+    await expect(outcome).resolves.toBe('cancelled')
+
+    await vi.waitFor(() => {
+      const rows = [...ctx.storageDomain.get('feishu_bot_delivery')!.table('approval_audit').entries()]
+      const withdrawn = rows.find(([, row]) => (row as { action?: string }).action === 'withdrawn')
+      if (withdrawn === undefined) {
+        throw new Error(`no withdrawn audit row yet: ${JSON.stringify(rows)}`)
+      }
+      // The cause must be distinguishable, not just "it ended".
+      expect(withdrawn[1]).toMatchObject({ action: 'withdrawn', cause: 'signal-abort' })
+    }, { timeout: 5_000, interval: 20 })
+  })
+
+  it('records what a click on a withdrawn card landed on, not just that it was refused', { timeout: 20_000 }, async () => {
+    // The exact report: the operator clicked a Feishu approval and the answer
+    // claimed a decision had been made elsewhere. Afterwards there was no
+    // durable trace of WHICH settled state the click hit, so the cause could
+    // only be guessed. The row must name the landed-on state and its cause.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    agent.session.append('approval/asked', { id: 'audit-click-1' as never, toolName: 'Bash' })
+
+    const toolSignal = new AbortController()
+    const outcome = ctx.approval.request({ agent, toolName: 'Bash', signal: toolSignal.signal })
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('审批请求'))) {
+        throw new Error('approval card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+    const sent = feishu.cards.find(c => JSON.stringify(c.card).includes('审批请求'))!
+    const pendingValue = (JSON.stringify(sent.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]
+
+    // Withdraw it, then click: the reported dead end.
+    toolSignal.abort(new Error('stopped'))
+    await expect(outcome).resolves.toBe('cancelled')
+
+    const result = await feishu.clickCard(OWNER, sent.messageId, {
+      pendingId: pendingValue, action: 'allow',
+    })
+    expect(result?.toast).toContain('已撤回')
+
+    await vi.waitFor(() => {
+      const rows = [...ctx.storageDomain.get('feishu_bot_delivery')!.table('approval_audit').entries()]
+        .map(([, row]) => row as { action?: string; cause?: string })
+      const rejected = rows.find(row => row.action === 'click-rejected')
+      if (rejected === undefined) throw new Error(`no click-rejected row: ${JSON.stringify(rows)}`)
+      // Distinguishes "a human decided elsewhere" from "the tool call went away".
+      expect(rejected).toMatchObject({ action: 'click-rejected', cause: 'not-pending' })
+    }, { timeout: 5_000, interval: 20 })
+  })
+
   it('does not publish an approval whose signal already aborted before bridge initialization', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })

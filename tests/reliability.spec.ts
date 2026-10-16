@@ -4,6 +4,7 @@ import {
   danglingActiveBindings,
   isAtOrBelowWatermark,
   isRecoveryExpired,
+  planApprovalAuditRetention,
   planDurableRetention,
   planRetention,
   sortPendingOutbox,
@@ -193,5 +194,61 @@ describe('M4 reliability decisions', () => {
     expect(plan.deliveryOverCapacity).toBe(true)
     expect(plan.approvalOverCapacity).toBe(true)
     expect(plan.projectionCursorOverCapacity).toBe(true)
+  })
+
+  it('expires approval audit rows by age and bounds them by capacity', () => {
+    const plan = planApprovalAuditRetention(
+      [
+        ['old', { createdAt: 1 }],
+        ['recent', { createdAt: 9_900 }],
+      ],
+      10_000,
+      { auditRetentionMs: 5_000, auditMaxRecords: 10 },
+    )
+    // Age alone decides the first cut.
+    expect(plan.auditDelete).toEqual(['old'])
+    expect(plan.auditOverCapacity).toBe(false)
+  })
+
+  it('trims the oldest EXPIRED audit rows first when capacity is exceeded', () => {
+    const plan = planApprovalAuditRetention(
+      [
+        ['third', { createdAt: 300 }],
+        ['first', { createdAt: 100 }],
+        ['second', { createdAt: 200 }],
+      ],
+      10_000,
+      { auditRetentionMs: 5_000, auditMaxRecords: 1 },
+    )
+    // All three are past the window; capacity keeps the newest one only.
+    expect(plan.auditDelete).toEqual(['first', 'second', 'third'])
+    expect(plan.auditOverCapacity).toBe(false)
+  })
+
+  it('never trims a still-fresh audit row to satisfy capacity', () => {
+    const plan = planApprovalAuditRetention(
+      [
+        ['fresh', { createdAt: 9_900 }],
+        ['stale', { createdAt: 1 }],
+      ],
+      10_000,
+      { auditRetentionMs: 5_000, auditMaxRecords: 0 },
+    )
+    // The expired row goes; the fresh one is kept and the caller applies
+    // backpressure instead of losing current forensic detail.
+    expect(plan.auditDelete).toEqual(['stale'])
+    expect(plan.auditOverCapacity).toBe(true)
+  })
+
+  it('reports over-capacity rather than deleting a row it must keep', () => {
+    // A zero cap with one row cannot be satisfied; the caller applies
+    // backpressure instead of losing the only forensic record.
+    const plan = planApprovalAuditRetention(
+      [['only', { createdAt: 900 }]],
+      1_000,
+      { auditRetentionMs: 10_000, auditMaxRecords: 0 },
+    )
+    expect(plan.auditDelete).toEqual([])
+    expect(plan.auditOverCapacity).toBe(true)
   })
 })

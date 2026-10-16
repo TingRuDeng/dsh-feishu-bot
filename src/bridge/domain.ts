@@ -33,6 +33,8 @@ export type FeishuDeliveryId = Branded<'FeishuDeliveryId'>
 export type ProjectionCursorId = Branded<'ProjectionCursorId'>
 /** Bridge-owned pending approval card key. */
 export type PendingCardId = Branded<'PendingCardId'>
+/** Approval audit key `[pendingId, createdAt]`; one row per lifecycle fact. */
+export type ApprovalAuditId = Branded<'ApprovalAuditId'>
 
 const brandedString = <T extends string>() => z.string().min(1) as unknown as z.ZodType<Branded<T>>
 
@@ -159,6 +161,41 @@ export const projectionCursor = z.object({
 })
 export type ProjectionCursor = z.infer<typeof projectionCursor>
 
+/**
+ * One durable approval-lifecycle fact.
+ *
+ * Written for the transitions an operator later has to explain: a card that
+ * stopped accepting clicks, and why. The bridge's structured audit lines
+ * otherwise reach only the logger, which is not retained, so a report of
+ * "it said something was already authorized" could not be diagnosed after
+ * the fact. `cause` is the discriminating field — a withdrawn item names the
+ * path that withdrew it instead of leaving "it just ended".
+ */
+export const approvalAudit = z.object({
+  /** Approval audit id paired from the session log when known. */
+  approvalId: z.string().min(1).optional(),
+  chatId: brandedString<'FeishuChatId'>(),
+  sessionId: brandedString<'SessionIdString'>(),
+  toolName: z.string(),
+  /**
+   * Terminal state the item reached. Mirrors ApprovalItemState's settled set
+   * plus the not-pending click rejection.
+   */
+  action: z.enum([
+    'withdrawn', 'invalidated', 'elsewhere', 'allowed', 'rejected', 'click-rejected',
+  ]),
+  /**
+   * Discriminator for WHY. `signal-abort` is a tool call whose execution
+   * signal aborted (turn cancelled); `disposed` is bridge teardown;
+   * `not-pending` is a click on an item no longer in the registry.
+   */
+  cause: z.enum([
+    'signal-abort', 'disposed', 'decided-elsewhere', 'decided', 'not-pending', 'card-id-write',
+  ]),
+  createdAt: z.number().int().nonnegative(),
+})
+export type ApprovalAudit = z.infer<typeof approvalAudit>
+
 /** The feishu-bot domain: identity, version, and all four tables. */
 export const feishuBotDomain = defineDomain({
   name: 'feishu_bot',
@@ -182,6 +219,7 @@ export const feishuDeliveryDomain = defineDomain({
   tables: {
     deliveries: domainTable<FeishuDeliveryId, CanonicalDelivery>(canonicalDelivery),
     projection_cursors: domainTable<ProjectionCursorId, ProjectionCursor>(projectionCursor),
+    approval_audit: domainTable<ApprovalAuditId, ApprovalAudit>(approvalAudit),
   },
 })
 
@@ -211,4 +249,18 @@ export function projectionCursorId(
   chatId: FeishuChatId, sessionId: SessionIdString,
 ): ProjectionCursorId {
   return JSON.stringify([chatId, sessionId]) as ProjectionCursorId
+}
+
+/**
+ * Encode one approval audit row identity.
+ *
+ * Keyed by time as well as item so repeated facts about one approval (a
+ * withdraw, then a click on the frozen card) each land as their own row
+ * rather than overwriting the evidence.
+ * @param pendingId - bridge pending approval id the fact concerns.
+ * @param createdAt - wall-clock stamp, also the tiebreaker in the key.
+ * @returns stable key for the audit table.
+ */
+export function approvalAuditId(pendingId: string, createdAt: number): ApprovalAuditId {
+  return JSON.stringify([pendingId, createdAt]) as ApprovalAuditId
 }

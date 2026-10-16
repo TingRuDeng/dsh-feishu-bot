@@ -30,8 +30,8 @@ import { auditHash, safeErrorFact } from '../audit.ts'
 import type {} from '@deepseek-ai/dsh-storage-domain'
 import type {} from '@deepseek-ai/dsh-session-persistence'
 import {
-  canonicalDeliveryId, feishuBotDomain, feishuDeliveryDomain, projectionCursorId,
-  type ChatBinding, type FeishuChatId, type FeishuEventId, type FeishuInboundKey,
+  approvalAuditId, canonicalDeliveryId, feishuBotDomain, feishuDeliveryDomain, projectionCursorId,
+  type ApprovalAudit, type ApprovalAuditId, type ChatBinding, type FeishuChatId, type FeishuEventId, type FeishuInboundKey,
   type FeishuDeliveryId, type FeishuMessageId, type FeishuOpenId,
   type InboundCommand, type InboundEvent, type InboundMessage, type OutboundSegment,
   type OutboundSegmentId, type ProjectionCursorId, type SessionIdString,
@@ -71,6 +71,7 @@ import {
 import { renderResultCard, segmentResultCards } from './result-card.ts'
 import {
   danglingActiveBindings, isRecoveryExpired,
+  planApprovalAuditRetention,
   planDurableRetention, planRetention, pruneProjectionCursors,
   sortPendingOutbox, watermarkKey,
 } from './reliability.ts'
@@ -140,6 +141,9 @@ export interface Config {
   approvalPendingTtlMs: number
   /** Hard capacity for persisted approval rows. */
   approvalMaxRecords: number
+  /** Retention window and hard cap for the durable approval audit trail. */
+  approvalAuditRetentionMs: number
+  approvalAuditMaxRecords: number
   /** Retention period for an unbound cursor with no pending delivery. */
   projectionCursorRetentionMs: number
   /** Hard capacity for projection cursors. */
@@ -178,6 +182,12 @@ const ConfigSchema: z<Config> = z.object({
   approvalMaxRecords: z.natural().default(1_000),
   projectionCursorRetentionMs: z.natural().default(604_800_000),
   projectionCursorMaxRecords: z.natural().default(10_000),
+  /**
+   * Approval audit keeps a longer window than the approvals it describes:
+   * the trail is read after a dead end, which is often days later.
+   */
+  approvalAuditRetentionMs: z.natural().default(2_592_000_000),
+  approvalAuditMaxRecords: z.natural().default(10_000),
   maintenanceIntervalMs: z.natural().default(86_400_000),
   agentProvider: z.string(),
   agentModel: z.string(),
@@ -377,6 +387,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const pendingCards = guardTable(domain.table('pending_cards'))
   const deliveries = guardTable(deliveryDomain.table('deliveries'))
   const projectionCursors = guardTable(deliveryDomain.table('projection_cursors'))
+  const approvalAudits = guardTable(deliveryDomain.table('approval_audit'))
   const setWatermarks = (watermarks: Record<string, number>): Promise<void> => {
     if (!storageWritable) return Promise.reject(new Error('feishu-bridge: storage closed'))
     return domain.global.set({ watermarks })
@@ -1237,6 +1248,42 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   }
 
   /** Flip one item's state, rotate the group out when nothing stays pending, re-render. */
+  /**
+   * Persist one approval-lifecycle fact.
+   *
+   * Best-effort by design: auditing exists to explain an approval later and
+   * must never turn a rejected click or a withdrawn card into a failed one.
+   * A write failure is logged with the same kind of detail the row would
+   * have carried.
+   * @param fact - the settled state and the path that produced it.
+   */
+  const recordApprovalAudit = (fact: {
+    pendingId: string
+    approvalId?: string | undefined
+    chatId: string
+    sessionId: string
+    toolName: string
+    action: ApprovalAudit['action']
+    cause: ApprovalAudit['cause']
+  }): void => {
+    const createdAt = Date.now()
+    void trackBackground(approvalAudits.put(
+      approvalAuditId(fact.pendingId, createdAt),
+      {
+        ...fact.approvalId === undefined ? {} : { approvalId: fact.approvalId },
+        chatId: fact.chatId as never,
+        sessionId: fact.sessionId as never,
+        toolName: fact.toolName,
+        action: fact.action,
+        cause: fact.cause,
+        createdAt,
+      },
+    )).catch((error: unknown) => {
+      ctx.logger.warn('feishu-audit action=approval-audit-write-failed pending=%s state=%s cause=%s error=%s',
+        auditHash(fact.pendingId), fact.action, fact.cause, safeErrorFact(error))
+    })
+  }
+
   const settleItem = (pendingId: string, state: Exclude<ApprovalItemState, 'pending'>): void => {
     const group = groupOf.get(pendingId)
     if (group === undefined) return
@@ -1255,6 +1302,22 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           auditHash(group.chatId), result.operation)
       }
     })
+  }
+
+  /**
+   * Find the approval group that most recently held one item.
+   *
+   * A settled item leaves the live registry, so the group that owns its
+   * final state has to be found among the settled groups. Used by the
+   * click-rejected path, which runs after the item is gone.
+   * @param pendingId - item to locate.
+   * @returns the owning group, or undefined when nothing recorded it.
+   */
+  const settledGroupOf = (pendingId: string): ApprovalGroup | undefined => {
+    for (const settled of settledApprovalGroups.values()) {
+      if (settled.group.items.has(pendingId)) return settled.group
+    }
+    return undefined
   }
 
   /**
@@ -1280,6 +1343,25 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     return `该审批${ITEM_STATE_COPY[state]}`
   }
 
+  /**
+   * Map a `finishApproval` reason onto the audit cause vocabulary.
+   *
+   * The reason already distinguishes the paths that produced a settle, so
+   * the audit row records the same discrimination instead of re-deriving it.
+   * @param reason - the caller's stated reason for settling.
+   * @returns the audit cause, defaulting to the least specific claim.
+   */
+  const auditCauseOf = (reason: string): ApprovalAudit['cause'] => {
+    switch (reason) {
+      case 'withdrawn': return 'signal-abort'
+      case 'disposed': return 'disposed'
+      case 'decided-elsewhere': return 'decided-elsewhere'
+      case 'decided': return 'decided'
+      case 'invalidated': return 'card-id-write'
+      default: return 'not-pending'
+    }
+  }
+
   /** One idempotent terminal path owns Promise, registry, durable row, and card state. */
   const finishApproval = (
     pendingId: string,
@@ -1294,6 +1376,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     pendingApprovals.delete(pendingId)
     deletePendingCard(pendingId, reason)
     settleItem(pendingId, state)
+    recordApprovalAudit({
+      pendingId,
+      approvalId: entry.approvalId,
+      chatId: entry.chatId,
+      sessionId: entry.sessionId,
+      toolName: entry.spec.toolName,
+      action: state,
+      cause: auditCauseOf(reason),
+    })
     entry.resolve(outcome)
     return true
   }
@@ -1593,6 +1684,25 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (entry === undefined || entry.settled) {
       ctx.logger.info('feishu-audit action=approval-click-rejected operator=%s message=%s pending=%s reason=not-pending',
         auditHash(action.operatorOpenId), auditHash(action.messageId), auditHash(pendingId))
+      // The reported dead end. Record what the click LANDED ON, not just that
+      // it was refused: the prior settled state is what distinguishes a real
+      // elsewhere-decision from a card whose tool call simply went away.
+      const prior = groupOf.get(pendingId)?.items.get(pendingId)?.state
+        ?? [...settledApprovalGroups.values()]
+          .map(settled => settled.group.items.get(pendingId)?.state)
+          .find(candidate => candidate !== undefined)
+      const settled = settledGroupOf(pendingId) ?? groupOf.get(pendingId)
+      if (settled !== undefined) {
+        recordApprovalAudit({
+          pendingId,
+          approvalId: entry?.approvalId,
+          chatId: settled.chatId,
+          sessionId: settled.sessionId,
+          toolName: settled.items.get(pendingId)?.spec.toolName ?? 'unknown',
+          action: 'click-rejected',
+          cause: prior === 'elsewhere' ? 'decided-elsewhere' : 'not-pending',
+        })
+      }
       return { toast: settledItemToast(pendingId) }
     }
     const sourceCardMessageId = groupOf.get(pendingId)?.messageId
@@ -3265,6 +3375,14 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     for (const key of durablePlan.approvalDelete) await pendingCards.delete(key as never)
     for (const key of durablePlan.cursorDelete) await projectionCursors.delete(key as ProjectionCursorId)
 
+    // The audit trail is the record an operator inspects AFTER something went
+    // wrong, so it is swept on its own window rather than tied to approvals.
+    const auditPlan = planApprovalAuditRetention(approvalAudits.entries(), now, {
+      auditRetentionMs: config.approvalAuditRetentionMs,
+      auditMaxRecords: config.approvalAuditMaxRecords,
+    })
+    for (const key of auditPlan.auditDelete) await approvalAudits.delete(key as ApprovalAuditId)
+
     const watermarkCleanup = watermarkTail.then(async () => {
       const current = domain.global.get()
       const watermarks = current.watermarks as Record<string, number>
@@ -3285,11 +3403,16 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
 
     const deleted = plan.inboundDelete.length + plan.outboundDelete.length
       + durablePlan.deliveryDelete.length + durablePlan.approvalDelete.length
-      + durablePlan.cursorDelete.length + watermarksDeleted
+      + durablePlan.cursorDelete.length + watermarksDeleted + auditPlan.auditDelete.length
     if (deleted > 0) {
-      ctx.logger.info('feishu-audit action=retention-sweep inboundDeleted=%d deadLetterDeleted=%d deliveryDeleted=%d approvalDeleted=%d cursorDeleted=%d watermarkDeleted=%d',
+      ctx.logger.info('feishu-audit action=retention-sweep inboundDeleted=%d deadLetterDeleted=%d deliveryDeleted=%d approvalDeleted=%d cursorDeleted=%d watermarkDeleted=%d auditDeleted=%d',
         plan.inboundDelete.length, plan.outboundDelete.length, durablePlan.deliveryDelete.length,
-        durablePlan.approvalDelete.length, durablePlan.cursorDelete.length, watermarksDeleted)
+        durablePlan.approvalDelete.length, durablePlan.cursorDelete.length, watermarksDeleted,
+        auditPlan.auditDelete.length)
+    }
+    if (auditPlan.auditOverCapacity) {
+      ctx.logger.warn('feishu-audit action=retention-backpressure table=approval-audit records=%d max=%d',
+        approvalAudits.size, config.approvalAuditMaxRecords)
     }
     if (plan.inboundOverCapacity || plan.outboundOverCapacity
       || durablePlan.deliveryOverCapacity || durablePlan.approvalOverCapacity

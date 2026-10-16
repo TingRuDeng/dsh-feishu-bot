@@ -78,4 +78,47 @@ describe('M6 storage compatibility', () => {
     })
     await reopened.close()
   })
+
+  it('adds the approval_audit table to an existing install without a version bump', async () => {
+    // An upgrade must not require migrating the live unit. The table is new,
+    // so an install that predates it simply starts with it empty and keeps
+    // every existing row. A version bump here would make every deployed
+    // feishu_bot_delivery unit unopenable.
+    const { ctx, root } = await mountOldFixture()
+    const deliverySpec = (domains as unknown as {
+      feishuDeliveryDomain?: DomainSpec
+    }).feishuDeliveryDomain
+    expect(deliverySpec).toBeDefined()
+    expect(deliverySpec!.version).toBe(1)
+
+    const delivery = await ctx.storageDomain.open(deliverySpec!)
+    expect(delivery.table('approval_audit').size).toBe(0)
+    await delivery.table('approval_audit').put(
+      domains.approvalAuditId('pc_legacy', 1_000),
+      {
+        chatId: 'oc_legacy' as never,
+        sessionId: 'session-legacy' as never,
+        toolName: 'Bash',
+        action: 'withdrawn',
+        cause: 'signal-abort',
+        createdAt: 1_000,
+      },
+    )
+    await delivery.close()
+
+    // Reopening proves the row round-trips through the persisted medium.
+    const reopened = await ctx.storageDomain.open(deliverySpec!)
+    expect(reopened.table('approval_audit').get(
+      domains.approvalAuditId('pc_legacy', 1_000),
+    )).toMatchObject({ action: 'withdrawn', cause: 'signal-abort' })
+    await reopened.close()
+
+    // The unit on disk stayed at v1; the binding domain is still readable.
+    expect(root).toBeDefined()
+    const bot = await ctx.storageDomain.open(feishuBotDomain)
+    expect(bot.table('bindings').get('oc_legacy' as never)).toMatchObject({
+      sessionId: 'session-legacy',
+    })
+    await bot.close()
+  })
 })
