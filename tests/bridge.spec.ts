@@ -4610,4 +4610,211 @@ describe('assembled bridge (M1 acceptance)', () => {
       expect(state!.task?.taskMessageId).toBeDefined()
     }, { timeout: 10_000, interval: 20 })
   })
+  it('answers a user question from Feishu instead of leaving it to the Web GUI', { timeout: 20_000 }, async () => {
+    // Reported: a question asked by the agent could only be answered in the
+    // Web GUI; Feishu showed nothing at all, so a phone-only operator was
+    // stuck. The bridge must present the question and settle the waterfall.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      {
+        agent,
+        questions: [{
+          id: 'q1',
+          question: '要用哪个数据库？',
+          options: [{ label: 'Postgres' }, { label: 'SQLite' }],
+        }],
+      },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('要用哪个数据库'))) {
+        throw new Error('question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    const questionCard = feishu.cards.findLast(card => JSON.stringify(card.card).includes('要用哪个数据库'))!
+    const value = cardButtonValue(questionCard.card, 'Postgres')
+    expect(value).toBeDefined()
+    await feishu.clickCard(OWNER, questionCard.messageId, value)
+
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: ['Postgres'] }],
+    })
+  })
+
+  it('accepts a free-text Feishu message as the answer to a pending question', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '项目叫什么名字？' }] },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('项目叫什么名字'))) {
+        throw new Error('question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // The operator simply types the answer; it must not be treated as a new task.
+    await deliver({ text: '就叫 dsh-feishu-bot' })
+
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: [], custom: '就叫 dsh-feishu-bot' }],
+    })
+  })
+
+  it('collects every choice for a multi-select question', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      {
+        agent,
+        questions: [{
+          id: 'q1',
+          question: '要启用哪些检查？',
+          multiSelect: true,
+          options: [{ label: 'lint' }, { label: 'typecheck' }],
+        }],
+      },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('要启用哪些检查'))) {
+        throw new Error('question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    const card = feishu.cards.findLast(c => JSON.stringify(c.card).includes('要启用哪些检查'))!
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'lint'))
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'typecheck'))
+
+    // Multi-select waits for explicit confirmation rather than settling on the
+    // first click, so the operator can revise the set.
+    const confirmCard = feishu.cards.findLast(c => JSON.stringify(c.card).includes('确认'))
+    await feishu.clickCard(OWNER, confirmCard.messageId, cardButtonValue(confirmCard.card, '确认'))
+
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: ['lint', 'typecheck'] }],
+    })
+  })
+
+  it('delegates a question for a session no chat is bound to', { timeout: 20_000 }, async () => {
+    // A question for a session with no bound chat must not be swallowed: the
+    // bridge delegates to the next answerer (the Web GUI) instead. The session
+    // is created directly rather than via /new, because /new is exactly what
+    // binds a chat and would make the bridge the legitimate answerer.
+    const { ctx, root } = await mountBridge(new MockAdapter([]))
+    const handle = await ctx.agents.create({
+      sessionId: 'unbound-question' as never,
+      agentOptions: { provider: 'mock', model: 'm' },
+      meta: { cwd: root },
+    })
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      { agent: handle.agent, questions: [{ id: 'q1', question: '谁来决定？' }] },
+      () => Promise.resolve({ answers: [{ id: 'q1', selected: ['web-decided'] }] }),
+    )
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: ['web-decided'] }],
+    })
+  })
+  it('supersedes an open question when a second one arrives, releasing the first', { timeout: 20_000 }, async () => {
+    // One card cannot hold two live question sets apart, so the newer question
+    // wins and the older call is released rather than left hanging forever.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const first = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '第一个问题？' }] },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('第一个问题'))) {
+        throw new Error('first question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    const second = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q2', question: '第二个问题？' }] },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('第二个问题'))) {
+        throw new Error('second question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // The superseded call is released, so its agent is not stuck.
+    await expect(first).rejects.toThrow(/not answered in Feishu/)
+    // The FIRST question's card must drop its buttons and say it went
+    // unanswered. The stub keeps every card version, so assert on the last card
+    // that still mentions the superseded question rather than on the newest
+    // card overall (which is the second question's).
+    await vi.waitFor(() => {
+      const superseded = feishu.cards.filter(c => JSON.stringify(c.card).includes('第一个问题')).at(-1)
+      expect(JSON.stringify(superseded?.card)).toContain('未作答')
+    }, { timeout: 5_000, interval: 20 })
+
+    // The newest question is the one still answerable. Search for the card that
+    // still carries a live 跳过 button: the newest version mentioning the
+    // question could be a settled card, which has no controls.
+    const card = feishu.cards.filter(c => cardButtonValue(c.card, '跳过') !== undefined
+      && JSON.stringify(c.card).includes('第二个问题')).at(-1)
+    expect(card).toBeDefined()
+    await feishu.clickCard(OWNER, card!.messageId, cardButtonValue(card!.card, '跳过'))
+    await expect(second).rejects.toThrow(/not answered in Feishu/)
+  })
+
+  it('leaves slash commands usable while a question is open', { timeout: 20_000 }, async () => {
+    // A question makes a bare message an answer, but /stop and friends must
+    // stay available: the operator may need to abandon the turn outright.
+    // Two guards enforce this (intake skips commands, and the answer path
+    // refuses a leading slash), so removing EITHER alone is masked by the
+    // other; this test only goes red when both are gone.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '还继续吗？' }] },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('还继续吗'))) {
+        throw new Error('question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // A command must be handled as a command, not swallowed as the answer.
+    await deliver({ text: '/help' })
+    await vi.waitFor(() => {
+      expect(JSON.stringify(feishu.sent.at(-1)?.text)).toContain('/new')
+    }, { timeout: 5_000, interval: 20 })
+
+    // The question is still open, so a plain message still answers it.
+    await deliver({ text: '继续' })
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: [], custom: '继续' }],
+    })
+  })
 })

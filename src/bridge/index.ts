@@ -10,7 +10,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { Session, SessionEvent, SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import {
@@ -77,6 +77,10 @@ import {
 } from './reliability.ts'
 import { ITEM_STATE_COPY, renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
 import {
+  QUESTION_CLICK, renderAnsweredQuestionCard, renderQuestionCard,
+  type QuestionCardItem, type QuestionCardSpec, type QuestionClickValue,
+} from './question.ts'
+import {
   approvalPairingProjectionDefinition,
   approvalPairingView,
   type ApprovalPairingState,
@@ -100,6 +104,9 @@ import {
 } from './session-list-card.ts'
 import type { ApprovalOutcome } from '@deepseek-ai/dsh-user-approval'
 import type {} from '@deepseek-ai/dsh-user-approval'
+import type { AskUserQuestionAnswer } from '@deepseek-ai/dsh-user-questions/types'
+import { UserQuestionError } from '@deepseek-ai/dsh-user-questions'
+import type {} from '@deepseek-ai/dsh-user-questions'
 
 /** Bridge configuration; every deployment-varying choice is a field here. */
 export interface Config {
@@ -1700,6 +1707,302 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     return Promise.race([feishuAnswer, webDecision])
   }, { prepend: true })
 
+  /**
+   * User-question channel: present an `ask_user_question` call to the bound
+   * chat and settle its waterfall from Feishu.
+   *
+   * One question per chat at a time. A second question arriving while one is
+   * open SUPERSEDES it: the older call is settled as skipped (`cancelled`) so
+   * its agent keeps moving, because a chat card offers no way to hold two live
+   * question sets apart and a silently dropped second question would strand
+   * the newer call instead. The operator sees the newest question, which is
+   * the one they are most likely being asked to answer.
+   *
+   * Answers route through this registry, never through card state, so a click
+   * on a superseded card reports the real fate instead of appearing to work.
+   */
+  interface PendingQuestion {
+    chatId: string
+    sessionId: string
+    callId: string | undefined
+    questions: readonly QuestionCardItem[]
+    spec: QuestionCardSpec
+    messageId?: string
+    /** Set when the question settles, even if its send is still in flight. */
+    settledCopy?: string
+    /** True once the settled card was actually patched, so it happens only once. */
+    outcomePublished?: boolean
+    settle: (answer: AskUserQuestionAnswer) => void
+    abandon: (reason: string) => void
+    detachAbort: () => void
+    settled: boolean
+  }
+  const pendingQuestions = new Map<string, PendingQuestion>()
+  const pendingQuestionOfChat = new Map<string, string>()
+
+  /** Answer copy for one settled question, as the collapsed card shows it. */
+  const describeAnswer = (questions: readonly QuestionCardItem[], answer: AskUserQuestionAnswer): string => {
+    const parts: string[] = []
+    for (const item of answer.answers) {
+      const question = questions.find(candidate => candidate.id === item.id)
+      const label = question?.header ?? question?.question ?? item.id
+      const chosen = [...item.selected]
+      if (item.custom !== undefined && item.custom !== '') chosen.push(item.custom)
+      parts.push(`${label} → ${chosen.length === 0 ? '（跳过）' : chosen.join('、')}`)
+    }
+    return parts.length === 0 ? '（跳过）' : parts.join('；')
+  }
+
+  /**
+   * Retire one pending question exactly once. Idempotent so the button path,
+   * the abort path, and the supersede path can all call it without racing:
+   * the first caller owns the registry removal and the final card patch.
+   */
+  const settleQuestion = (
+    pendingId: string,
+    outcome: { kind: 'answer'; answer: AskUserQuestionAnswer } | { kind: 'abandon'; reason: string },
+  ): boolean => {
+    const entry = pendingQuestions.get(pendingId)
+    if (entry === undefined || entry.settled) return false
+    entry.settled = true
+    entry.detachAbort()
+    pendingQuestions.delete(pendingId)
+    if (pendingQuestionOfChat.get(entry.chatId) === pendingId) {
+      pendingQuestionOfChat.delete(entry.chatId)
+    }
+    if (outcome.kind === 'answer') entry.settle(outcome.answer)
+    else entry.abandon(outcome.reason)
+    // Record the settled copy on the entry. The publish path replays it once
+    // it knows a message id, which matters when a question is superseded while
+    // its own send is still in flight: without this the abandoned card would
+    // stay on screen with buttons that no longer do anything.
+    entry.settledCopy = outcome.kind === 'answer'
+      ? describeAnswer(entry.questions, outcome.answer)
+      : `未作答（${outcome.reason}）`
+    if (entry.messageId !== undefined) publishQuestionOutcome(entry, pendingId)
+    return true
+  }
+
+  /** Show a settled question's outcome on the card that asked it. */
+  const publishQuestionOutcome = (entry: PendingQuestion, pendingId: string): void => {
+    if (entry.messageId === undefined || entry.settledCopy === undefined) return
+    if (entry.outcomePublished) return
+    entry.outcomePublished = true
+    const card = renderAnsweredQuestionCard(entry.spec, entry.settledCopy)
+    trackBackground(ctx.feishu.patchCard(entry.messageId, card).catch((error: unknown) => {
+      ctx.logger.warn('feishu-audit action=question-card-settle-failed chat=%s pending=%s error=%s',
+        auditHash(entry.chatId), auditHash(pendingId), safeErrorFact(error))
+    }))
+  }
+
+  const unregisterQuestionRequests = ctx.on('user-questions/request', async (req, next) => {
+    if (disposed) return next()
+    // A request without an agent names no session, so the bridge cannot tell
+    // whether a bound chat is asking; leave it to the next answerer.
+    if (req.agent === undefined) return next()
+    const sessionId = String(req.agent.session.id)
+    // Only a session bound to an active chat concerns Feishu; anything else
+    // must reach the next answerer (the Web GUI) untouched.
+    let boundChatId: string | undefined
+    for (const [chatId, binding] of bindings.entries()) {
+      if (binding.status === 'active' && (binding.sessionId as string) === sessionId) {
+        boundChatId = chatId
+        break
+      }
+    }
+    if (boundChatId === undefined) return next()
+
+    const questions: QuestionCardItem[] = req.questions.map(question => ({
+      id: question.id,
+      question: question.question,
+      ...(question.detail === undefined ? {} : { detail: question.detail }),
+      ...(question.header === undefined ? {} : { header: question.header }),
+      ...(question.options === undefined ? {} : {
+        options: question.options.map(option => ({
+          label: option.label,
+          ...(option.description === undefined ? {} : { description: option.description }),
+        })),
+      }),
+      ...(question.multiSelect === undefined ? {} : { multiSelect: question.multiSelect }),
+    }))
+    const pendingId = randomUUID()
+    const callId = req.wait?.callId === undefined ? undefined : String(req.wait.callId)
+    const spec: QuestionCardSpec = {
+      pendingId,
+      questions,
+      picked: {},
+      sessionTitle: req.agent.session.header.cwd?.split('/').filter(Boolean).at(-1)
+        ?? String(req.agent.session.id),
+      webUrl: config.webUrl,
+    }
+
+    // Supersede an open question in the same chat before publishing this one.
+    const openId = pendingQuestionOfChat.get(boundChatId)
+    if (openId !== undefined) {
+      settleQuestion(openId, { kind: 'abandon', reason: 'superseded' })
+      ctx.logger.info('feishu-audit action=question-superseded chat=%s superseded=%s by=%s',
+        auditHash(boundChatId), auditHash(openId), auditHash(pendingId))
+    }
+
+    // `let` + definite assignment: the resolver is captured by the entry below
+    // and invoked later, so this mirrors the approval channel's own shape.
+    let resolveAnswered!: (answer: AskUserQuestionAnswer) => void
+    const answered = new Promise<AskUserQuestionAnswer>((resolvePromise) => {
+      resolveAnswered = resolvePromise
+    })
+    let resolveSkipped!: (reason: string) => void
+    const skipped = new Promise<string>((resolvePromise) => {
+      resolveSkipped = resolvePromise
+    })
+    const abortController = new AbortController()
+    const onAbort = (): void => {
+      settleQuestion(pendingId, { kind: 'abandon', reason: 'withdrawn' })
+    }
+    if (req.signal !== undefined) {
+      if (req.signal.aborted) {
+        ctx.logger.info('feishu-audit action=question-aborted-before-publish chat=%s', auditHash(boundChatId))
+        return next()
+      }
+      req.signal.addEventListener('abort', onAbort, { once: true })
+    }
+
+    const entry: PendingQuestion = {
+      chatId: boundChatId,
+      sessionId,
+      callId,
+      questions,
+      spec,
+      settle: resolveAnswered,
+      abandon: resolveSkipped,
+      detachAbort: () => {
+        abortController.abort()
+        req.signal?.removeEventListener('abort', onAbort)
+      },
+      settled: false,
+    }
+    pendingQuestions.set(pendingId, entry)
+    pendingQuestionOfChat.set(boundChatId, pendingId)
+
+    const card = renderQuestionCard({ ...spec, questions })
+    try {
+      entry.messageId = await ctx.feishu.sendCard(boundChatId, card)
+      ctx.logger.info('feishu-audit action=question-asked chat=%s pending=%s call=%s count=%d',
+        auditHash(boundChatId), auditHash(pendingId), auditHash(callId ?? ''), questions.length)
+      // The question may have settled while this send was in flight; show that
+      // outcome now instead of leaving live-looking buttons behind.
+      publishQuestionOutcome(entry, pendingId)
+    } catch (error: unknown) {
+      // No card means the operator cannot answer: release the call rather than
+      // hanging the agent on a question nobody can see.
+      settleQuestion(pendingId, { kind: 'abandon', reason: 'card-send-failed' })
+      ctx.logger.warn('feishu-audit action=question-card-send-failed chat=%s pending=%s error=%s',
+        auditHash(boundChatId), auditHash(pendingId), safeErrorFact(error))
+      return next()
+    }
+
+    // A free-text reply is the answer; see `answerPendingQuestionWithText`.
+    return Promise.race([
+      answered,
+      skipped.then((reason): AskUserQuestionAnswer => {
+        throw new UserQuestionError(`question was not answered in Feishu (${reason})`, 'ASK_ABORTED')
+      }),
+    ])
+  }, { prepend: true })
+
+  /**
+   * Settle an open question from a plain chat message.
+   *
+   * A question card is the one time a bare message in a bound chat is an
+   * ANSWER rather than a new task, so this runs before task intake and consumes
+   * the message when it applies. Slash commands are never consumed: the
+   * operator must keep `/stop`, `/ls`, and the rest available while a question
+   * is open.
+   * @param message - the admitted inbound message.
+   * @returns true when the message was consumed as an answer.
+   */
+  const answerPendingQuestionWithText = (message: FeishuInboundMessage): boolean => {
+    const text = message.text?.trim() ?? ''
+    if (text === '' || text.startsWith('/')) return false
+    const pendingId = pendingQuestionOfChat.get(message.chatId)
+    if (pendingId === undefined) return false
+    const entry = pendingQuestions.get(pendingId)
+    if (entry === undefined) return false
+    if (message.messageId !== undefined && answerConsumed.has(message.messageId)) return false
+    if (message.messageId !== undefined) answerConsumed.add(message.messageId)
+    // Free text answers the FIRST question that has no selection yet; a
+    // question whose options are all single-select was already answered by the
+    // click, so the text belongs to the next one.
+    const target = entry.questions.find(question => (entry.spec.picked[question.id] ?? []).length === 0)
+      ?? entry.questions[0]
+    const answers = target === undefined
+      ? []
+      : [{ id: target.id, selected: [], custom: text }]
+    settleQuestion(pendingId, { kind: 'answer', answer: { answers } })
+    ctx.logger.info('feishu-audit action=question-answered-by-text chat=%s pending=%s bytes=%d',
+      auditHash(message.chatId), auditHash(pendingId), Buffer.byteLength(text, 'utf8'))
+    return true
+  }
+
+  /** Bound-message ids already consumed as answers, so a redelivery never double-settles. */
+  const answerConsumed = new Set<string>()
+
+  /**
+   * Apply one question-card button click.
+   * @param pendingId - the pending question the payload names.
+   * @param action - pick | confirm | skip.
+   * @param optionIndex - the option a pick names.
+   * @returns the toast to show the operator.
+   */
+  const handleQuestionClick = async (
+    pendingId: string, action: string, optionIndex: number | undefined,
+  ): Promise<{ toast: string }> => {
+    const entry = pendingQuestions.get(pendingId)
+    if (entry === undefined) {
+      return { toast: '该提问已结束' }
+    }
+    if (action === QUESTION_CLICK.skip) {
+      settleQuestion(pendingId, { kind: 'abandon', reason: 'skipped-by-operator' })
+      return { toast: '已跳过该提问' }
+    }
+    const question = entry.questions[0]
+    const options = question?.options ?? []
+    if (question === undefined || options.length === 0) return { toast: '该提问请直接回复文字作答' }
+    if (action === QUESTION_CLICK.pick && optionIndex !== undefined) {
+      const option = options[optionIndex]
+      if (option === undefined) return { toast: '该选项已失效' }
+      if (question.multiSelect !== true) {
+        settleQuestion(pendingId, {
+          kind: 'answer',
+          answer: { answers: [{ id: question.id, selected: [option.label] }] },
+        })
+        return { toast: `已选择：${option.label}` }
+      }
+      // Multi-select accumulates until the operator confirms the set.
+      const picked = new Set(entry.spec.picked[question.id] ?? [])
+      if (picked.has(optionIndex)) picked.delete(optionIndex)
+      else picked.add(optionIndex)
+      entry.spec = { ...entry.spec, picked: { ...entry.spec.picked, [question.id]: [...picked] } }
+      if (entry.messageId !== undefined) {
+        const card = renderQuestionCard({ ...entry.spec })
+        await ctx.feishu.patchCard(entry.messageId, card)
+      }
+      return { toast: picked.has(optionIndex) ? `已选择：${option.label}` : `已取消：${option.label}` }
+    }
+    if (action === QUESTION_CLICK.confirm) {
+      const picked = entry.spec.picked[question.id] ?? []
+      if (picked.length === 0) return { toast: '请先选择至少一项' }
+      const labels = picked
+        .map(index => options[index]?.label)
+        .filter((label): label is string => label !== undefined)
+      settleQuestion(pendingId, {
+        kind: 'answer',
+        answer: { answers: [{ id: question.id, selected: labels }] },
+      })
+      return { toast: `已确认：${labels.join('、')}` }
+    }
+    return { toast: '该操作已失效' }
+  }
+
   /** All card button clicks share one Gateway slot; dispatch by payload kind. */
   const unregisterCardActions = ctx.feishu.handleCardActions(async (action) => {
     if (disposed) return { toast: '该卡片已失效' }
@@ -1722,8 +2025,13 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           level?: 'workspaces' | 'sessions' | 'providers' | 'models' | 'efforts'
           workspaceIndex?: number
           effortId?: string
+          optionIndex?: number
         }
       : undefined
+    if (value?.kind === 'question') {
+      const questionValue = value as unknown as QuestionClickValue
+      return handleQuestionClick(questionValue.pendingId, questionValue.action, questionValue.optionIndex)
+    }
     if (value?.kind === 'session-list') return handleSessionListCardAction(action, value)
     if (value?.kind === 'model') return handleModelCardAction(action, value)
     const pendingId = value?.pendingId
@@ -3233,6 +3541,18 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       return
     }
     const command = parseCommand(message.text)
+    // An open question makes a plain message an ANSWER rather than a new task.
+    // Commands are excluded, so /stop and friends stay usable meanwhile.
+    if (command === undefined && answerPendingQuestionWithText(message)) {
+      await inboundEvents.put(inboundKey, {
+        kind: 'message',
+        chatId: message.chatId as FeishuChatId,
+        senderOpenId: message.senderOpenId as FeishuOpenId,
+        ...wireIds,
+        receivedAt, status: 'enqueued', reason: 'question-answer',
+      })
+      return
+    }
     if (command !== undefined) {
       const record: InboundCommand = {
         kind: 'command',
