@@ -5191,6 +5191,79 @@ describe('assembled bridge (M1 acceptance)', () => {
     }, { timeout: 5_000, interval: 20 })
   })
 
+  it('retires the question card when the request times out, so it cannot look answerable', { timeout: 20_000 }, async () => {
+    // Reported: a card whose request has expired keeps looking clickable. The
+    // timed ask aborts `request.signal` at its deadline, so the bridge is told;
+    // what matters is that the CARD is updated to match, otherwise the operator
+    // is left with buttons that silently do nothing.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const controller = new AbortController()
+    void ctx.waterfall('user-questions/request', {
+      agent,
+      signal: controller.signal,
+      questions: [{ id: 'q1', question: '超时前请回答', options: [{ label: '选项A' }] }],
+    }, () => new Promise(() => {})).catch(() => undefined)
+
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('超时前请回答'))) {
+        throw new Error('the question card never appeared')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // The deadline passes.
+    controller.abort()
+
+    await vi.waitFor(() => {
+      const settled = feishu.cards.filter(({ card }) => {
+        const json = JSON.stringify(card)
+        return json.includes('超时前请回答') && json.includes('未作答')
+      })
+      if (settled.length === 0) {
+        throw new Error('the card still looks answerable after the request expired')
+      }
+    }, { timeout: 5_000, interval: 20 })
+  })
+  it('retires the approval card when the request is abandoned, not just the record', { timeout: 20_000 }, async () => {
+    // Reported: an expired approval card keeps looking clickable, and the only
+    // way out is the Web GUI. When the request's lifetime ends the card must be
+    // updated to say so, or the operator is left clicking a dead button.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+    agent.session.append('approval/asked', {
+      id: 'bridge-expiry-1' as never,
+      toolName: 'Bash',
+    })
+    const controller = new AbortController()
+    void ctx.waterfall('approval/request', {
+      agent, toolName: 'Bash', signal: controller.signal,
+    }, () => new Promise(() => {})).catch(() => undefined)
+
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('审批请求'))) {
+        throw new Error('the approval card never appeared')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // The request's lifetime ends (e.g. the tool call timed out).
+    controller.abort()
+
+    await vi.waitFor(() => {
+      // The group card is COLLAPSED once nothing is pending, and it names the
+      // terminal state of the item it held. Asserting on that avoids pinning
+      // the internal wording of the expanded form.
+      const cards = feishu.cards.map(({ card }) => JSON.stringify(card))
+      const retired = cards.filter(json => json.includes('已收纳') && json.includes('已撤回'))
+      if (retired.length === 0) {
+        throw new Error('the approval card still looks clickable after the request ended')
+      }
+    }, { timeout: 5_000, interval: 20 })
+  })
 })
 
 /** The button style of each option on a question card, keyed by label. */
