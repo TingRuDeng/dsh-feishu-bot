@@ -5124,6 +5124,73 @@ describe('assembled bridge (M1 acceptance)', () => {
       if (!resumed) throw new Error('switching to a busy session showed no progress')
     }, { timeout: 5_000, interval: 20 })
   })
+  it('keeps the question card answerable while the Web GUI is NOT answering', { timeout: 20_000 }, async () => {
+    // Reported: question cards vanished. The Web race settles the Feishu card
+    // the moment the Web answerer resolves — and with no browser attached (or a
+    // session outside the browser's scope) `next()` resolves immediately by
+    // delegating onward. The card was therefore retired before the operator
+    // could ever click it.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    void ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '这个问题必须能点', options: [{ label: '是' }] }] },
+      // The Web side delegates onward instead of answering: no browser here.
+      (() => Promise.resolve({ answers: [{ id: 'q1', selected: [] }] })) as never,
+    ).catch(() => undefined)
+
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('这个问题必须能点'))) {
+        throw new Error('the question card never appeared')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // The operator must still be able to answer it: the card must NOT have been
+    // auto-retired to 未作答 just because the Web answerer resolved.
+    const live = feishu.cards.filter(({ card }) => {
+      const json = JSON.stringify(card)
+      return json.includes('这个问题必须能点') && !json.includes('已回答') && !json.includes('未作答')
+    })
+    expect(live.length).toBeGreaterThan(0)
+  })
+  it('shows the approval card even when an autonomous reviewer decides instantly', { timeout: 20_000 }, async () => {
+    // Reported: approval cards stopped appearing. The composed chain answers
+    // such requests on its own — this profile runs `smart-approval`, which has
+    // a model decide — so the operator may never see a card at all. This pins
+    // that the card is STILL published and then marked as decided elsewhere,
+    // rather than being skipped because nothing was pending by then.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()]
+      .map(session => ctx.agents.get(session.id))
+      .find(candidate => candidate !== undefined)!
+    agent.session.append('approval/asked', {
+      id: 'bridge-auto-reviewer-1' as never,
+      toolName: 'Bash',
+    })
+    // Stands in for the autonomous reviewer: answers before a human could.
+    ctx.on('approval/request', () => Promise.resolve('allowed-once' as const))
+
+    const outcome = await ctx.approval.request({ agent, toolName: 'Bash' })
+    expect(outcome).toBe('allowed-once')
+
+    // The decision must be visible in the chat: some card must carry it.
+    await vi.waitFor(() => {
+      const approval = feishu.cards.filter(({ card }) => {
+        const json = JSON.stringify(card)
+        return json.includes('审批') || json.includes('已在别处决定')
+      })
+      if (approval.length === 0) {
+        throw new Error('an auto-decided approval published no card at all')
+      }
+      expect(JSON.stringify(approval.at(-1)!.card)).toContain('已在别处决定')
+    }, { timeout: 5_000, interval: 20 })
+  })
+
 })
 
 /** The button style of each option on a question card, keyed by label. */
