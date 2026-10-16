@@ -100,3 +100,59 @@ if (entry === undefined || entry.settled) {
   目前只走 logger，不落盘，所以事后无法取证。**这是可改进项**。
 - 若绑定变更发生在审批等待期间，旧卡片答"该会话绑定已变更，审批按钮已失效"
   （与本次文案问题不同，属另一条路径，行为合理但同样会让人卡住）。
+
+## 八、审批审计已落盘（`29d1925`）
+
+第七节列出的"事后无法取证"已修复：每次审批结算都会写一行到
+**`approval_audit`** 表（`feishu_bot_delivery` 域）。
+
+### 字段
+
+| 字段 | 含义 |
+|---|---|
+| `action` | 终态：`withdrawn` / `invalidated` / `elsewhere` / `allowed` / `rejected` / `click-rejected` |
+| `cause` | **为什么**：`signal-abort`（回合被取消）/ `disposed` / `decided-elsewhere` / `decided` / `card-id-write` / `not-pending` |
+| `toolName` / `chatId` / `sessionId` / `approvalId` / `createdAt` | 定位信息 |
+
+关键点：**`cause` 能区分"有人真的在别处决定了"和"工具调用自己没了"** —— 这正是
+本次排查花了很长时间才靠读源码推断出来的结论。
+
+### 怎么查
+
+存储是纯 JSON，直接读：
+
+```bash
+python3 -c "
+import json
+d = json.load(open('$HOME/.dsh/storages/feishu_bot_delivery.json'))
+rows = d['tables'].get('approval_audit', {})
+for key, row in sorted(rows.items(), key=lambda kv: kv[1].get('createdAt', 0)):
+    print(row['action'], row['cause'], row.get('toolName'), row['createdAt'])
+"
+```
+
+或直接 grep：
+
+```bash
+grep -o '\"cause\":\"[a-z-]*\"' ~/.dsh/storages/feishu_bot_delivery.json | sort | uniq -c
+```
+
+### 保留策略
+
+独立于审批本身：默认 **30 天 / 10000 行**（`approvalAuditRetentionMs`、
+`approvalAuditMaxRecords`）。先按时间过期，再对**已过期**的行按最旧优先裁剪；
+若上限在保留未过期行的前提下无法满足，报告 backpressure 而非删除记录 ——
+与既有 planner 一致，不会为了凑数毁掉证据。
+
+### 升级安全性
+
+新表加在**既有的 v1** 域里，**没有**升 version —— 线上
+`feishu_bot_delivery` 是 v1 且只有两张表，升 version 会让所有已部署的
+存储单元无法打开。新增表直接以空表出现，`tests/domain-compat.spec.ts`
+用真实的旧版落盘 fixture 覆盖了这条升级路径。
+
+### 仍未做
+
+- 审计只覆盖**审批**生命周期，其余 ~59 种 `feishu-audit` 动作仍只走 logger。
+- 没有查询 UI/CLI：目前靠读 JSON（如上）。
+
