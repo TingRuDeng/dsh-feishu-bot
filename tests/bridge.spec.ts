@@ -3285,6 +3285,81 @@ describe('assembled bridge (M1 acceptance)', () => {
     })
   })
 
+  it('/new defaults to the workspace the operator last entered via /ls', { timeout: 20_000 }, async () => {
+    // Reported expectation: after picking a workspace in /ls, a following /new
+    // should create inside THAT workspace rather than the configured default.
+    // The two differ here on purpose: defaultWorkspace is `root`, while the
+    // operator navigates into root/alpha.
+    const { ctx, feishu, root, deliver, drain, workspaces } = await mountBridge(new MockAdapter([]))
+    const alpha = join(root, 'alpha')
+    await mkdir(alpha)
+    const { agent: seeded } = await ctx.agents.create({
+      sessionId: 'alpha-seeded' as never,
+      meta: { cwd: alpha },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    seeded.session.append('session/title' as never, {
+      title: 'Alpha 的会话', messageSeqs: [], source: { kind: 'user' },
+    } as never)
+
+    await deliver({ text: '/ls' })
+    const listing = feishu.cards.findLast(item => JSON.stringify(item.card).includes('选择工作空间'))!
+    // Entering the workspace is what records the operator's choice.
+    const workspaceValue = cardButtonValue(listing.card, '1. alpha（1 个会话）')
+      ?? cardButtonValue(listing.card, '2. alpha（1 个会话）')
+    await feishu.clickCard(OWNER, listing.messageId, workspaceValue)
+    await drain()
+
+    // Now /new with no explicit path must land in alpha.
+    await deliver({ text: '/new' })
+    const created = [...ctx.agents.list()].find(candidate => String(candidate.session.id).startsWith('feishu-'))
+    expect(created).toBeDefined()
+    expect(created!.session.header.cwd).toBe(await realpath(alpha))
+    const workspace = workspaces.find(candidate => candidate.sessionIds.includes(String(created!.session.id)))
+    expect(workspace?.path).toBe(await realpath(alpha))
+  })
+
+  it('/new falls back to defaultWorkspace when no workspace was entered', { timeout: 20_000 }, async () => {
+    // The remembered choice must not outlive its usefulness: without a /ls
+    // selection, /new keeps using the configured default.
+    const { ctx, feishu, root, deliver, workspaces } = await mountBridge(new MockAdapter([]))
+    await deliver({ text: '/new' })
+    expect(feishu.sent[0]!.text).toContain('已创建并绑定')
+    const created = [...ctx.agents.list()][0]
+    expect(created.session.header.cwd).toBe(await realpath(root))
+    const workspace = workspaces.find(candidate => candidate.sessionIds.includes(String(created.session.id)))
+    expect(workspace?.path).toBe(await realpath(root))
+  })
+
+  it('/new drops a remembered workspace that became unusable and uses the default', { timeout: 20_000 }, async () => {
+    // The remembered directory can vanish between the /ls that chose it and
+    // the /new that uses it. Blocking /new on a choice the operator can no
+    // longer see is worse than falling back to the configured default.
+    const { ctx, feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
+    const alpha = join(root, 'alpha')
+    await mkdir(alpha)
+    await ctx.agents.create({
+      sessionId: 'alpha-seeded' as never,
+      meta: { cwd: alpha },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+
+    await deliver({ text: '/ls' })
+    const listing = feishu.cards.findLast(item => JSON.stringify(item.card).includes('选择工作空间'))!
+    const workspaceValue = cardButtonValue(listing.card, '1. alpha（1 个会话）')
+      ?? cardButtonValue(listing.card, '2. alpha（1 个会话）')
+    await feishu.clickCard(OWNER, listing.messageId, workspaceValue)
+    await drain()
+
+    // The chosen directory disappears before /new runs.
+    await rm(alpha, { recursive: true, force: true })
+
+    await deliver({ text: '/new' })
+    expect(feishu.sent.at(-1)!.text).toContain('已创建并绑定')
+    const created = [...ctx.agents.list()].find(candidate => String(candidate.session.id).startsWith('feishu-'))
+    expect(created!.session.header.cwd).toBe(await realpath(root))
+  })
+
   it('/ls disambiguates duplicate workspace basenames without exposing parent paths', { timeout: 20_000 }, async () => {
     const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
     const left = join(root, 'left', 'shared')

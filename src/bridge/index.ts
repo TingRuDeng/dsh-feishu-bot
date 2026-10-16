@@ -590,6 +590,18 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   /** Last stable `/ls` snapshot per chat; card actions resolve token/index through this map. */
   const listings = new Map<string, SessionListing>()
 
+  /**
+   * Last workspace directory the operator entered via `/ls`, per chat.
+   *
+   * Picking a workspace is a statement of where the operator is working, so a
+   * following `/new` should create there instead of jumping back to the
+   * configured default. Deliberately process-local: it is a convenience that
+   * must decay to the configured default after a restart, and a stale entry
+   * that outlived its usefulness would silently send new sessions somewhere
+   * the operator did not ask for.
+   */
+  const preferredWorkspaces = new Map<string, string>()
+
   /** M7.1: last stable `/model` snapshot per chat (design §5.3). */
   interface ModelListing {
     token: string
@@ -2218,11 +2230,17 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         if (currentBinding?.status === 'active' && currentBinding.boundBy !== action.operatorOpenId) {
           return { toast: '只有当前会话的绑定者可以替换绑定' }
         }
+        // Entering a workspace states where the operator is working, even when
+        // it resolves to a single session and binds directly.
+        preferredWorkspaces.set(action.chatId, workspace.key)
         listing.state = 'binding'
         enqueueBinding(async () => (await workspaceSessionChoices(listing, workspaceIndex))?.[0])
         return { toast: '正在绑定会话…' }
       }
       listing.state = 'navigating'
+      // Entering a workspace states where the operator is working; a later
+      // /new should create here rather than in the configured default.
+      preferredWorkspaces.set(action.chatId, workspace.key)
       void enqueueChatWork(action.chatId, async () => {
         try {
           const choices = await workspaceSessionChoices(listing, workspaceIndex)
@@ -3008,10 +3026,27 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       }
       case 'new': {
         const currentBinding = bindings.get(chatId)
-        const cwdInput = command.cwd ?? config.defaultWorkspace
+        // An explicit path always wins. Otherwise create inside the workspace
+        // the operator last entered via /ls — that selection says where they
+        // are working — and fall back to the configured default.
+        const preferred = preferredWorkspaces.get(chatId)
+        const cwdInput = command.cwd ?? preferred ?? config.defaultWorkspace
         if (cwdInput === undefined) { await commit('未配置默认工作区，且未提供 cwd。'); return }
-        const authorized = await authorizeCwd(
+        let authorized = await authorizeCwd(
           command.cwd === undefined ? cwdInput : command.cwd, config.allowedWorkspaces)
+        // A remembered directory can disappear (or leave the allowlist) between
+        // the /ls that chose it and this /new. Drop the stale preference and
+        // use the configured default rather than blocking /new on a choice the
+        // operator cannot see. An explicit path still fails loudly: they asked.
+        if (!authorized.ok && command.cwd === undefined && preferred !== undefined) {
+          preferredWorkspaces.delete(chatId)
+          ctx.logger.info('feishu-audit action=new-preferred-workspace-dropped chat=%s path=%s reason=%s',
+            auditHash(chatId), auditHash(preferred), authorized.reason)
+          const fallback = config.defaultWorkspace
+          if (fallback !== undefined && fallback !== preferred) {
+            authorized = await authorizeCwd(fallback, config.allowedWorkspaces)
+          }
+        }
         if (!authorized.ok) { await commit(`目录不可用：${authorized.reason}`); return }
         const sessionId = `feishu-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}` as unknown as SessionId
         await stageTarget(sessionId as unknown as SessionIdString)
