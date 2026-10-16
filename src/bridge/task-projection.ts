@@ -52,8 +52,16 @@ const taskStateSchema = z.object({
     lastTurnStartTurn: z.number(),
     boundedByNextTask: z.boolean(),
     openTools: z.record(z.string(), z.string()),
+    /**
+     * Optional with a default: folds persisted before tool details existed
+     * carry no such field, and a required key would make those rows fail to
+     * load and silently drop a live task card across a restart.
+     */
+    openToolDetails: z.record(z.string(), z.string()).default({}),
     seenCalls: z.array(z.string()),
     recentTools: z.array(z.string()),
+    /** Aligned with `recentTools`; defaulted for the same compatibility reason. */
+    recentToolDetails: z.array(z.string()).default([]),
     startedChildren: z.array(z.string()),
     settledChildren: z.array(z.string()),
     resultCandidates: z.record(z.string(), z.object({ seq: z.number(), text: z.string() })),

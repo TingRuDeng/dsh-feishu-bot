@@ -16,7 +16,6 @@ import {
   foldFeishuTaskResults,
   reduceFeishuTask,
   reduceTaskCard,
-  type TaskCardSnapshot,
 } from '../src/bridge/task-card.ts'
 
 type Ev = { seq: number; time: number; type: string; data: unknown }
@@ -29,6 +28,9 @@ const turnStart = (turn = 1): Ev => ev('turn/start', { turn })
 const stepStart = (turn = 1, step = 1): Ev => ev('step/start', { turn, step })
 const toolCall = (callId: string, name: string, turn = 1, step = 1): Ev =>
   ev('tool/call', { turn, step, callId, name, arguments: '{"secret":"never-shown"}' })
+/** Same event with caller-chosen arguments; `seq` is assigned on this call. */
+const toolCallWithArgs = (callId: string, name: string, args: string, turn = 1, step = 1): Ev =>
+  ev('tool/call', { turn, step, callId, name, arguments: args })
 const toolResult = (callId: string, turn = 1, step = 1): Ev =>
   ev('tool/result', {
     turn, step,
@@ -82,6 +84,39 @@ describe('reduceTaskCard', () => {
     seq = 0
     const snap = reduceTaskCard([turnStart(), stepStart(), toolCall('c1', 'Bash')], 1)!
     expect(JSON.stringify(snap)).not.toContain('never-shown')
+  })
+
+  it('carries a human detail from the arguments of an open tool call', () => {
+    // The card must say WHAT a call is doing. Reading one whitelisted key is
+    // how it knows; every other key stays unread (see the leak test below).
+    // `ev` assigns `seq` in call order, so build the events in order.
+    seq = 0
+    const events = [turnStart(), stepStart(), toolCallWithArgs('c1', 'bash', '{"command":"pnpm test"}')]
+    const snap = reduceTaskCard(events, 1)!
+    expect(snap.currentTools).toEqual(['bash'])
+    expect(snap.toolDetails).toEqual({ bash: 'pnpm test' })
+  })
+
+  it('keeps the detail with the call after it completes', () => {
+    seq = 0
+    const events = [
+      turnStart(), stepStart(),
+      toolCallWithArgs('c1', 'read', '{"file_path":"src/bridge/index.ts"}'),
+      toolResult('c1'),
+    ]
+    const snap = reduceTaskCard(events, 1)!
+    expect(snap.currentTools).toEqual([])
+    expect(snap.recentToolDetails).toEqual({ read: 'src/bridge/index.ts' })
+  })
+
+  it('never reads an unrecognized argument key, even when it holds text', () => {
+    // The whitelist is the privacy boundary: a tool passing a credential in an
+    // unusual field must not get it rendered onto a chat card.
+    seq = 0
+    const events = [turnStart(), stepStart(), toolCallWithArgs('c1', 'login', '{"apiKey":"sk-do-not-render"}')]
+    const snap = reduceTaskCard(events, 1)!
+    expect(JSON.stringify(snap)).not.toContain('sk-do-not-render')
+    expect(snap.toolDetails).toEqual({})
   })
 
   it('completed turn → completed status with duration from turn boundaries', () => {

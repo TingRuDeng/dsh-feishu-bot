@@ -45,6 +45,50 @@ describe('renderTaskCard', () => {
     expect(card.elements[0]!.text.content.endsWith('思考中.....')).toBe(true)
   })
 
+  it('shows what a running tool is DOING, not only its name', () => {
+    // Reported: Feishu progress read like "bash… edit…", which says nothing
+    // about the work. The Web GUI shows a one-line detail taken from the
+    // call's arguments; the card must do the same.
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['Bash'],
+      toolDetails: { Bash: '运行 pnpm test' },
+      toolCallCount: 1,
+    })
+    const json = JSON.stringify(card)
+    expect(json).toContain('运行 pnpm test')
+    // The raw tool name must not be the whole story.
+    expect(json).not.toContain('Bash …')
+  })
+
+  it('falls back to the tool name when a call exposes no useful argument', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['Bash'],
+      toolDetails: { Bash: undefined },
+      toolCallCount: 1,
+    })
+    const json = JSON.stringify(card)
+    expect(json).toContain('Bash')
+  })
+
+  it('renders recent completed tools with their detail too', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: [],
+      recentTools: ['Bash'],
+      recentToolDetails: { Bash: '运行 ls -la' },
+      toolCallCount: 1,
+    })
+    // The card escapes Lark markdown, so assert on the rendered body rather
+    // than the raw JSON (a literal "-" arrives as "\-").
+    expect(card.elements[0]!.text.content).toContain('运行 ls \\-la')
+    expect(card.elements[0]!.text.content).not.toContain('✅ Bash')
+  })
+
   it('completed card carries no duplicate completion body text', () => {
     const card = renderTaskCard({ ...base, status: 'completed', currentTools: [], toolCallCount: 2, durationMs: 65_000 })
     const json = JSON.stringify(card)

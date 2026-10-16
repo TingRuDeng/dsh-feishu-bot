@@ -21,8 +21,16 @@ export interface TaskCardSnapshot {
   status: 'running' | 'completed' | 'stopped' | 'failed'
   /** Names of tools called but not yet resolved, in call order. Never arguments. */
   currentTools: string[]
+  /**
+   * One-line description of what each OPEN tool is doing, keyed by tool name
+   * and derived from that call's arguments (a command, a path, a query).
+   * Undefined when the call exposes nothing worth showing.
+   */
+  toolDetails?: Record<string, string | undefined>
   /** Names of the last few COMPLETED tools, oldest first (scrolling progress). */
   recentTools: string[]
+  /** Detail copy for {@link recentTools}, keyed by tool name. */
+  recentToolDetails?: Record<string, string | undefined>
   /** Total tool calls observed in this turn. */
   toolCallCount: number
   /** turn/start → turn/end span; null while running. */
@@ -96,9 +104,75 @@ export function isInternalTaskMessage(data: unknown): boolean {
   return kind === 'subagent-report' || kind === 'subagent-settled'
 }
 
+/**
+ * Argument keys worth showing as a one-line detail, most specific first.
+ *
+ * Mirrors the Web GUI's live tool detail so both frontends describe a call the
+ * same way. `title`/`description` come first because a tool that names its own
+ * work says it best; `command`/`path`/`pattern` cover the common shell and
+ * filesystem calls.
+ */
+const TOOL_DETAIL_KEYS = [
+  'title', 'description', 'objective', 'task', 'task_name', 'name',
+  'question', 'prompt', 'message', 'command', 'cmd', 'queries', 'query',
+  'pattern', 'url', 'uri', 'file_path', 'path', 'target', 'action', 'status',
+] as const
+
+/** Longest detail kept on a card; longer values are truncated with an ellipsis. */
+const TOOL_DETAIL_MAX_CHARS = 80
+
+/**
+ * One-line description of what a tool call is doing.
+ *
+ * A card that lists only tool names ("bash… edit…") tells the operator nothing
+ * about the work. The call's arguments are already in the session log, so the
+ * first key carrying text becomes the detail. This is deliberately a WHITELIST:
+ * an unrecognized argument is never rendered, so a tool that passes a secret in
+ * an unusual field cannot leak it onto a chat card.
+ * @param args - the call's decoded arguments, if any.
+ * @returns display copy, or undefined to let the renderer show the bare name.
+ */
+export function toolDetail(args: unknown): string | undefined {
+  if (typeof args === 'string') {
+    const parsed = args.trim()
+    if (parsed === '') return undefined
+    try {
+      return toolDetail(JSON.parse(parsed))
+    } catch {
+      // A non-JSON argument string is the detail itself (e.g. a raw prompt).
+      return clipDetail(parsed)
+    }
+  }
+  if (typeof args !== 'object' || args === null || Array.isArray(args)) return undefined
+  const record = args as Record<string, unknown>
+  for (const key of TOOL_DETAIL_KEYS) {
+    const value = record[key]
+    if (typeof value === 'string') {
+      const clipped = clipDetail(value)
+      if (clipped !== undefined) return clipped
+      continue
+    }
+    // A list of queries/patterns reads better joined than omitted; only the
+    // first few entries are kept so one huge array cannot fill the card.
+    if (Array.isArray(value)) {
+      const parts = value.filter((entry): entry is string => typeof entry === 'string')
+      if (parts.length === 0) continue
+      const joined = clipDetail(parts.slice(0, 3).join('、'))
+      if (joined !== undefined) return joined
+    }
+  }
+  return undefined
+}
+
+function clipDetail(text: string): string | undefined {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (normalized === '') return undefined
+  if (normalized.length <= TOOL_DETAIL_MAX_CHARS) return normalized
+  return `${normalized.slice(0, TOOL_DETAIL_MAX_CHARS - 1).trimEnd()}…`
+}
+
 /** Extract text blocks only from a tool result surface, never from arguments. */
-function contentTexts(value: unknown): string[] {
-  if (!Array.isArray(value)) return []
+function contentTexts(value: unknown): string[] {  if (!Array.isArray(value)) return []
   const texts: string[] = []
   for (const block of value) {
     if (typeof block !== 'object' || block === null) continue
@@ -175,10 +249,13 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
   let lastSequence = -1
   /** callId → tool name, insertion-ordered (Map preserves call order). */
   const open = new Map<string, string>()
+  /** callId → one-line detail from that call's arguments, when it has one. */
+  const openDetails = new Map<string, string>()
   /** A stable call id represents one timeline row even when progress is refreshed. */
   const seenCalls = new Set<string>()
   const RECENT_CAP = 5
   const recent: string[] = []
+  const recentDetails: string[] = []
 
   for (const event of events) {
     const data = event.data as { turn?: number }
@@ -197,12 +274,15 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
         break
       case 'tool/call': {
         seen = true
-        const call = event.data as { callId: string; name: string }
+        const call = event.data as { callId: string; name: string; arguments?: unknown }
         if (!seenCalls.has(call.callId)) {
           seenCalls.add(call.callId)
           toolCallCount++
         }
         open.set(call.callId, call.name)
+        const detail = toolDetail(call.arguments)
+        if (detail === undefined) openDetails.delete(call.callId)
+        else openDetails.set(call.callId, detail)
         break
       }
       case 'tool/result': {
@@ -212,8 +292,14 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
           const name = open.get(callId)
           if (name !== undefined) {
             recent.push(name)
-            if (recent.length > RECENT_CAP) recent.shift()
+            recentDetails.push(openDetails.get(callId) ?? name)
+            while (recent.length > RECENT_CAP) {
+              recent.shift()
+              recentDetails.shift()
+            }
           }
+          open.delete(callId)
+          openDetails.delete(callId)
           open.delete(callId)
         }
         break
@@ -245,6 +331,7 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
         }
         durationMs = startedAt === null ? null : event.time - startedAt
         open.clear()
+        openDetails.clear()
         break
       }
       default:
@@ -259,7 +346,12 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
     turn,
     status,
     currentTools: [...open.values()],
+    toolDetails: Object.fromEntries(
+      [...open].map(([callId, name]) => [name, openDetails.get(callId)] as const)
+        .filter(([, detail]) => detail !== undefined)),
     recentTools: recent,
+    recentToolDetails: Object.fromEntries(
+      recent.map((name, index) => [name, recentDetails[index]])),
     toolCallCount,
     durationMs,
     startedAt,
@@ -344,8 +436,12 @@ export interface FeishuTaskFoldState {
   lastTurnStartTurn: number
   boundedByNextTask: boolean
   openTools: Record<string, string>
+  /** One-line detail per OPEN callId, harvested from its arguments. */
+  openToolDetails: Record<string, string>
   seenCalls: string[]
   recentTools: string[]
+  /** Detail copy aligned with {@link recentTools}, oldest first. */
+  recentToolDetails: string[]
   startedChildren: string[]
   settledChildren: string[]
   resultCandidates: Record<string, { seq: number; text: string }>
@@ -373,8 +469,10 @@ export function initFeishuTaskFoldState(fromSeq: number): FeishuTaskFoldState {
     lastTurnStartTurn: 0,
     boundedByNextTask: false,
     openTools: {},
+    openToolDetails: {},
     seenCalls: [],
     recentTools: [],
+    recentToolDetails: [],
     startedChildren: [],
     settledChildren: [],
     resultCandidates: {},
@@ -484,8 +582,10 @@ function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): voi
   let lastTurnStartTime = state.lastTurnStartTime
   let lastTurnStartTurn = state.lastTurnStartTurn
   const openTools = new Map(Object.entries(state.openTools))
+  const openToolDetails = new Map(Object.entries(state.openToolDetails))
   const seenCalls = new Set(state.seenCalls)
   const recentTools = [...state.recentTools]
+  const recentToolDetails = [...state.recentToolDetails]
   const startedChildren = new Set(state.startedChildren)
   const settledChildren = new Set(state.settledChildren)
   const resultCandidates = new Map(
@@ -505,13 +605,18 @@ function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): voi
         lastTurnStartTurn = turn
         break
       case 'tool/call': {
-        const call = event.data as { callId?: unknown; name?: unknown }
+        const call = event.data as { callId?: unknown; name?: unknown; arguments?: unknown }
         if (typeof call.callId !== 'string' || typeof call.name !== 'string') break
         if (!seenCalls.has(call.callId)) {
           seenCalls.add(call.callId)
           toolCallCount++
         }
         openTools.set(call.callId, call.name)
+        // Keep the detail beside the call so a card refresh mid-call shows what
+        // is running, and a finished call can carry it into the recent list.
+        const detail = toolDetail(call.arguments)
+        if (detail === undefined) openToolDetails.delete(call.callId)
+        else openToolDetails.set(call.callId, detail)
         break
       }
       case 'tool/result': {
@@ -521,9 +626,14 @@ function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): voi
           const name = openTools.get(callId)
           if (name !== undefined) {
             recentTools.push(name)
-            if (recentTools.length > 5) recentTools.shift()
+            recentToolDetails.push(openToolDetails.get(callId) ?? name)
+            while (recentTools.length > 5) {
+              recentTools.shift()
+              recentToolDetails.shift()
+            }
           }
           openTools.delete(callId)
+          openToolDetails.delete(callId)
         }
         break
       }
@@ -555,6 +665,7 @@ function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): voi
         lastTurnEndSeq = event.seq
         lastEndedTurn = turn
         openTools.clear()
+        openToolDetails.clear()
         if (mapped.status === 'completed') {
           const candidate = resultCandidates.get(turn)
           if (candidate !== undefined) result = candidate
@@ -580,8 +691,10 @@ function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): voi
   state.lastTurnStartTime = lastTurnStartTime
   state.lastTurnStartTurn = lastTurnStartTurn
   state.openTools = Object.fromEntries(openTools)
+  state.openToolDetails = Object.fromEntries(openToolDetails)
   state.seenCalls = [...seenCalls]
   state.recentTools = recentTools
+  state.recentToolDetails = recentToolDetails
   state.startedChildren = [...startedChildren]
   state.settledChildren = [...settledChildren]
   state.resultCandidates = Object.fromEntries(
@@ -613,7 +726,13 @@ export function feishuTaskFoldFromState(state: FeishuTaskFoldState): FeishuTaskF
       turn,
       status,
       currentTools: Object.values(openTools),
+      toolDetails: Object.fromEntries(
+        Object.entries(openTools)
+          .map(([callId, name]) => [name, state.openToolDetails[callId]] as const)
+          .filter(([, detail]) => detail !== undefined)),
       recentTools: state.recentTools,
+      recentToolDetails: Object.fromEntries(
+        state.recentTools.map((name, index) => [name, state.recentToolDetails[index]])),
       toolCallCount,
       durationMs: settled && startedAt !== null && endedAt !== null ? endedAt - startedAt : null,
       startedAt,
@@ -794,8 +913,15 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   const lines: string[] = []
   if (snapshot.status === 'running') {
     if (snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0) {
-      for (const name of snapshot.recentTools) lines.push(`✅ ${escapeLarkMarkdownLiteral(name)}`)
-      for (const name of snapshot.currentTools) lines.push(`▸ ${escapeLarkMarkdownLiteral(name)} …`)
+      // Prefer what the call is DOING over its bare name: "运行 pnpm test"
+      // tells the operator far more than "bash …".
+      for (const name of snapshot.recentTools) {
+        const detail = snapshot.recentToolDetails?.[name]
+        lines.push(`✅ ${escapeLarkMarkdownLiteral(detail ?? name)}`)
+      }
+      for (const name of snapshot.currentTools) {
+        lines.push(`▸ ${escapeLarkMarkdownLiteral(snapshot.toolDetails?.[name] ?? name)} …`)
+      }
       lines.push(`已调用工具 ${snapshot.toolCallCount} 次`)
     }
   } else {
