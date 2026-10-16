@@ -4817,4 +4817,111 @@ describe('assembled bridge (M1 acceptance)', () => {
       answers: [{ id: 'q1', selected: [], custom: '继续' }],
     })
   })
+  it('keeps each multi-select pick marked on the card after the click', { timeout: 20_000 }, async () => {
+    // Reported live: the button only turned blue at the moment of the click and
+    // then reverted, so the operator could not see which options were already
+    // chosen. The patch that follows a pick must therefore render the
+    // accumulated set, and it must survive a SECOND pick (which is when the
+    // first one was observed to be lost).
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      {
+        agent,
+        questions: [{
+          id: 'q1',
+          question: '要启用哪些检查？',
+          multiSelect: true,
+          options: [{ label: 'lint' }, { label: 'typecheck' }, { label: 'unit' }],
+        }],
+      },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('要启用哪些检查'))) {
+        throw new Error('question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    const card = feishu.cards.findLast(c => cardButtonValue(c.card, 'lint') !== undefined)!
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'lint'))
+
+    // The newest version of the card must show lint as selected.
+    const afterFirst = feishu.cards.filter(c => c.messageId === card.messageId).at(-1)!
+    expect(pickStyles(afterFirst.card)).toEqual({ lint: 'primary', typecheck: 'default', unit: 'default' })
+
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'typecheck'))
+
+    // Both picks stay marked: the second click must ADD to the set, not reset it.
+    const afterSecond = feishu.cards.filter(c => c.messageId === card.messageId).at(-1)!
+    expect(pickStyles(afterSecond.card)).toEqual({ lint: 'primary', typecheck: 'primary', unit: 'default' })
+
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '确认'))
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: ['lint', 'typecheck'] }],
+    })
+  })
+
+  it('unmarks an option when it is picked a second time', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      {
+        agent,
+        questions: [{
+          id: 'q1', question: '要启用哪些检查？', multiSelect: true,
+          options: [{ label: 'lint' }, { label: 'typecheck' }],
+        }],
+      },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('要启用哪些检查'))) {
+        throw new Error('question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    const card = feishu.cards.findLast(c => cardButtonValue(c.card, 'lint') !== undefined)!
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'lint'))
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'lint'))
+
+    const latest = feishu.cards.filter(c => c.messageId === card.messageId).at(-1)!
+    expect(pickStyles(latest.card)).toEqual({ lint: 'default', typecheck: 'default' })
+
+    // Toggling everything off and confirming must refuse, not answer emptily.
+    const toast = await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '确认'))
+    expect(toast?.toast).toContain('请先选择')
+    expect(JSON.stringify(feishu.cards.filter(c => c.messageId === card.messageId).at(-1)!.card))
+      .not.toContain('已回答')
+    // Still open, so the operator can carry on.
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'typecheck'))
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '确认'))
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: ['typecheck'] }],
+    })
+  })
 })
+
+/** The button style of each option on a question card, keyed by label. */
+function pickStyles(card: object): Record<string, string> {
+  const styles: Record<string, string> = {}
+  for (const element of (card as { elements?: unknown[] }).elements ?? []) {
+    const actions = (element as { actions?: unknown }).actions
+    if (!Array.isArray(actions)) continue
+    for (const action of actions) {
+      const button = action as { tag?: string; type?: string; text?: { content?: string } }
+      if (button.tag !== 'button' || button.text?.content === undefined) continue
+      if (button.text.content === '确认' || button.text.content === '跳过') continue
+      styles[button.text.content] = button.type ?? 'default'
+    }
+  }
+  return styles
+}

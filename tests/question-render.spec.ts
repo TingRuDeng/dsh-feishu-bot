@@ -68,8 +68,36 @@ describe('renderQuestionCard', () => {
       }],
     })
     const buttons = collectButtons(card)
-    expect(buttons[0]!.type).toBe('default')
+    // An unpicked button must carry NO `type` key at all. Emitting the literal
+    // string `default` was observed live to leave the button unmarked, which
+    // made the accumulated selection look forgotten.
+    expect(noTypeKeys(optionButtons(card))).toEqual(['lint'])
     expect(buttons[1]!.type).toBe('primary')
+  })
+
+  it('never sends the literal string `default` as a button type', () => {
+    // Only `primary`/`danger` are ever sent. The neutral style is the ABSENCE
+    // of the key: a literal `default` was observed live to leave an unpicked
+    // option unmarked, which made the selection look like it had been reset.
+    const cards = [
+      renderQuestionCard({
+        ...base,
+        questions: [{ id: 'q1', question: 'q', multiSelect: true, options: [{ label: 'lint' }] }],
+      }),
+      renderQuestionCard({
+        ...base,
+        picked: { q1: [0] },
+        questions: [{ id: 'q1', question: 'q', multiSelect: true, options: [{ label: 'lint' }] }],
+      }),
+      renderQuestionCard({
+        ...base,
+        questions: [{ id: 'q1', question: 'q' }],
+      }),
+      renderAnsweredQuestionCard({ questions: [{ id: 'q1', question: 'q' }], sessionTitle: 's' }, 'a'),
+    ]
+    for (const card of cards) {
+      expect(JSON.stringify(card)).not.toContain('"type":"default"')
+    }
   })
 
   it('shows a question header only when the caller supplied one', () => {
@@ -101,12 +129,13 @@ describe('renderQuestionCard', () => {
 })
 
 /** Every button on a card, in render order (the shapes Feishu accepts). */
-function collectButtons(card: { elements: unknown[] }): {
-  text: { content: string }
-  type: string
-  value: { action: string; optionIndex?: number }
+function rawButtons(card: { elements: unknown[] }): {
+  label: string
+  type: unknown
+  action: string
+  optionIndex?: number
 }[] {
-  const buttons: { text: { content: string }; type: string; value: { action: string } }[] = []
+  const buttons: { label: string; type: unknown; action: string; optionIndex?: number }[] = []
   for (const element of card.elements) {
     const actions = (element as { actions?: unknown }).actions
     if (!Array.isArray(actions)) continue
@@ -114,16 +143,40 @@ function collectButtons(card: { elements: unknown[] }): {
       const button = action as {
         tag?: string
         text?: { content?: string }
-        type?: string
+        type?: unknown
         value?: { action?: string; optionIndex?: number }
       }
       if (button.tag !== 'button' || button.text?.content === undefined) continue
       buttons.push({
-        text: { content: button.text.content },
-        type: button.type ?? 'default',
-        value: { action: button.value?.action ?? '', optionIndex: button.value?.optionIndex },
+        label: button.text.content,
+        type: button.type,
+        action: button.value?.action ?? '',
+        optionIndex: button.value?.optionIndex,
       })
     }
   }
   return buttons
+}
+
+/** Only the option buttons, i.e. excluding the 确认/跳过 controls. */
+function optionButtons(card: { elements: unknown[] }): ReturnType<typeof rawButtons> {
+  return rawButtons(card).filter(button => button.action === QUESTION_CLICK.pick)
+}
+
+/** Labels of buttons that carry no `type` key at all (Feishu's neutral style). */
+function noTypeKeys(buttons: ReturnType<typeof rawButtons>): string[] {
+  return buttons.filter(button => button.type === undefined).map(button => button.label)
+}
+
+/** Every button on a card, with a resolved style for order/equality assertions. */
+function collectButtons(card: { elements: unknown[] }): {
+  text: { content: string }
+  type: string
+  value: { action: string; optionIndex?: number }
+}[] {
+  return rawButtons(card).map(button => ({
+    text: { content: button.label },
+    type: typeof button.type === 'string' ? button.type : 'default',
+    value: { action: button.action, optionIndex: button.optionIndex },
+  }))
 }

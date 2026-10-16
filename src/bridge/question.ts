@@ -109,11 +109,14 @@ export function renderQuestionCard(spec: QuestionCardSpec): FeishuActionCard {
         actions: options.map((option, optionIndex) => ({
           tag: 'button',
           text: { tag: 'plain_text', content: escapeLarkMarkdownLiteral(option.label, OPTION_BYTE_BUDGET) },
-          // A multi-select shows its accumulated choice in the button style so
-          // the operator can see the set before confirming it.
-          type: question.multiSelect === true
-            ? (picked.includes(optionIndex) ? 'primary' : 'default')
-            : 'primary',
+          // A multi-select shows its accumulated choice by styling the picked
+          // buttons primary. An UNPICKED button omits `type` entirely rather
+          // than sending `default`: that is what every other card in this
+          // codebase does, and a literal `default` was observed live to leave
+          // the button unmarked, so the selection appeared to be forgotten.
+          ...(question.multiSelect === true && !picked.includes(optionIndex)
+            ? {}
+            : { type: 'primary' as const }),
           value: {
             kind: 'question',
             pendingId: spec.pendingId,
@@ -166,10 +169,11 @@ export function renderQuestionCard(spec: QuestionCardSpec): FeishuActionCard {
 }
 
 function skipButton(pendingId: string): unknown {
+  // No `type`: the neutral style is the ABSENCE of the key (see the option
+  // buttons above), not the literal string `default`.
   return {
     tag: 'button',
     text: { tag: 'plain_text', content: '跳过' },
-    type: 'default',
     value: { kind: 'question', pendingId, action: QUESTION_CLICK.skip } satisfies QuestionClickValue,
   }
 }
