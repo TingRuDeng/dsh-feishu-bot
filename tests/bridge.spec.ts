@@ -4959,6 +4959,109 @@ describe('assembled bridge (M1 acceptance)', () => {
     await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, 'OK'))
     await expect(outcome).resolves.toEqual({ answers: [{ id: 'q1', selected: ['OK'] }] })
   })
+  it('opens a progress card for a task started in the Web GUI after binding', { timeout: 20_000 }, async () => {
+    // Reported: switching back to a session that has a task running in the Web
+    // GUI gave no sign of it in Feishu, and no progress was mirrored. Adoption
+    // only ran at BINDING time (adoptRunningTask from /use and /ls), so a task
+    // started later — the common case — was invisible: the session/event
+    // listener dropped every event because no tracker existed for the chat.
+    // One scripted reply per turn: the mock throws "script exhausted" and the
+    // turn fails otherwise.
+    const { ctx, feishu, deliver } = await mountBridge(
+      new MockAdapter([textResponse('飞书侧任务结果'), textResponse('Web 侧任务完成')]),
+    )
+    await deliver({ text: '/new' })
+    const agent = [...ctx.sessions.list()]
+      .map(session => ctx.agents.get(session.id))
+      .find(candidate => candidate !== undefined)!
+
+    // Finish a Feishu-originated task first, so the chat holds a FROZEN tracker
+    // for it — the state a later Web task has to displace.
+    await deliver({ text: '先跑一个飞书任务' })
+    await agent.whenIdle()
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('飞书侧任务结果'))) {
+        throw new Error('the first task has not settled in Feishu yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+    const cardsBefore = feishu.cards.length
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: '从 Web 发起的新任务' }],
+      source: { kind: 'user', via: 'web' } as never,
+    }))
+
+    // A card must be opened for the Web-originated task without any new /use or
+    // /ls binding, and its result must land in the same chat.
+    await agent.whenIdle()
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('Web 侧任务完成'))) {
+        throw new Error('Web task result has not reached Feishu yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // The Web task owns exactly one card, tracked under a message id of its
+    // own — not the id of the card the finished Feishu task used.
+    const webCardIds = new Set(feishu.cards
+      .filter(({ card }) => JSON.stringify(card).includes('Web 侧任务完成'))
+      .map(card => card.messageId))
+    expect(webCardIds.size).toBe(1)
+    // Its progress was mirrored onto that card, not sent as a bare text reply.
+    expect(feishu.cards.length).toBeGreaterThan(cardsBefore)
+    expect(feishu.sent.some(({ text }) => text.includes('Web 侧任务完成'))).toBe(false)
+  })
+  it('mirrors a Web task that is ALREADY RUNNING when the chat binds to it', { timeout: 20_000 }, async () => {
+    // The reported case: a task is already running in the Web GUI, and the
+    // operator switches the Feishu chat onto that session ("切换到 web 有任务的
+    // 会话"). Binding must adopt the in-flight task and publish its progress,
+    // because no session/event will arrive for a turn that started earlier.
+    const { ctx, feishu, deliver } = await mountBridge(
+      new MockAdapter(['hang', textResponse('绑定前就在跑的任务完成')]),
+    )
+    // Bind a first chat so a session exists, then let it go idle-agnostic.
+    await deliver({ text: '/new' })
+    const agent = [...ctx.sessions.list()]
+      .map(session => ctx.agents.get(session.id))
+      .find(candidate => candidate !== undefined)!
+
+    // Start a task from the Web side and leave it RUNNING (adapter hangs).
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Web 侧长任务' }],
+      source: { kind: 'user', via: 'web' } as never,
+    }))
+    // Wait until the Web turn is genuinely in flight.
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('思考中'))) {
+        throw new Error('the running Web task has no progress card yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+    const whileRunning = feishu.cards.filter(({ card }) => JSON.stringify(card).includes('思考中')).length
+
+    // Re-bind the chat onto that very session: adoption must re-publish the
+    // running task's card rather than leave the session looking idle.
+    await deliver({ text: '/use ' + String([...ctx.sessions.list()][0]!.id) })
+    await vi.waitFor(() => {
+      const resumed = feishu.cards.filter(({ card }) => JSON.stringify(card).includes('思考中')).length
+      if (resumed <= whileRunning) throw new Error('binding did not re-publish the running task')
+    }, { timeout: 5_000, interval: 20 })
+  })
+  // The cold-resume path — a task still RUNNING when the process restarts — has
+  // no end-to-end test here, and is deliberately not asserted green.
+  //
+  // Established: catchUpBoundSessions replays settled RESULTS only, so a task
+  // that has not finished gets no card at startup. resumeRunningTask() rebuilds
+  // the fold from the durable event log and hands it to the card actor, which
+  // is what lets a card be opened before the session is resumed.
+  //
+  // An earlier diagnosis blamed validateBindings() for marking the binding
+  // `unavailable`. That was WRONG: it was an artefact of this fixture, whose
+  // session never reaches disk. Checked against the real profile, the binding's
+  // session artifact is present and the binding stays active.
+  //
+  // A faithful restart fixture therefore needs a session log that actually
+  // persists. tests/zz-cold-resume.spec.ts pins the FOLD against a real log;
+  // it does not cover the wiring, so the integration still needs a live check.
+
 })
 
 /** The button style of each option on a question card, keyed by label. */

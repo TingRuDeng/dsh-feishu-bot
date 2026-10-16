@@ -64,7 +64,9 @@ import {
   type TokenInfo,
 } from './task-card.ts'
 import {
+  feishuTaskApply,
   feishuTaskFoldOf,
+  feishuTaskInit,
   feishuTaskProjectionDefinition,
   type FeishuTaskState,
 } from './task-projection.ts'
@@ -991,6 +993,12 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     taskMessageId: string
     /** Bound session needed when a pending timer is promoted during drain. */
     sessionId: SessionIdString
+    /**
+     * Fold rebuilt from the durable event log, set only when the session is not
+     * live (a task still running at startup). Without it the actor could not
+     * render a card for a session the runtime has not resumed yet.
+     */
+    coldFold?: FeishuTaskFold
     messageId: string | undefined
     /** A newer session snapshot has been accepted by this actor. */
     dirty: boolean
@@ -1024,20 +1032,23 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     const actor = (async () => {
       try {
         const session = ctx.sessions.list().find(s => String(s.id) === (sessionId as string))
-        if (session === undefined) return
-        const folded = currentTaskFold(session)
+        // A session still running at startup is not resumed yet, so it has no
+        // projection to read: the tracker carries the fold rebuilt from the
+        // durable log instead. Everything below needs only that fold, except
+        // the optional token meter, which is simply skipped.
+        const folded = session === undefined ? tracker.coldFold : currentTaskFold(session)
         if (folded === undefined || folded.taskMessageId !== tracker.taskMessageId) return
         const snapshot = folded.snapshot
         // tokenMeter is optional: measurement failure removes only the token line.
         const meter = ctx.get('tokenMeter') as { measure?: (s: unknown) => { totalTokens: number; baseline: { kind: string } } } | undefined
         let tokens: TokenInfo | undefined
         try {
-          const measured = meter?.measure?.(session)
+          const measured = session === undefined ? undefined : meter?.measure?.(session)
           if (measured !== undefined) {
             tokens = { totalTokens: measured.totalTokens, anchored: measured.baseline.kind === 'usage' }
           }
         } catch { /* card facts remain valid without token measurement */ }
-        const cwd = session.header.cwd
+        const cwd = session?.header.cwd
         const workspace = workspaceLabel(cwd)
         const title = cwd === undefined ? undefined : workspace
         const card = renderTaskCard(snapshot, tokens, title === undefined ? undefined : {
@@ -1103,16 +1114,20 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   }
 
   /** Rebuild the currently open Web task as the authoritative Feishu progress card. */
-  const adoptRunningTask = (chatId: string, sessionId: SessionIdString): void => {
+  const adoptRunningTask = (
+    chatId: string, sessionId: SessionIdString, coldFold?: FeishuTaskFold,
+  ): void => {
     const session = ctx.sessions.list().find(candidate => String(candidate.id) === String(sessionId))
-    if (session === undefined) return
-    const folded = currentTaskFold(session)
+    // `coldFold` is the caller's fold rebuilt from the durable log; it is the
+    // only source available when the session has not been resumed yet.
+    const folded = coldFold ?? (session === undefined ? undefined : currentTaskFold(session))
     if (folded === undefined || folded.settled) return
     const tracker: CardTracker = {
       turn: folded.snapshot.turn,
       taskStartSeq: folded.taskStartSeq,
       taskMessageId: folded.taskMessageId,
       sessionId,
+      ...(coldFold === undefined ? {} : { coldFold }),
       messageId: undefined,
       dirty: false,
       terminalRequested: false,
@@ -3933,7 +3948,42 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     for (const [chatId, binding] of bindings.entries()) {
       if (binding.status !== 'active') continue
       void enqueueChatWork(chatId, () => catchUpProjection(chatId, binding.sessionId))
+      // catchUpProjection replays settled RESULTS only. A task that is still
+      // RUNNING when the process starts has no card and no result to replay, so
+      // a chat bound to it looked idle while work was happening — the operator
+      // could not tell from Feishu that the session was busy. Adoption reads
+      // the durable event log, so it survives the restart that dropped the
+      // in-memory tracker.
+      void enqueueChatWork(chatId, () => resumeRunningTask(chatId, binding.sessionId))
     }
+  }
+
+  /**
+   * Re-open the progress card of a task that was already running at startup.
+   *
+   * The restart sweep deliberately rebuilds no card for a FINISHED task
+   * (design §6.3 — an old card would be noise, and its result is delivered
+   * separately). A task still in flight is the opposite case: the operator is
+   * waiting on it, so its card is the thing they need. The fold is rebuilt from
+   * the durable log, which is what makes this work across a restart.
+   */
+  async function resumeRunningTask(chatId: FeishuChatId, sessionId: SessionIdString): Promise<void> {
+    if (disposed) return
+    const existing = cards.get(chatId)
+    // A live tracker means this session already has a card; never open a second.
+    if (existing !== undefined && !existing.frozen) return
+    // The fold is rebuilt from the durable event log rather than read from a
+    // live session: at startup none is registered yet (ctx.sessions.list() is
+    // empty), and `sessionEventsFrom` already reads storage when a session is
+    // not live. This is what lets the resume work across a restart.
+    const events = await sessionEventsFrom(sessionId, 0)
+    if (events.length === 0) return
+    let state = feishuTaskInit()
+    for (const event of events) state = feishuTaskApply(state, event as never)
+    const folded = feishuTaskFoldOf(state)
+    if (folded === undefined || folded.settled) return
+    if (disposed) return
+    adoptRunningTask(chatId, sessionId, folded)
   }
 
   /**
