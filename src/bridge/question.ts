@@ -127,14 +127,18 @@ export function questionBodyElements(spec: QuestionCardSpec): unknown[] {
         actions: options.map((option, optionIndex) => ({
           tag: 'button',
           text: { tag: 'plain_text', content: escapeLarkMarkdownLiteral(option.label, OPTION_BYTE_BUDGET) },
-          // A multi-select shows its accumulated choice by styling the picked
-          // buttons primary. An UNPICKED button omits `type` entirely rather
-          // than sending `default`: that is what every other card in this
-          // codebase does, and a literal `default` was observed live to leave
-          // the button unmarked, so the selection appeared to be forgotten.
-          ...(question.multiSelect === true && !picked.includes(optionIndex)
-            ? {}
-            : { type: 'primary' as const }),
+          // The chosen options are styled primary so the operator can SEE that
+          // the click registered; an unpicked button omits `type` entirely
+          // rather than sending `default`, because that is what every other
+          // card in this codebase does and a literal `default` was observed
+          // live to leave the button unmarked — the same "my click did nothing"
+          // complaint this styling exists to prevent.
+          //
+          // This applies to single-select too. Gating it on `multiSelect` left
+          // every button of a single-select question primary, so re-rendering
+          // after a pick produced a pixel-identical card and the operator had
+          // no way to tell their answer had been taken.
+          ...(picked.includes(optionIndex) ? { type: 'primary' as const } : {}),
           value: {
             kind: 'question',
             pendingId: spec.pendingId,

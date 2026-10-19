@@ -5533,6 +5533,117 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(JSON.stringify(answer)).toContain('选这个')
   })
 
+  it('marks the chosen option even when that pick answers the whole request', { timeout: 20_000 }, async () => {
+    // The common case: ONE question. Picking it settles the request outright,
+    // so the highlighted card must still be rendered — otherwise the operator
+    // sees the card turn into its settled form with no sign of WHAT they chose
+    // ever having been accepted.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const asked = ctx.waterfall('user-questions/request', {
+      agent,
+      questions: [{ id: 'q1', question: '只有一个问题', options: [{ label: '甲' }, { label: '乙' }] }],
+    }, () => new Promise(() => {}))
+
+    const card = await vi.waitFor(() => {
+      const found = feishu.cards
+        .filter(({ card }) => cardButtonValue(card, '甲') !== undefined).at(-1)
+      if (found === undefined) throw new Error('the question card never appeared')
+      return found
+    }, { timeout: 5_000, interval: 20 })
+
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '甲'))
+    await asked
+
+    // Some card version rendered after the pick must still show the buttons,
+    // with the chosen one marked.
+    const marked = feishu.cards.some(({ card }) => {
+      const buttons = cardButtonValue(card, '甲')
+      if (buttons === undefined) return false
+      const elements = (card as { elements?: unknown[] }).elements ?? []
+      const style = (label: string): string | undefined => {
+        for (const element of elements) {
+          const action = element as { tag?: string; actions?: unknown[] }
+          if (action.tag !== 'action') continue
+          for (const button of action.actions ?? []) {
+            const b = button as { text?: { content?: string }; type?: string }
+            if (b.text?.content === label) return b.type
+          }
+        }
+        return undefined
+      }
+      return style('甲') === 'primary' && style('乙') === undefined
+    })
+    expect(marked).toBe(true)
+  })
+
+  it('marks the chosen option so the operator can see the click registered', { timeout: 20_000 }, async () => {
+    // Reported: after picking an answer the buttons looked unchanged, so it was
+    // impossible to tell whether the click had been accepted at all.
+    //
+    // The selected style was gated on `multiSelect`: a single-select question
+    // rendered EVERY button primary, so re-rendering with a pick changed
+    // nothing on screen.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    void ctx.waterfall('user-questions/request', {
+      agent,
+      questions: [{
+        id: 'q1',
+        question: '选哪个？',
+        options: [{ label: '甲' }, { label: '乙' }],
+      }, {
+        id: 'q2',
+        question: '另一个？',
+        options: [{ label: '丙' }, { label: '丁' }],
+      }],
+    }, () => new Promise(() => {}))
+
+    const card = await vi.waitFor(() => {
+      const found = feishu.cards
+        .filter(({ card }) => cardButtonValue(card, '甲') !== undefined).at(-1)
+      if (found === undefined) throw new Error('the question card never appeared')
+      return found
+    }, { timeout: 5_000, interval: 20 })
+
+    const styleOf = (c: unknown, label: string): string | undefined => {
+      const card = c as { elements?: unknown[] }
+      for (const element of card.elements ?? []) {
+        const action = element as { tag?: string; actions?: unknown[] }
+        if (action.tag !== 'action') continue
+        for (const button of action.actions ?? []) {
+          const b = button as { text?: { content?: string }; type?: string }
+          if (b.text?.content === label) return b.type
+        }
+      }
+      return undefined
+    }
+
+    // Before the pick, the single-select buttons carry the same style.
+    expect(styleOf(card.card, '甲')).toEqual(styleOf(card.card, '乙'))
+
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '甲'))
+
+    // After the pick the chosen one must be visibly different from its rival.
+    const after = await vi.waitFor(() => {
+      const found = feishu.cards
+        .filter(({ card }) => cardButtonValue(card, '甲') !== undefined).at(-1)
+      if (found === undefined) throw new Error('the card vanished after the pick')
+      if (styleOf(found.card, '甲') === styleOf(found.card, '乙')) {
+        throw new Error('the picked option is still indistinguishable')
+      }
+      return found
+    }, { timeout: 5_000, interval: 20 })
+    expect(styleOf(after.card, '甲')).toBe('primary')
+    expect(styleOf(after.card, '乙')).toBeUndefined()
+  })
+
   it('keeps a two-question batch open until BOTH questions are answered', { timeout: 20_000 }, async () => {
     // The free-text path settled after the first reply, so replying to the
     // second question of a batch answered the first one and dropped the rest —

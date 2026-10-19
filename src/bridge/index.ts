@@ -2333,7 +2333,11 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       // Single-select: this question is answered outright, but the REQUEST may
       // hold other questions that are still unanswered.
       entry.spec = { ...entry.spec, picked: { ...entry.spec.picked, [question.id]: [optionIndex] } }
-      if (!settleIfEveryQuestionAnswered(entry, pendingId)) await repaintQuestion(entry)
+      // Show the mark BEFORE settling. Settling replaces the card with its
+      // answered form, so without this first paint the operator never saw their
+      // own choice being accepted — the pick appeared to do nothing.
+      await repaintQuestion(entry)
+      settleIfEveryQuestionAnswered(entry, pendingId)
       return { toast: `已选择：${option.label}` }
     }
     if (action === QUESTION_CLICK.confirm) {
@@ -2342,7 +2346,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       const labels = picked
         .map(index => options[index]?.label)
         .filter((label): label is string => label !== undefined)
-      if (!settleIfEveryQuestionAnswered(entry, pendingId)) await repaintQuestion(entry)
+      await repaintQuestion(entry)
+      settleIfEveryQuestionAnswered(entry, pendingId)
       return { toast: `已确认：${labels.join('、')}` }
     }
     return { toast: '该操作已失效' }
