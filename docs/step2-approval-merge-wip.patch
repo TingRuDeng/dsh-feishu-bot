@@ -1,0 +1,201 @@
+diff --git a/src/bridge/approval.ts b/src/bridge/approval.ts
+index faabb6d..14bad58 100644
+--- a/src/bridge/approval.ts
++++ b/src/bridge/approval.ts
+@@ -112,6 +112,22 @@ function itemLines(spec: ApprovalCardSpec): string {
+  * @param items - the group's items in arrival order.
+  * @returns the card JSON for msg_type `interactive` (send and patch alike).
+  */
++/**
++ * The approval group's title, used as the card header when it stands alone.
++ *
++ * Exported so a card that hosts the approval among other content can label it
++ * the same way instead of leaving the buttons unlabelled.
++ */
++export function approvalHeading(items: readonly ApprovalGroupItem[]): string {
++  const pending = items.filter(item => item.state === 'pending').length
++  return items.length > 1 ? `审批请求（${pending}/${items.length} 待处理）` : '审批请求'
++}
++
++/** The approval group's title as an in-card heading, for a merged card. */
++export function approvalHeadingElement(items: readonly ApprovalGroupItem[]): unknown {
++  return { tag: 'div', text: { tag: 'lark_md', content: `**${approvalHeading(items)}**` } }
++}
++
+ export function renderApprovalGroupCard(items: readonly ApprovalGroupItem[]): FeishuActionCard {
+   const pending = items.filter(item => item.state === 'pending').length
+   if (pending === 0) {
+@@ -129,10 +145,7 @@ export function renderApprovalGroupCard(items: readonly ApprovalGroupItem[]): Fe
+     }
+   }
+   const header = {
+-    title: {
+-      tag: 'plain_text' as const,
+-      content: items.length > 1 ? `审批请求（${pending}/${items.length} 待处理）` : '审批请求',
+-    },
++    title: { tag: 'plain_text' as const, content: approvalHeading(items) },
+     template: 'orange',
+   }
+   const elements: unknown[] = []
+diff --git a/src/bridge/index.ts b/src/bridge/index.ts
+index b0ed6a8..af50cbd 100644
+--- a/src/bridge/index.ts
++++ b/src/bridge/index.ts
+@@ -77,7 +77,10 @@ import {
+   planDurableRetention, planRetention, pruneProjectionCursors,
+   sortPendingOutbox, watermarkKey,
+ } from './reliability.ts'
+-import { ITEM_STATE_COPY, renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
++import {
++  approvalHeadingElement, ITEM_STATE_COPY, renderApprovalGroupCard,
++  type ApprovalCardSpec, type ApprovalItemState,
++} from './approval.ts'
+ import {
+   QUESTION_CLICK, questionBodyElements, renderAnsweredQuestionCard, renderQuestionCard,
+   type QuestionCardItem, type QuestionCardSpec, type QuestionClickValue,
+@@ -1055,6 +1058,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
+     terminalRequested: boolean
+     lastPatchAt: number
+     frozen: boolean
++    /**
++     * True when the task snapshot itself is terminal.
++     *
++     * This is NOT the same as `frozen`. A settled task still has to be writable
++     * while an approval or question on its card is undecided: freezing the card
++     * outright left those buttons on a message nothing would ever update again,
++     * which is how they became dead buttons.
++     */
++    taskSettled?: boolean
+     timer: ReturnType<typeof setTimeout> | undefined
+     actor: Promise<void> | undefined
+   }
+@@ -1065,6 +1077,23 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
+     'tool/code-dispatch', 'llm/retry', 'turn/end',
+   ])
+ 
++  /**
++   * True while some decision is still waiting on this chat's card.
++   *
++   * A settled task keeps its card writable as long as something on it is
++   * undecided — the buttons must stay live and the card must be re-rendered
++   * when they are answered.
++   */
++  const decisionPendingOn = (chatId: string): boolean => {
++    const group = approvalGroups.get(chatId)
++    if (group !== undefined
++      && [...group.items.values()].some(item => item.state === 'pending')) return true
++    const pendingId = pendingQuestionOfChat.get(chatId)
++    if (pendingId === undefined) return false
++    const question = pendingQuestions.get(pendingId)
++    return question !== undefined && !question.settled
++  }
++
+   const clearCardTimer = (tracker: CardTracker): void => {
+     if (tracker.timer === undefined) return
+     clearTimeout(tracker.timer)
+@@ -1074,7 +1103,11 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
+   const startCardActor = (
+     chatId: string, sessionId: SessionIdString, tracker: CardTracker,
+   ): void => {
+-    if (tracker.actor !== undefined || tracker.frozen || !tracker.dirty) return
++    // `frozen` closes the card only when nothing is waiting on it; a settled
++    // task whose card still holds an undecided approval must keep updating.
++    if (tracker.actor !== undefined || !tracker.dirty) return
++    if (tracker.frozen && !decisionPendingOn(chatId)) return
++    if (tracker.frozen) tracker.frozen = false
+     clearCardTimer(tracker)
+     tracker.dirty = false
+     tracker.terminalRequested = false
+@@ -1105,6 +1138,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
+           progressDetail: config.progressDetail,
+           ...(tracker.resumed === true ? { resumed: true } : {}),
+           ...pendingQuestionElements(chatId),
++          ...mergedApprovalElements(chatId),
+         })
+         if (tracker.messageId === undefined) {
+           tracker.messageId = await ctx.feishu.sendCard(chatId, card)
+@@ -1159,6 +1193,40 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
+    * merely pushed the progress card further up the chat, so a couple of
+    * questions buried the thing the operator was watching.
+    */
++  /**
++   * Pending approvals, appended to the task's card alongside any question.
++   *
++   * A question already occupies the `interactive` slot, so approvals are joined
++   * to it rather than replacing it: an operator can be asked a question and owe
++   * an approval at the same time, and neither may vanish.
++   */
++  const mergedApprovalElements = (chatId: string): { interactive?: readonly unknown[] } => {
++    const approvals = pendingApprovalElements(chatId)
++    if (approvals.length === 0) return {}
++    const question = pendingQuestionElements(chatId)
++    if (question.interactive === undefined) return { interactive: approvals }
++    return { interactive: [...approvals, { tag: 'hr' }, ...question.interactive] }
++  }
++
++  /** The interactive elements of the approvals still waiting in this chat. */
++  const pendingApprovalElements = (chatId: string): readonly unknown[] => {
++    // A settled group is rotated out of `approvalGroups` into
++    // `settledApprovalGroups`; both must be consulted or the collapsed
++    // "已允许" state would never reach the card.
++    const group = approvalGroups.get(chatId)
++      ?? [...settledApprovalGroups.values()]
++        .find(settled => settled.group.chatId === chatId)?.group
++    if (group === undefined) return []
++    const items = [...group.items.values()]
++    if (items.length === 0) return []
++    // A settled group still renders: it collapses to "已允许" / "已拒绝", which
++    // is how the operator sees that their click was accepted. Dropping it as
++    // soon as nothing was pending made an answered approval vanish silently.
++    // The group's header becomes an in-card heading: the task's own header is
++    // the card's, but the approval still needs a label of its own.
++    return [approvalHeadingElement(items), ...(renderApprovalGroupCard(items).elements as unknown[])]
++  }
++
+   const pendingQuestionElements = (chatId: string): { interactive?: readonly unknown[] } => {
+     const pendingId = pendingQuestionOfChat.get(chatId)
+     if (pendingId !== undefined) {
+@@ -1195,7 +1263,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
+   const requestCard = (
+     chatId: string, sessionId: SessionIdString, tracker: CardTracker, terminal: boolean,
+   ): void => {
+-    if (tracker.frozen) return
++    if (tracker.frozen && !decisionPendingOn(chatId)) return
++    if (tracker.frozen) tracker.frozen = false
+     tracker.dirty = true
+     if (terminal) {
+       tracker.terminalRequested = true
+@@ -1442,6 +1511,33 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
+       // issue a second create when the first message id never became known.
+       if (group.messageId === undefined
+         && ![...group.items.values()].some(item => item.state === 'pending')) return ''
++      // Adopt the running task's card: the approval's buttons then sit on the
++      // card whose progress the operator is watching instead of pushing it out
++      // of view. `group.messageId` becomes that card's id, which is what the
++      // click handler validates against, so approval clicks keep resolving.
++      // Only a card that HAS a message can host anything. A tracker whose
++      // create is still in flight (or whose create failed) has no id to adopt,
++      // and returning here would drop the approval with no card at all.
++      const host = cards.get(group.chatId)
++      const hostUsable = host !== undefined
++        && host.messageId !== undefined
++        && (host.frozen ? decisionPendingOn(group.chatId) : true)
++        && host.sessionId === group.sessionId
++      if (hostUsable) {
++        group.messageId = host.messageId
++        operation = 'patch'
++        host.dirty = true
++        host.terminalRequested = true
++        startCardActor(group.chatId, host.sessionId, host)
++        try {
++          await host.actor ?? Promise.resolve()
++        } catch {
++          // The task card could not take the item. Fall through to a card of
++          // its own rather than leaving this approval with no way to answer it.
++          group.messageId = undefined
++        }
++        if (group.messageId !== undefined) return group.messageId
++      }
+       const card = renderApprovalGroupCard([...group.items.values()])
+       if (group.messageId === undefined) {
+         operation = 'send'

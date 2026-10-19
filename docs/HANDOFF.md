@@ -78,6 +78,27 @@
 
 前置：飞书后台已订阅并发布 `im.message.receive_v1` 与 `card.action.trigger`，测试 chat 不承载真实业务内容。若点击没有 `feishu-audit action=card-click-received`，先核对飞书后台事件发布状态。
 
+## 卡片合并（进行中）
+
+上报问题：授权申请与提问各自发一条顶层卡片，每来一条就把进度卡往上顶，几条之后进度就看不见了。
+
+**第一步（提问卡）已完成并实测通过**：待回答的提问不再单独发卡，而是画在任务卡里，一个会话同一时刻只有一条消息。
+
+- 提问的按钮本来就只按 `pendingId` 路由，不校验消息 id，所以搬进任务卡不需要改点击分发。
+- 一次请求可以带多个问题，因此按钮必须携带 `questionId`：此前点击只带请求 id，处理时写死 `questions[0]`，答第二个问题会被记到第一个头上。
+- 一次点击**不能**结算整个请求。答案按问题累积，只有每个问题都有答案时才 `settleQuestion`；在此之前卡片保持打开并重绘。
+- 文字回复的目标要同时看「点选」和「已有文字答案」，只看点选会让无选项的问题反复被覆盖。
+- 选中态对所有题型都成立（此前只在 `multiSelect` 下生效，单选题每个按钮都是 primary，重绘后像素完全一致，看起来像没反应）；并且**结算前必须先画一次**，否则单选题永远看不到自己选中的高亮。
+
+**第二步（审批卡）未开始，且有真实阻碍**：审批可以活得比任务卡久。
+
+- `tracker.frozen` 由 `folded.settled` 驱动，而 `folded.settled` 只看 turn 状态，完全不看有没有待处理审批；`frozen` 是单向闩锁，一旦置上就再也不会 patch。把审批画进任务卡之后，任务一结束卡片冻结，审批按钮就变成死按钮。
+- 审批点击**确实**校验消息 id（`groupOf.get(pendingId)?.messageId` 必须等于 `action.messageId`，否则回「该按钮不属于当前审批卡」），与提问不同；合并后必须让 `group.messageId` 成为任务卡的 id，否则每次点击都会被拒。
+- `settleItem` 在无人 pending 时把 group 从 `approvalGroups` 移到 `settledApprovalGroups`，于是「这个审批结束了吗」和「这张卡还能写吗」出现两套互相矛盾的定义。局部放宽 `frozen` 只是把矛盾挪个位置。
+- 另外两处地雷：`FeishuCard.elements` 的窄类型要放宽（否则无法承载 action 元素），以及重启清理 `sweepPendingCards` 会直接拿审批卡覆盖任务卡。
+
+只做渲染层的半成品比不做更糟：它会把「审批卡更新失败」变成静默丢卡。**正确做法是一个 chat 维度的卡片状态，同时持有 `{ snapshot, approvals, question, messageId, chain }` 和一个统一渲染器**，让每个 chat 只有一个 message id、一个写入者。这一步的 WIP 补丁保存在 `docs/step2-approval-merge-wip.patch`，复现测试保留为 `it.todo`。
+
 ## 不要踩的边界
 
 - `unavailable` 是审批 waterfall 的“无人回答”，不是决定；飞书卡仍有效时必须继续等待。
