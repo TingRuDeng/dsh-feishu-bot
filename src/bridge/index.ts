@@ -1910,6 +1910,24 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     return true
   }
 
+  /**
+   * Retire whatever question one chat is still holding.
+   *
+   * A question card belongs to the binding that was in force when it was asked.
+   * Once that binding ends the card can never be answered — its click would be
+   * matched against a chat that no longer concerns that session — so leaving it
+   * on screen offers buttons that silently do nothing. That is how a question
+   * that had already been handled still appeared open long after the
+   * conversation had moved on.
+   */
+  const retireChatQuestion = (chatId: string, reason: string): void => {
+    const pendingId = pendingQuestionOfChat.get(chatId)
+    if (pendingId === undefined) return
+    settleQuestion(pendingId, { kind: 'abandon', reason })
+    ctx.logger.info('feishu-audit action=question-retired-with-binding chat=%s pending=%s reason=%s',
+      auditHash(chatId), auditHash(pendingId), reason)
+  }
+
   /** Show a settled question's outcome on the card that asked it. */
   const publishQuestionOutcome = (entry: PendingQuestion, pendingId: string): void => {
     if (entry.messageId === undefined || entry.settledCopy === undefined) return
@@ -2348,6 +2366,12 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     try {
       if (seedCursor) await seedProjectionCursorAtHead(chatId, candidate.sessionId)
       await bindings.put(chatId, candidate)
+      // The chat now answers for a different session, so any question asked
+      // under the previous binding can never be answered from here. Retire it
+      // rather than leave buttons that do nothing.
+      if (previous !== undefined && String(previous.sessionId) !== String(candidate.sessionId)) {
+        retireChatQuestion(chatId, 'session-switched')
+      }
       return { ok: true }
     } catch (writeError: unknown) {
       ctx.logger.error('feishu-bridge binding prepare/write failed: %s', safeErrorFact(writeError))
@@ -3423,6 +3447,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         await stageTarget(binding.sessionId)
         await bindings.delete(chatId)
         cards.delete(chatId)
+        retireChatQuestion(chatId, 'binding-released')
         ctx.logger.info('feishu-audit action=binding-released chat=%s session=%s sender=%s',
           auditHash(chatId), auditHash(binding.sessionId), auditHash(record.senderOpenId))
         await commit(`已解绑 ${binding.sessionId}。后续会话消息不再同步到飞书；会话仍在运行，可随时 /use 重新绑定。`)

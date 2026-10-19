@@ -5466,6 +5466,41 @@ describe('assembled bridge (M1 acceptance)', () => {
     const sessions = feishu.cards.findLast(item => item.messageId === listing.messageId)!
     expect(JSON.stringify(sessions.card).split('未命名会话').length - 1).toBe(1)
   })
+  it('retires the question card when the chat releases the session it belonged to', { timeout: 20_000 }, async () => {
+    // Reported: the conversation had already moved on, yet a question that had
+    // been handled was still sitting in the chat with live buttons. Releasing
+    // the session must retire any card the chat is still holding: the question
+    // belongs to a binding that no longer exists, so its card can never be
+    // answered and must stop looking as if it could.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    const session = [...ctx.sessions.list()][0]!
+    const agent = ctx.agents.get(session.id)!
+
+    void ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '释放前请回答', options: [{ label: '选项A' }] }] },
+      () => new Promise(() => {}),
+    ).catch(() => undefined)
+
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('释放前请回答'))) {
+        throw new Error('the question card never appeared')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    await deliver({ text: '/release' })
+
+    await vi.waitFor(() => {
+      const latest = new Map<string, object>()
+      for (const { messageId, card } of feishu.cards) latest.set(messageId, card)
+      const stillLive = [...latest.values()].some(card => {
+        const json = JSON.stringify(card)
+        return json.includes('释放前请回答') && !json.includes('已回答') && !json.includes('未作答')
+      })
+      if (stillLive) throw new Error('the card still looks answerable after the session was released')
+    }, { timeout: 5_000, interval: 20 })
+  })
 })
 
 /** The button style of each option on a question card, keyed by label. */
