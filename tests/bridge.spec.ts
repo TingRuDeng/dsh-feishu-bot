@@ -275,6 +275,18 @@ function cardActionValue(card: object, actionName: string): unknown {
   return undefined
 }
 
+/**
+ * A session seed that makes a session count as used.
+ *
+ * `/ls` hides sessions that still hold only the configuration every session is
+ * created with, matching the Web GUI. A test that needs a listed session must
+ * therefore give it at least one event of its own.
+ */
+const usedSeed = (turn = 1) => [
+  { type: 'turn/start', seq: 0, time: 1, data: { turn } },
+  { type: 'turn/end', seq: 1, time: 2, data: { turn, reason: { kind: 'completed' } } },
+] as never
+
 async function mountBridge(
   adapter: MockAdapter, configOverrides: object = {}, existingRoot?: string,
   configureFeishu?: (feishu: StubFeishu) => void,
@@ -827,6 +839,7 @@ describe('assembled bridge (M1 acceptance)', () => {
         probeRoot, undefined, async (ctx) => {
           await ctx.agents.create({
             sessionId: 'web-owned-live' as never,
+            seed: usedSeed(),
             meta: { cwd: probeRoot },
             agentOptions: { provider: 'mock', model: 'm' },
           })
@@ -896,6 +909,7 @@ describe('assembled bridge (M1 acceptance)', () => {
         probeRoot, undefined, async (ctx) => {
           await ctx.agents.create({
             sessionId: 'web-owned-status' as never,
+            seed: usedSeed(),
             meta: { cwd: probeRoot },
             agentOptions: { provider: 'mock', model: 'm' },
           })
@@ -994,6 +1008,7 @@ describe('assembled bridge (M1 acceptance)', () => {
         probeRoot, undefined, async (ctx) => {
           await ctx.agents.create({
             sessionId: 'web-owned-effort' as never,
+            seed: usedSeed(),
             meta: { cwd: probeRoot },
             agentOptions: { provider: 'mock', model: 'm' },
           })
@@ -1127,9 +1142,10 @@ describe('assembled bridge (M1 acceptance)', () => {
     it('/ls text fallback escapes adversarial session titles', async () => {
       const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
       ctx.sessions.create('hostile-title' as never, {
-        seed: [{
-          type: 'session/title', seq: 0, time: 1, data: { title: '恶意[标题](链接)' },
-        }] as never,
+        seed: [
+          { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+          { type: 'session/title', seq: 1, time: 2, data: { title: '恶意[标题](链接)' } },
+        ] as never,
         meta: { cwd: root },
       })
       feishu.nextSessionListCardError = Object.assign(
@@ -1186,6 +1202,7 @@ describe('assembled bridge (M1 acceptance)', () => {
         probeRoot, undefined, async (ctx) => {
           await ctx.agents.create({
             sessionId: 'web-owned-model' as never,
+            seed: usedSeed(),
             meta: { cwd: probeRoot },
             agentOptions: { provider: 'mock', model: 'm' },
           })
@@ -1388,6 +1405,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const nextSessionId = 'canonical-fifo-next-session'
     const next = await ctx.agents.create({
       sessionId: nextSessionId as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -2595,10 +2613,18 @@ describe('assembled bridge (M1 acceptance)', () => {
     // Fake only Date: drain() and the per-chat queues need real timers.
     vi.useFakeTimers({ toFake: ['Date'] })
     try {
-      const { feishu, deliver, drain } = await mountBridge(new MockAdapter([]))
-      await deliver({ text: '/new' })
-      await deliver({ text: '/new' })
-      await deliver({ text: '/release' })
+      const { ctx, root, feishu, deliver, drain } = await mountBridge(new MockAdapter([]))
+      // Two sessions with content: `/new` alone would leave them holding only
+      // the configuration every session is born with, which /ls hides (as the
+      // Web GUI does). This test is about listing TTL, not about /new.
+      for (const id of ['stale-a', 'stale-b']) {
+        await ctx.agents.create({
+          sessionId: id as never,
+          seed: usedSeed(),
+          meta: { cwd: root },
+          agentOptions: { provider: 'mock', model: 'm' },
+        })
+      }
       await deliver({ text: '/ls' })
       const listing = feishu.cards.find(item => JSON.stringify(item.card).includes('选择工作空间'))!
       await feishu.clickCard(OWNER, listing.messageId, cardActionValue(listing.card, 'workspace'))
@@ -2651,6 +2677,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const original = ctx.storageDomain.get('feishu_bot')!.table('bindings').get('oc_chat_1') as { sessionId: string }
     await ctx.agents.create({
       sessionId: 'second-session' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3036,6 +3063,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const liveSessionId = 'live-use-binding-failure'
     const handle = await ctx.agents.create({
       sessionId: liveSessionId as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3089,11 +3117,13 @@ describe('assembled bridge (M1 acceptance)', () => {
     await deliver({ text: '/new' })
     await ctx.agents.create({
       sessionId: 'candidate-binding' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
     await ctx.agents.create({
       sessionId: 'newer-binding' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3213,10 +3243,18 @@ describe('assembled bridge (M1 acceptance)', () => {
   })
 
   it('/ls card keeps the ordinal snapshot so /use <n> remains a text fallback', { timeout: 20_000 }, async () => {
-    const { feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
-    await deliver({ text: '/new' })
-    await deliver({ text: '/new' })          // two rows keep this workspace in navigation mode
-    await deliver({ text: '/release' })
+    const { ctx, feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
+    // Two USED sessions keep this workspace in navigation mode. `/new` would
+    // not do: it leaves a session holding only its birth configuration, which
+    // /ls hides exactly as the Web GUI does.
+    for (const id of ['ordinal-a', 'ordinal-b']) {
+      await ctx.agents.create({
+        sessionId: id as never,
+        seed: usedSeed(),
+        meta: { cwd: root },
+        agentOptions: { provider: 'mock', model: 'm' },
+      })
+    }
     await deliver({ text: '/ls' })
     const listing = feishu.cards.find(item => JSON.stringify(item.card).includes('选择工作空间'))
     expect(listing).toBeDefined()
@@ -3239,6 +3277,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     await mkdir(beta)
     const alphaHandle = await ctx.agents.create({
       sessionId: 'alpha-session' as never,
+      seed: usedSeed(),
       meta: { cwd: alpha },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3247,6 +3286,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     } as never)
     const alphaSecond = await ctx.agents.create({
       sessionId: 'alpha-session-2' as never,
+      seed: usedSeed(),
       meta: { cwd: alpha },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3255,6 +3295,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     } as never)
     const betaHandle = await ctx.agents.create({
       sessionId: 'beta-session' as never,
+      seed: usedSeed(),
       meta: { cwd: beta },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3299,6 +3340,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     await mkdir(alpha)
     const { agent: seeded } = await ctx.agents.create({
       sessionId: 'alpha-seeded' as never,
+      seed: usedSeed(),
       meta: { cwd: alpha },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3344,6 +3386,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     await mkdir(alpha)
     await ctx.agents.create({
       sessionId: 'alpha-seeded' as never,
+      seed: usedSeed(),
       meta: { cwd: alpha },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3372,11 +3415,13 @@ describe('assembled bridge (M1 acceptance)', () => {
     await mkdir(right, { recursive: true })
     await ctx.agents.create({
       sessionId: 'left-shared-session' as never,
+      seed: usedSeed(),
       meta: { cwd: left },
       agentOptions: { provider: 'mock', model: 'm' },
     })
     await ctx.agents.create({
       sessionId: 'right-shared-session' as never,
+      seed: usedSeed(),
       meta: { cwd: right },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3396,6 +3441,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     for (let index = 1; index <= 2; index += 1) {
       await ctx.agents.create({
         sessionId: `back-session-${index}` as never,
+        seed: usedSeed(),
         meta: { cwd: root },
         agentOptions: { provider: 'mock', model: 'm' },
       })
@@ -3424,6 +3470,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     for (let index = 1; index <= 21; index += 1) {
       const handle = await ctx.agents.create({
         sessionId: `uncapped-session-${index}` as never,
+        seed: usedSeed(),
         meta: { cwd: root },
         agentOptions: { provider: 'mock', model: 'm' },
       })
@@ -3453,6 +3500,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
     const handle = await ctx.agents.create({
       sessionId: 'opaque-live-id' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3461,6 +3509,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     } as never)
     await ctx.agents.create({
       sessionId: 'live-title-filler' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3488,6 +3537,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
     const handle = await ctx.agents.create({
       sessionId: 'opaque-cold-id' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3498,6 +3548,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     await handle.dispose()
     await ctx.agents.create({
       sessionId: 'cold-title-filler' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3518,6 +3569,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
     const handle = await ctx.agents.create({
       sessionId: 'permanent-card-rejection' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3540,6 +3592,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
     const handle = await ctx.agents.create({
       sessionId: 'ambiguous-card-timeout' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3560,6 +3613,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
     await ctx.agents.create({
       sessionId: 'ambiguous-card-copy-target' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3582,6 +3636,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
     const handle = await ctx.agents.create({
       sessionId: 'click-bind-target' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3618,6 +3673,7 @@ describe('assembled bridge (M1 acceptance)', () => {
       originalTitles.push(title)
       const handle = await ctx.agents.create({
         sessionId: `snapshot-${index}` as never,
+        seed: usedSeed(),
         meta: { cwd: root },
         agentOptions: { provider: 'mock', model: 'm' },
       })
@@ -3636,6 +3692,7 @@ describe('assembled bridge (M1 acceptance)', () => {
 
     const newer = await ctx.agents.create({
       sessionId: 'new-after-snapshot' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3660,6 +3717,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     for (let index = 1; index <= 8; index += 1) {
       await ctx.agents.create({
         sessionId: `page-failure-${index}` as never,
+        seed: usedSeed(),
         meta: { cwd: root },
         agentOptions: { provider: 'mock', model: 'm' },
       })
@@ -3684,6 +3742,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
     await ctx.agents.create({
       sessionId: 'token-protected-target' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3704,6 +3763,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
     await ctx.agents.create({
       sessionId: 'message-protected-target' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3730,6 +3790,7 @@ describe('assembled bridge (M1 acceptance)', () => {
       const { ctx, feishu, root, deliver } = await mountBridge(new MockAdapter([]))
       await ctx.agents.create({
         sessionId: 'expired-card-target' as never,
+        seed: usedSeed(),
         meta: { cwd: root },
         agentOptions: { provider: 'mock', model: 'm' },
       })
@@ -3749,10 +3810,25 @@ describe('assembled bridge (M1 acceptance)', () => {
   })
 
   it('rejects non-allowlisted and non-binding-owner /ls card operators', { timeout: 20_000 }, async () => {
-    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter([]), {
+    const { ctx, root, feishu, deliver } = await mountBridge(new MockAdapter([]), {
       allowedOpenIds: [OWNER, OTHER],
     })
+    // OWNER holds the binding, which is what makes OTHER not its binder. The
+    // listed session needs content of its own; a merely created one is hidden
+    // (as the Web GUI hides it), so seed it.
+    await ctx.agents.create({
+      sessionId: 'operators-target' as never,
+      seed: usedSeed(),
+      meta: { cwd: root },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
     await deliver({ text: '/new' })
+    await ctx.storageDomain.get('feishu_bot')!.table('bindings').put('oc_chat_1', {
+      sessionId: 'operators-target',
+      status: 'active',
+      boundBy: OWNER,
+      boundAt: Date.now(),
+    } as never)
     await deliver({ senderOpenId: OTHER, text: '/ls' })
     const listing = feishu.cards.findLast(item => JSON.stringify(item.card).includes('选择工作空间'))!
     const value = cardActionValue(listing.card, 'workspace')
@@ -3769,6 +3845,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
     await ctx.agents.create({
       sessionId: 'single-click-target' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3791,6 +3868,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver, drain, archiveSession } = await mountBridge(new MockAdapter([]))
     const handle = await ctx.agents.create({
       sessionId: 'archived-after-listing' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3817,6 +3895,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver, drain } = await mountBridge(new MockAdapter([]))
     const handle = await ctx.agents.create({
       sessionId: 'terminal-patch-target' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3846,6 +3925,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     for (const sessionId of ['visible-session', 'archived-session']) {
       const handle = await ctx.agents.create({
         sessionId: sessionId as never,
+        seed: usedSeed(),
         meta: { cwd: root },
         agentOptions: { provider: 'mock', model: 'm' },
       })
@@ -3866,6 +3946,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const { ctx, feishu, root, deliver, archiveSession } = await mountBridge(new MockAdapter([]))
     const handle = await ctx.agents.create({
       sessionId: 'archived-direct' as never,
+      seed: usedSeed(),
       meta: { cwd: root },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -3884,6 +3965,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     dirs.push(outside)
     const handle = await ctx.agents.create({
       sessionId: 'outside-direct' as never,
+      seed: usedSeed(),
       meta: { cwd: outside },
       agentOptions: { provider: 'mock', model: 'm' },
     })
@@ -4062,6 +4144,7 @@ describe('assembled bridge (M1 acceptance)', () => {
         bridgeContext = ctx
         const handle = await ctx.agents.create({
           sessionId: 'startup-approval-agent' as never,
+          seed: usedSeed(),
           meta: { cwd: (await ctx.sessionPersistence.list())[0]?.header.cwd },
           agentOptions: { provider: 'mock', model: 'm' },
         })
@@ -4724,6 +4807,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     const handle = await ctx.agents.create({
       sessionId: 'unbound-question' as never,
       agentOptions: { provider: 'mock', model: 'm' },
+      seed: usedSeed(),
       meta: { cwd: root },
     })
 
@@ -5325,6 +5409,62 @@ describe('assembled bridge (M1 acceptance)', () => {
         throw new Error('a task without a `via` marker produced no progress card')
       }
     }, { timeout: 5_000, interval: 20 })
+  })
+  it('/ls does not offer a session that was created but never ran a turn', { timeout: 20_000 }, async () => {
+    // Reported against the real GUI: /ls offered 8 sessions in one workspace
+    // while the Web GUI showed 1. The 7 extra had never run a turn — their logs
+    // hold only the context events every session starts with, no `turn/start`.
+    // The GUI hides those (blankness clears at the first `turn/start`), but /ls
+    // listed them, so a switch could offer a session with no task to report at
+    // all — which is the confusing case this whole area is about.
+    const { ctx, feishu, deliver, root, drain } = await mountBridge(new MockAdapter([]))
+    const dir = await realpath(root)
+    // Two sessions in ONE workspace: one used, one merely created.
+    await ctx.agents.create({
+      sessionId: 'used-session' as never,
+      meta: { cwd: dir },
+      seed: [
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+        { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+      ] as never,
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    await ctx.agents.create({
+      sessionId: 'never-used-session' as never,
+      meta: { cwd: dir },
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+
+    await deliver({ text: '/ls' })
+    const listing = feishu.cards.findLast(item => JSON.stringify(item.card).includes(basename(dir)))!
+    await feishu.clickCard(OWNER, listing.messageId, cardActionValue(listing.card, 'workspace'))
+    await drain()
+    const sessions = feishu.cards.findLast(item => item.messageId === listing.messageId)!
+    const rendered = JSON.stringify(sessions.card)
+    // Both would render as the same unnamed label, so count rows: exactly the
+    // one that ran a turn may be offered.
+    expect(rendered.split('未命名会话').length - 1).toBe(1)
+  })
+
+  it('/ls still offers an idle session whose turn already ran', { timeout: 20_000 }, async () => {
+    // The blankness guard must not sweep away real sessions: an idle session
+    // that DID run a turn is the normal case a switch exists to answer.
+    const { ctx, feishu, deliver, root, drain } = await mountBridge(new MockAdapter([]))
+    const dir = await realpath(root)
+    await ctx.agents.create({
+      sessionId: 'ran-then-stopped' as never,
+      meta: { cwd: dir },
+      seed: [
+        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
+      ] as never,
+      agentOptions: { provider: 'mock', model: 'm' },
+    })
+    await deliver({ text: '/ls' })
+    const listing = feishu.cards.findLast(item => JSON.stringify(item.card).includes(basename(dir)))!
+    await feishu.clickCard(OWNER, listing.messageId, cardActionValue(listing.card, 'workspace'))
+    await drain()
+    const sessions = feishu.cards.findLast(item => item.messageId === listing.messageId)!
+    expect(JSON.stringify(sessions.card).split('未命名会话').length - 1).toBe(1)
   })
 })
 

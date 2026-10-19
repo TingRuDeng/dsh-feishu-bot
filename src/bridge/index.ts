@@ -96,7 +96,7 @@ import {
   reconciliationProjectionDefinition,
   type ReconciliationState,
 } from './reconcile-projection.ts'
-import { readSessionEventsFrom } from './session-read.ts'
+import { SESSION_READ_PAGE, readSessionEventsFrom } from './session-read.ts'
 import {
   renderSessionListCard,
   renderSessionListStatusCard,
@@ -503,6 +503,53 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     `${escapeLarkMarkdownLiteral(selection.provider)}/${escapeLarkMarkdownLiteral(selection.model)}（档位：${await describeEffort(
       selection.provider, selection.model, selection.reasoningEffort,
     )}）`
+
+  /**
+   * Whether a session holds nothing but the configuration it was born with.
+   *
+   * The Web GUI hides these; `/ls` listed them, which is how a workspace could
+   * offer 8 sessions while the GUI showed 1, and how a switch could land on a
+   * session with nothing to report. Every session opens with exactly the same
+   * three configuration events, so a session still made only of those has never
+   * been used for anything.
+   *
+   * Nothing stronger than "has content" is asserted: a session that somehow
+   * holds only a title is left visible, because hiding a real session is worse
+   * than offering an unused one.
+   *
+   * The log is read rather than a projection, because `/ls` lists sessions the
+   * runtime is not holding and so has no projection to read.
+   */
+  const isBlankSession = async (sessionId: SessionIdString): Promise<boolean> => {
+    const live = ctx.sessions.list().find(session => String(session.id) === String(sessionId))
+    const events = live === undefined
+      ? await readPersistedPrefix(sessionId)
+      : live.snapshotEvents()
+    if (events === undefined) return false
+    return !events.some(event => !BIRTH_EVENT_TYPES.has(event.type))
+  }
+
+  /** The events every session is created with, and nothing a user produced. */
+  const BIRTH_EVENT_TYPES = new Set(['session', 'permission/preset', 'sandbox/mode', 'approval/policy'])
+
+  /** Read a bounded prefix of a persisted session, or undefined when unreadable. */
+  const readPersistedPrefix = async (
+    sessionId: SessionIdString,
+  ): Promise<readonly SessionEvent[] | undefined> => {
+    try {
+      const handle = await ctx.sessionPersistence.open(sessionId as unknown as SessionId, 'read')
+      try {
+        const { events } = await handle.read(0, SESSION_READ_PAGE)
+        return events
+      } finally {
+        await handle.close()
+      }
+    } catch {
+      // An unreadable session is not a blank one: a transient read failure must
+      // not hide a real session from the list.
+      return undefined
+    }
+  }
 
   /**
    * Read one projection's state for `session`.
@@ -3122,6 +3169,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
             if (seen.has(id) || archived.has(id)) continue
             const header = liveById.get(id) ?? persistedById.get(id)
             if (header === undefined || header.origin === 'subagent' || !(await inWorkspace(header.cwd))) continue
+            if (await isBlankSession(id as SessionIdString)) continue
             seen.add(id)
             headers.push(header)
           }
