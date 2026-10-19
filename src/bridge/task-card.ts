@@ -86,15 +86,28 @@ interface UserMessageSource {
   senderSessionId?: unknown
 }
 
-/** Direct human input in a bound session, as opposed to internal continuation input. */
+/**
+ * Direct human input in a bound session, as opposed to internal continuation input.
+ *
+ * `via` names the frontend that submitted the input, but it is NOT always set:
+ * a task started in the Web GUI can arrive as a plain `kind: 'user'` message
+ * with no `via` at all. Requiring it meant such tasks were never recognized —
+ * the projection held no task, so binding to that session reported nothing and
+ * the operator saw no progress for work that was plainly running.
+ *
+ * The internal kinds are therefore excluded by name instead of being excluded
+ * by the absence of a marker.
+ */
 export function directBoundTaskMessageId(data: unknown): string | null {
   if (typeof data !== 'object' || data === null) return null
   const message = data as { id?: unknown; source?: UserMessageSource }
-  const via = message.source?.via
-  return message.source?.kind === 'user' && (via === 'feishu' || via === 'web')
-    && typeof message.id === 'string'
-    ? message.id
-    : null
+  const source = message.source
+  if (source?.kind !== 'user' || typeof message.id !== 'string') return null
+  const via = source.via
+  // An explicit marker from another frontend is not a task of this bridge's
+  // chat unless it is one this bridge serves.
+  if (via !== undefined && via !== 'feishu' && via !== 'web') return null
+  return message.id
 }
 
 /** True for report/settlement messages that continue the active parent task. */
