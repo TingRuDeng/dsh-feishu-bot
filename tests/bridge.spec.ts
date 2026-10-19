@@ -17,7 +17,11 @@ import SessionStore from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+// The persistence plugin moved from a default export to the named `apply`
+// shape the rest of its family uses. Importing the namespace keeps this test
+// working under both, instead of failing at mount with an opaque
+// "invalid plugin ... received undefined".
+import * as JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { titleProjectionDefinition } from '@deepseek-ai/dsh-session-title'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -5261,6 +5265,64 @@ describe('assembled bridge (M1 acceptance)', () => {
       const retired = cards.filter(json => json.includes('已收纳') && json.includes('已撤回'))
       if (retired.length === 0) {
         throw new Error('the approval card still looks clickable after the request ended')
+      }
+    }, { timeout: 5_000, interval: 20 })
+  })
+  it('reports the last result when binding to a session whose task already finished', { timeout: 20_000 }, async () => {
+    // Reported: the operator ran a task in the Web GUI, then bound that session
+    // from Feishu. Only the bind confirmation arrived — no progress, and no
+    // summary of what the session had just done. The task had already finished,
+    // so this is the IDLE branch of the bind report, and it produced nothing.
+    const { ctx, feishu, deliver } = await mountBridge(
+      new MockAdapter([textResponse('构建已通过，三个包全部成功')]),
+    )
+    // Build a session in another chat and let its task finish, so the session
+    // exists with a settled task but is NOT bound to the chat we will use.
+    await deliver({ text: '/new' })
+    const sessionId = String([...ctx.sessions.list()][0]!.id)
+    await deliver({ text: '跑一下构建' })
+    const agent = ctx.agents.get([...ctx.sessions.list()][0]!.id)!
+    await agent.whenIdle()
+    await deliver({ text: '/release' })
+    feishu.cards.length = 0
+    feishu.sent.length = 0
+
+    await deliver({ text: `/use ${sessionId}` })
+
+    await vi.waitFor(() => {
+      const text = feishu.sent.map(entry => entry.text).join('\n')
+      if (!text.includes('空闲') || !text.includes('构建已通过')) {
+        throw new Error('binding to an idle session did not report its last result')
+      }
+    }, { timeout: 5_000, interval: 20 })
+  })
+  it('reports a task whose message carries no `via` marker', { timeout: 20_000 }, async () => {
+    // Reported with concrete diagnosis: binding to a session that is running a
+    // task in the Web GUI produced no progress at all, and the projection held
+    // NO task (taskMessageId=null). Such a session's own log shows why — its
+    // user messages have `kind: 'user'` but no `via` field at all, because a
+    // task started in the Web GUI is not always tagged `via: 'web'`. Requiring
+    // the marker meant the task was never recognized, so nothing was reported.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']), { cardThrottleMs: 0 })
+    await deliver({ text: '/new' })
+    const session = ctx.sessions.list()[0]!
+    const append = session.append.bind(session) as unknown as (
+      type: string, data: unknown, intent?: { surfaceOp?: 'append' },
+    ) => unknown
+    feishu.cards.length = 0
+
+    append('turn/start', { turn: 4 })
+    // Exactly what the real session log holds: kind 'user', no `via`.
+    append('user/message', createUserMessage({
+      content: [{ type: 'text', text: 'web 侧任务' }],
+      source: { kind: 'user' } as never,
+    }), { surfaceOp: 'append' })
+    append('tool/call', { turn: 4, step: 1, callId: 'c1', name: 'bash', arguments: '{}' })
+
+    await vi.waitFor(() => {
+      const produced = feishu.cards.map(({ card }) => JSON.stringify(card)).join('\n')
+      if (!produced.includes('bash') && !produced.includes('运行') && !produced.includes('思考中')) {
+        throw new Error('a task without a `via` marker produced no progress card')
       }
     }, { timeout: 5_000, interval: 20 })
   })
