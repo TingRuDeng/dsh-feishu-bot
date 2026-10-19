@@ -1923,6 +1923,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     abandon: (reason: string) => void
     detachAbort: () => void
     settled: boolean
+    /** Free-text answers by question id, for the reply-to-answer path. */
+    freeText?: Record<string, string>
   }
   const pendingQuestions = new Map<string, PendingQuestion>()
   const pendingQuestionOfChat = new Map<string, string>()
@@ -2001,6 +2003,59 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     settleQuestion(pendingId, { kind: 'abandon', reason })
     ctx.logger.info('feishu-audit action=question-retired-with-binding chat=%s pending=%s reason=%s',
       auditHash(chatId), auditHash(pendingId), reason)
+  }
+
+  /**
+   * Re-render a question's card after a partial answer.
+   *
+   * Used while a batch is still incomplete: the picks so far must be visible,
+   * and the card must stay live. A hosted question re-renders through the task
+   * actor that owns the card, so the two writers never race.
+   */
+  const repaintQuestion = async (entry: PendingQuestion): Promise<void> => {
+    if (entry.hostedByTask === true) {
+      const host = cards.get(entry.chatId)
+      if (host !== undefined && !host.frozen) {
+        host.dirty = true
+        host.terminalRequested = true
+        startCardActor(entry.chatId, host.sessionId, host)
+      }
+      return
+    }
+    if (entry.messageId === undefined) return
+    try {
+      await ctx.feishu.patchCard(entry.messageId, renderQuestionCard({ ...entry.spec }))
+    } catch (error: unknown) {
+      ctx.logger.warn('feishu-audit action=question-card-repaint-failed chat=%s error=%s',
+        auditHash(entry.chatId), safeErrorFact(error))
+    }
+  }
+
+  /**
+   * Settle the request once EVERY question has an answer, and only then.
+   *
+   * Settling on the first pick is what made a two-question batch impossible to
+   * answer from Feishu: the card collapsed with the second question still
+   * unanswered. A request with questions left open stays live instead.
+   * @returns true when the request was settled by this call.
+   */
+  const settleIfEveryQuestionAnswered = (entry: PendingQuestion, pendingId: string): boolean => {
+    const answers = entry.questions.map(question => {
+      const picked = entry.spec.picked[question.id] ?? []
+      return {
+        id: question.id,
+        selected: picked
+          .map(index => question.options?.[index]?.label)
+          .filter((label): label is string => label !== undefined),
+      }
+    })
+    // A question is answered when it has a selection, or when it offered no
+    // options at all and so was answered by the free-text path.
+    const complete = entry.questions.every((question, index) =>
+      (question.options ?? []).length === 0 || answers[index]!.selected.length > 0)
+    if (!complete) return false
+    settleQuestion(pendingId, { kind: 'answer', answer: { answers } })
+    return true
   }
 
   /** Show a settled question's outcome on the card that asked it. */
@@ -2192,17 +2247,39 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (entry === undefined) return false
     if (message.messageId !== undefined && answerConsumed.has(message.messageId)) return false
     if (message.messageId !== undefined) answerConsumed.add(message.messageId)
-    // Free text answers the FIRST question that has no selection yet; a
-    // question whose options are all single-select was already answered by the
-    // click, so the text belongs to the next one.
-    const target = entry.questions.find(question => (entry.spec.picked[question.id] ?? []).length === 0)
+    // Free text answers the FIRST question that is not answered yet. A question
+    // is answered either by a click (a selection) or by earlier text, so both
+    // must be consulted: checking only the selections made every reply of a
+    // batch land on the first option-less question, overwriting the previous
+    // answer instead of moving on to the next question.
+    const isAnswered = (question: QuestionCardItem): boolean =>
+      (entry.spec.picked[question.id] ?? []).length > 0
+      || entry.freeText?.[question.id] !== undefined
+    const target = entry.questions.find(question => !isAnswered(question))
       ?? entry.questions[0]
-    const answers = target === undefined
-      ? []
-      : [{ id: target.id, selected: [], custom: text }]
-    settleQuestion(pendingId, { kind: 'answer', answer: { answers } })
-    ctx.logger.info('feishu-audit action=question-answered-by-text chat=%s pending=%s bytes=%d',
-      auditHash(message.chatId), auditHash(pendingId), Buffer.byteLength(text, 'utf8'))
+    if (target === undefined) {
+      settleQuestion(pendingId, { kind: 'answer', answer: { answers: [] } })
+      return true
+    }
+    // Record the text against that question and settle only once the WHOLE
+    // request is answered. Settling here answered a batch's first question and
+    // abandoned the rest, which is the same defect the click path had.
+    entry.freeText = { ...entry.freeText, [target.id]: text }
+    const answers = entry.questions.map(question => ({
+      id: question.id,
+      selected: (entry.spec.picked[question.id] ?? [])
+        .map(index => question.options?.[index]?.label)
+        .filter((label): label is string => label !== undefined),
+      ...(entry.freeText?.[question.id] === undefined ? {} : { custom: entry.freeText[question.id] }),
+    }))
+    const complete = entry.questions.every(question =>
+      (question.options ?? []).length > 0
+        ? answers.find(a => a.id === question.id)!.selected.length > 0
+        : entry.freeText?.[question.id] !== undefined)
+    ctx.logger.info('feishu-audit action=question-answered-by-text chat=%s pending=%s bytes=%d complete=%s',
+      auditHash(message.chatId), auditHash(pendingId), Buffer.byteLength(text, 'utf8'), String(complete))
+    if (complete) settleQuestion(pendingId, { kind: 'answer', answer: { answers } })
+    else trackBackground(repaintQuestion(entry))
     return true
   }
 
@@ -2211,13 +2288,20 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
 
   /**
    * Apply one question-card button click.
+   *
+   * One request can carry several questions on a single card, so a click names
+   * the question it belongs to. Answering one must NOT end the request: the
+   * remaining questions are still unanswered, and settling here left the
+   * operator unable to answer them from Feishu at all.
    * @param pendingId - the pending question the payload names.
    * @param action - pick | confirm | skip.
    * @param optionIndex - the option a pick names.
+   * @param questionId - which question of the request the button belongs to.
    * @returns the toast to show the operator.
    */
   const handleQuestionClick = async (
     pendingId: string, action: string, optionIndex: number | undefined,
+    questionId: string | undefined,
   ): Promise<{ toast: string }> => {
     const entry = pendingQuestions.get(pendingId)
     if (entry === undefined) {
@@ -2227,29 +2311,30 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       settleQuestion(pendingId, { kind: 'abandon', reason: 'skipped-by-operator' })
       return { toast: '已跳过该提问' }
     }
-    const question = entry.questions[0]
+    // A one-question request may omit the id; a batch always carries one, and
+    // falling back to the first question is only safe when there is one.
+    const question = questionId === undefined
+      ? entry.questions[0]
+      : entry.questions.find(candidate => candidate.id === questionId)
     const options = question?.options ?? []
     if (question === undefined || options.length === 0) return { toast: '该提问请直接回复文字作答' }
     if (action === QUESTION_CLICK.pick && optionIndex !== undefined) {
       const option = options[optionIndex]
       if (option === undefined) return { toast: '该选项已失效' }
-      if (question.multiSelect !== true) {
-        settleQuestion(pendingId, {
-          kind: 'answer',
-          answer: { answers: [{ id: question.id, selected: [option.label] }] },
-        })
-        return { toast: `已选择：${option.label}` }
-      }
-      // Multi-select accumulates until the operator confirms the set.
       const picked = new Set(entry.spec.picked[question.id] ?? [])
-      if (picked.has(optionIndex)) picked.delete(optionIndex)
-      else picked.add(optionIndex)
-      entry.spec = { ...entry.spec, picked: { ...entry.spec.picked, [question.id]: [...picked] } }
-      if (entry.messageId !== undefined) {
-        const card = renderQuestionCard({ ...entry.spec })
-        await ctx.feishu.patchCard(entry.messageId, card)
+      if (question.multiSelect === true) {
+        // Multi-select accumulates until the operator confirms the set.
+        if (picked.has(optionIndex)) picked.delete(optionIndex)
+        else picked.add(optionIndex)
+        entry.spec = { ...entry.spec, picked: { ...entry.spec.picked, [question.id]: [...picked] } }
+        await repaintQuestion(entry)
+        return { toast: picked.has(optionIndex) ? `已选择：${option.label}` : `已取消：${option.label}` }
       }
-      return { toast: picked.has(optionIndex) ? `已选择：${option.label}` : `已取消：${option.label}` }
+      // Single-select: this question is answered outright, but the REQUEST may
+      // hold other questions that are still unanswered.
+      entry.spec = { ...entry.spec, picked: { ...entry.spec.picked, [question.id]: [optionIndex] } }
+      if (!settleIfEveryQuestionAnswered(entry, pendingId)) await repaintQuestion(entry)
+      return { toast: `已选择：${option.label}` }
     }
     if (action === QUESTION_CLICK.confirm) {
       const picked = entry.spec.picked[question.id] ?? []
@@ -2257,10 +2342,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       const labels = picked
         .map(index => options[index]?.label)
         .filter((label): label is string => label !== undefined)
-      settleQuestion(pendingId, {
-        kind: 'answer',
-        answer: { answers: [{ id: question.id, selected: labels }] },
-      })
+      if (!settleIfEveryQuestionAnswered(entry, pendingId)) await repaintQuestion(entry)
       return { toast: `已确认：${labels.join('、')}` }
     }
     return { toast: '该操作已失效' }
@@ -2293,7 +2375,9 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       : undefined
     if (value?.kind === 'question') {
       const questionValue = value as unknown as QuestionClickValue
-      return handleQuestionClick(questionValue.pendingId, questionValue.action, questionValue.optionIndex)
+      return handleQuestionClick(
+        questionValue.pendingId, questionValue.action, questionValue.optionIndex, questionValue.questionId,
+      )
     }
     if (value?.kind === 'session-list') return handleSessionListCardAction(action, value)
     if (value?.kind === 'model') return handleModelCardAction(action, value)

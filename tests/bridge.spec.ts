@@ -5533,6 +5533,99 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(JSON.stringify(answer)).toContain('选这个')
   })
 
+  it('keeps a two-question batch open until BOTH questions are answered', { timeout: 20_000 }, async () => {
+    // The free-text path settled after the first reply, so replying to the
+    // second question of a batch answered the first one and dropped the rest —
+    // the same defect the button path had.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const asked = ctx.waterfall('user-questions/request', {
+      agent,
+      questions: [
+        { id: '1', question: '节一？' },
+        { id: '2', question: '节二？' },
+      ],
+    }, () => new Promise(() => {}))
+
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(({ card }) => JSON.stringify(card).includes('节一'))) {
+        throw new Error('the batch card never appeared')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // Answer the first question by replying in the chat.
+    console.error('T2PROBE beforeFirst=%d', feishu.cards.length)
+    await deliver({ text: '一答' })
+    let settledEarly = false
+    void asked.then(() => { settledEarly = true }, () => { settledEarly = true })
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(settledEarly).toBe(false)
+
+    // The second question must still be answerable.
+    await deliver({ text: '二答' })
+    const answer = await asked
+    const payload = JSON.stringify(answer)
+    expect(payload).toContain('一答')
+    expect(payload).toContain('二答')
+  })
+
+  it('answers every question in a multi-question batch before settling it', { timeout: 20_000 }, async () => {
+    // Reported: the operator was asked two questions, answered the FIRST, and
+    // the card collapsed immediately — there was no way to answer the second
+    // from Feishu, and the operator had to redo both in the Web GUI.
+    //
+    // Two independent faults produced that:
+    //   * the click carried no question id, so every pick was resolved against
+    //     `questions[0]` — answering the second question recorded the first;
+    //   * a single pick settled the whole request instead of only that answer.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    const session = [...ctx.sessions.list()][0]!
+    const agent = ctx.agents.get(session.id)!
+
+    const asked = ctx.waterfall('user-questions/request', {
+      agent,
+      questions: [
+        { id: 'q1', question: '第一个问题？', options: [{ label: '甲' }, { label: '乙' }] },
+        { id: 'q2', question: '第二个问题？', options: [{ label: '丙' }, { label: '丁' }] },
+      ],
+    }, () => new Promise(() => {}))
+
+    const cardFor = (label: string) => feishu.cards
+      .filter(({ card }) => cardButtonValue(card, label) !== undefined).at(-1)
+
+    const first = await vi.waitFor(() => {
+      const found = cardFor('甲')
+      if (found === undefined) throw new Error('the batch card never appeared')
+      return found
+    }, { timeout: 5_000, interval: 20 })
+
+    // Answer the FIRST question.
+    await feishu.clickCard(OWNER, first.messageId, cardButtonValue(first.card, '甲'))
+
+    // The request must still be open, and the SECOND question must still be
+    // answerable. Settling here is the reported bug.
+    let settledEarly = false
+    void asked.then(() => { settledEarly = true }, () => { settledEarly = true })
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect(settledEarly).toBe(false)
+
+    const second = await vi.waitFor(() => {
+      const found = cardFor('丙')
+      if (found === undefined) throw new Error('the second question is no longer answerable')
+      return found
+    }, { timeout: 5_000, interval: 20 })
+    await feishu.clickCard(OWNER, second.messageId, cardButtonValue(second.card, '丙'))
+
+    const answer = await asked
+    const payload = JSON.stringify(answer)
+    expect(payload).toContain('甲')
+    expect(payload).toContain('丙')
+  })
+
   it('puts a pending question on the running task card instead of a second message', { timeout: 20_000 }, async () => {
     // Reported: every approval and question arrived as its own top-level card,
     // so a few of them pushed the progress card out of view and the operator

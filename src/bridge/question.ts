@@ -61,6 +61,15 @@ export interface QuestionClickValue {
   pendingId: string
   action: string
   optionIndex?: number
+  /**
+   * Which question of the request this button belongs to.
+   *
+   * One request can carry several questions on one card, so a click that named
+   * only the request could not say which one it answered: every pick was
+   * resolved against the first question, so answering the second recorded the
+   * first instead.
+   */
+  questionId?: string
 }
 
 /**
@@ -131,6 +140,7 @@ export function questionBodyElements(spec: QuestionCardSpec): unknown[] {
             pendingId: spec.pendingId,
             action: QUESTION_CLICK.pick,
             optionIndex,
+            questionId: question.id,
           } satisfies QuestionClickValue,
         })),
       })
@@ -146,6 +156,7 @@ export function questionBodyElements(spec: QuestionCardSpec): unknown[] {
                 kind: 'question',
                 pendingId: spec.pendingId,
                 action: QUESTION_CLICK.confirm,
+                questionId: question.id,
               } satisfies QuestionClickValue,
             },
             skipButton(spec.pendingId),
