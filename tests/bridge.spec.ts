@@ -5769,6 +5769,12 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(json).toContain('选项A')
   })
 
+  // Step 2 of the merging work, deliberately not started: an approval cannot
+  // simply be drawn on the task's card, because the approval outlives the task
+  // (a pending approval survives `folded.settled`, and `tracker.frozen` is a
+  // one-way latch that would leave its buttons dead). Doing it properly needs
+  // one chat-scoped card state owning { snapshot, approvals, question,
+  // messageId, chain } and a single renderer — see HANDOFF.md.
   it.todo('step 2: a pending approval renders inside the task card, not as its own message')
 })
 
