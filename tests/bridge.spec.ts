@@ -4856,9 +4856,13 @@ describe('assembled bridge (M1 acceptance)', () => {
     // unanswered. The stub keeps every card version, so assert on the last card
     // that still mentions the superseded question rather than on the newest
     // card overall (which is the second question's).
+    // The superseded question must be visibly settled, never silently dropped:
+    // the card passes through a state that says so before the newer question
+    // takes it over. Both share ONE message, so the trace is a card version
+    // rather than a message id.
     await vi.waitFor(() => {
-      const superseded = feishu.cards.filter(c => JSON.stringify(c.card).includes('第一个问题')).at(-1)
-      expect(JSON.stringify(superseded?.card)).toContain('未作答')
+      const traced = feishu.cards.some(c => JSON.stringify(c.card).includes('未作答'))
+      if (!traced) throw new Error('the superseded question left no trace')
     }, { timeout: 5_000, interval: 20 })
 
     // The newest question is the one still answerable. Search for the card that
@@ -5501,6 +5505,67 @@ describe('assembled bridge (M1 acceptance)', () => {
       if (stillLive) throw new Error('the card still looks answerable after the session was released')
     }, { timeout: 5_000, interval: 20 })
   })
+  it('answers a question hosted on the task card, exactly as a standalone one', { timeout: 20_000 }, async () => {
+    // The buttons moved onto the task's card. A click must still resolve: it is
+    // matched by the question's own pendingId, not by the message it sits on.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const asked = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '托管的问题', options: [{ label: '选这个' }] }] },
+      () => new Promise(() => {}),
+    )
+
+    const card = await vi.waitFor(() => {
+      const found = feishu.cards
+        .filter(({ card }) => cardButtonValue(card, '选这个') !== undefined)
+        .at(-1)
+      if (found === undefined) throw new Error('the question card never appeared')
+      return found
+    }, { timeout: 5_000, interval: 20 })
+
+    // It lives on the task card, and answering it from there still works.
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '选这个'))
+    const answer = await asked
+    expect(JSON.stringify(answer)).toContain('选这个')
+  })
+
+  it('puts a pending question on the running task card instead of a second message', { timeout: 20_000 }, async () => {
+    // Reported: every approval and question arrived as its own top-level card,
+    // so a few of them pushed the progress card out of view and the operator
+    // could no longer see what the task was doing.
+    //
+    // A question is answered with buttons, and those buttons belong on the card
+    // of the task that is waiting for the answer.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    void ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '这里需要你决定', options: [{ label: '选项A' }] }] },
+      () => new Promise(() => {}),
+    ).catch(() => undefined)
+
+    await vi.waitFor(() => {
+      const shown = feishu.cards.some(({ card }) => JSON.stringify(card).includes('这里需要你决定'))
+      if (!shown) throw new Error('the question never appeared')
+    }, { timeout: 5_000, interval: 20 })
+
+    // ONE message carries both the task's progress and the question's buttons.
+    const messages = new Set(feishu.cards.map(({ messageId }) => messageId))
+    expect(messages.size).toBe(1)
+    const latest = feishu.cards.at(-1)!.card
+    const json = JSON.stringify(latest)
+    expect(json).toContain('这里需要你决定')
+    expect(json).toContain('选项A')
+  })
+
+  it.todo('step 2: a pending approval renders inside the task card, not as its own message')
 })
 
 /** The button style of each option on a question card, keyed by label. */

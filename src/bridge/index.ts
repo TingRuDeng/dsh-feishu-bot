@@ -79,7 +79,7 @@ import {
 } from './reliability.ts'
 import { ITEM_STATE_COPY, renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
 import {
-  QUESTION_CLICK, renderAnsweredQuestionCard, renderQuestionCard,
+  QUESTION_CLICK, questionBodyElements, renderAnsweredQuestionCard, renderQuestionCard,
   type QuestionCardItem, type QuestionCardSpec, type QuestionClickValue,
 } from './question.ts'
 import {
@@ -1104,6 +1104,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           ...(title === undefined ? {} : { title }),
           progressDetail: config.progressDetail,
           ...(tracker.resumed === true ? { resumed: true } : {}),
+          ...pendingQuestionElements(chatId),
         })
         if (tracker.messageId === undefined) {
           tracker.messageId = await ctx.feishu.sendCard(chatId, card)
@@ -1134,6 +1135,48 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       () => { cardActors.delete(actor) },
       () => { cardActors.delete(actor) },
     )
+  }
+
+  /**
+   * Re-render a chat's task card so it picks up (or drops) an inline question.
+   *
+   * The task actor owns that card, so the question cannot patch it directly
+   * without the two overwriting each other. Marking the tracker dirty and
+   * starting the actor reuses the one writer that already serializes itself.
+   */
+  const adoptQuestionIntoTaskCard = (chatId: string, tracker: CardTracker): void => {
+    if (tracker.frozen) return
+    tracker.dirty = true
+    tracker.terminalRequested = true
+    startCardActor(chatId, tracker.sessionId, tracker)
+  }
+
+  /**
+   * The interactive elements of whatever question this chat is waiting on.
+   *
+   * A pending question is answered with buttons, and those buttons belong on
+   * the card of the task that is blocked on them. Sent as their own card they
+   * merely pushed the progress card further up the chat, so a couple of
+   * questions buried the thing the operator was watching.
+   */
+  const pendingQuestionElements = (chatId: string): { interactive?: readonly unknown[] } => {
+    const pendingId = pendingQuestionOfChat.get(chatId)
+    if (pendingId !== undefined) {
+      const entry = pendingQuestions.get(pendingId)
+      if (entry !== undefined && !entry.settled) {
+        return { interactive: questionBodyElements(entry.spec) }
+      }
+    }
+    // Nothing is pending: show what became of the last one, so the card does
+    // not silently lose the question the operator just handled.
+    const settled = settledQuestionNote.get(chatId)
+    if (settled === undefined) return {}
+    return {
+      interactive: [{
+        tag: 'div',
+        text: { tag: 'lark_md', content: escapeLarkMarkdownLiteral(settled.note) },
+      }],
+    }
   }
 
   const scheduleCard = (chatId: string, sessionId: SessionIdString, tracker: CardTracker): void => {
@@ -1859,6 +1902,23 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     settledCopy?: string
     /** True once the settled card was actually patched, so it happens only once. */
     outcomePublished?: boolean
+    /**
+     * True when this question's buttons live on the task's own card rather than
+     * on a message of their own. The card is then owned by the task actor, so
+     * retiring this question means re-rendering that card, not patching a
+     * message id this question owns.
+     */
+    hostedByTask?: boolean
+    /**
+     * The one-line trace a hosted question leaves on the task card once it has
+     * settled.
+     *
+     * A question that simply vanished would leave the operator unable to tell
+     * whether it was answered, superseded, or never asked — the same ambiguity
+     * the standalone card resolved by collapsing to `已回答`. The trace is
+     * cleared when the task card is retired with the binding.
+     */
+    settledNote?: string
     settle: (answer: AskUserQuestionAnswer) => void
     abandon: (reason: string) => void
     detachAbort: () => void
@@ -1866,6 +1926,13 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   }
   const pendingQuestions = new Map<string, PendingQuestion>()
   const pendingQuestionOfChat = new Map<string, string>()
+  /**
+   * The last settled question's trace per chat, shown on the task card until
+   * the binding ends. `settleQuestion` deletes the pending entry, so without
+   * this the card could not say what became of a question that was just
+   * answered or superseded.
+   */
+  const settledQuestionNote = new Map<string, { sessionId: string; note: string }>()
 
   /** Answer copy for one settled question, as the collapsed card shows it. */
   const describeAnswer = (questions: readonly QuestionCardItem[], answer: AskUserQuestionAnswer): string => {
@@ -1906,6 +1973,14 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     entry.settledCopy = outcome.kind === 'answer'
       ? describeAnswer(entry.questions, outcome.answer)
       : `未作答（${outcome.reason}）`
+    // Name the question in the trace. The card previously carried the question
+    // text and its outcome together, so an outcome alone — "未作答（超时）" with
+    // no subject — would leave the operator unable to tell what was settled.
+    const subject = entry.questions[0]?.question
+    entry.settledNote = subject === undefined
+      ? `✅ ${entry.settledCopy}`
+      : `✅ ${subject} — ${entry.settledCopy}`
+    settledQuestionNote.set(entry.chatId, { sessionId: entry.sessionId, note: entry.settledNote })
     if (entry.messageId !== undefined) publishQuestionOutcome(entry, pendingId)
     return true
   }
@@ -1933,6 +2008,19 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (entry.messageId === undefined || entry.settledCopy === undefined) return
     if (entry.outcomePublished) return
     entry.outcomePublished = true
+    // A hosted question has no card of its own: its buttons live on the task's
+    // card, owned by the task actor. Re-render that card so the buttons go away
+    // — patching the message directly here would race the actor and the loser's
+    // render would be lost.
+    if (entry.hostedByTask === true) {
+      const host = cards.get(entry.chatId)
+      if (host !== undefined && !host.frozen) {
+        host.dirty = true
+        host.terminalRequested = true
+        startCardActor(entry.chatId, host.sessionId, host)
+      }
+      return
+    }
     const card = renderAnsweredQuestionCard(entry.spec, entry.settledCopy)
     trackBackground(ctx.feishu.patchCard(entry.messageId, card).catch((error: unknown) => {
       ctx.logger.warn('feishu-audit action=question-card-settle-failed chat=%s pending=%s error=%s',
@@ -2028,11 +2116,26 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     pendingQuestions.set(pendingId, entry)
     pendingQuestionOfChat.set(boundChatId, pendingId)
 
+    // Adopt the running task's card when there is one. The question's buttons
+    // then appear on the card whose progress the operator is already watching,
+    // instead of as yet another message pushing that progress out of view.
+    //
+    // The buttons carry their own `pendingId`, so a click resolves exactly as
+    // it did when the question had a card of its own.
+    const host = cards.get(boundChatId)
+    const hostUsable = host !== undefined && !host.frozen && host.sessionId === String(sessionId)
     const card = renderQuestionCard({ ...spec, questions })
     try {
-      entry.messageId = await ctx.feishu.sendCard(boundChatId, card)
-      ctx.logger.info('feishu-audit action=question-asked chat=%s pending=%s call=%s count=%d',
-        auditHash(boundChatId), auditHash(pendingId), auditHash(callId ?? ''), questions.length)
+      if (hostUsable) {
+        entry.messageId = host.messageId
+        entry.hostedByTask = true
+        adoptQuestionIntoTaskCard(boundChatId, host)
+      } else {
+        entry.messageId = await ctx.feishu.sendCard(boundChatId, card)
+      }
+      ctx.logger.info('feishu-audit action=question-asked chat=%s pending=%s call=%s count=%d hosted=%s',
+        auditHash(boundChatId), auditHash(pendingId), auditHash(callId ?? ''), questions.length,
+        String(hostUsable))
       // The question may have settled while this send was in flight; show that
       // outcome now instead of leaving live-looking buttons behind.
       publishQuestionOutcome(entry, pendingId)

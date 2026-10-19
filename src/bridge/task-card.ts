@@ -818,11 +818,17 @@ export function foldFeishuTaskResults(
   return { results, cursorThrough }
 }
 
-/** Feishu interactive-card payload (msg_type `interactive` content). */
+/**
+ * Feishu interactive-card payload (msg_type `interactive` content).
+ *
+ * `elements` is deliberately `unknown[]` rather than a narrow div shape: a task
+ * card carries an interactive block (an action row, an hr) whenever a pending
+ * decision belongs to it.
+ */
 export interface FeishuCard {
   config: { wide_screen_mode: boolean }
   header: { title: { tag: 'plain_text'; content: string }; template: string }
-  elements: { tag: 'div'; text: { tag: 'lark_md'; content: string } }[]
+  elements: unknown[]
 }
 
 /** Duration as `X分Y秒` / `Y秒`; stable for card reproduction. */
@@ -907,6 +913,16 @@ export interface TaskCardContext {
    * along — the operator cannot tell whether the history is complete.
    */
   resumed?: boolean
+  /**
+   * Interactive elements belonging to the same task, appended below the
+   * progress body.
+   *
+   * A pending question is answered with buttons, and those buttons used to be
+   * sent as a card of their own. Every such card pushed the progress card
+   * further up the chat, so a few of them buried the very thing the operator
+   * was watching. They belong on the card of the task that is waiting for them.
+   */
+  interactive?: readonly unknown[]
 }
 
 /**
@@ -963,9 +979,17 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
     ? hasProgress ? appendActiveThinkingIndicator(lines.join('\n')) : ''
     : trimActiveThinkingIndicator(lines.join('\n'))
   const name = context?.title ?? '任务'
+  const elements: unknown[] = body === ''
+    ? []
+    : [{ tag: 'div', text: { tag: 'lark_md', content: body } }]
+  // A separator only earns its place when there is progress to separate from.
+  if (context?.interactive !== undefined && context.interactive.length > 0) {
+    if (elements.length > 0) elements.push({ tag: 'hr' })
+    elements.push(...context.interactive)
+  }
   return {
     config: { wide_screen_mode: true },
     header: { title: { tag: 'plain_text', content: `${name} · ${titleText}` }, template },
-    elements: body === '' ? [] : [{ tag: 'div', text: { tag: 'lark_md', content: body } }],
+    elements,
   }
 }

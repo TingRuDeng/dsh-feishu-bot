@@ -90,7 +90,16 @@ export interface QuestionCardSpec {
  * @param spec - the pending question and its current selection.
  * @returns the card JSON for msg_type `interactive`.
  */
-export function renderQuestionCard(spec: QuestionCardSpec): FeishuActionCard {
+/**
+ * Everything a question needs on screen, without a card around it.
+ *
+ * A question is answered by buttons, and those buttons used to get a message of
+ * their own — one more card below the running task's, pushing the progress the
+ * operator was watching further up the chat. They are appended to the task's
+ * own card instead. Each button already carries its `pendingId`, so a click
+ * resolves exactly as before wherever the buttons are rendered.
+ */
+export function questionBodyElements(spec: QuestionCardSpec): unknown[] {
   const count = spec.questions.length
   const elements: unknown[] = []
   spec.questions.forEach((question, index) => {
@@ -161,11 +170,21 @@ export function renderQuestionCard(spec: QuestionCardSpec): FeishuActionCard {
   if (spec.webUrl !== '') {
     elements.push({ tag: 'div', text: { tag: 'lark_md', content: `[在 Web GUI 中查看](${spec.webUrl})` } })
   }
+  return elements
+}
+
+/** A standalone question card, for a question with no task card to join. */
+export function renderQuestionCard(spec: QuestionCardSpec): FeishuActionCard {
   return {
     config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: '需要你的回答' }, template: 'blue' },
-    elements,
+    header: questionHeader(),
+    elements: questionBodyElements(spec),
   }
+}
+
+/** The header a standalone question card carries. */
+export function questionHeader(): FeishuActionCard['header'] {
+  return { title: { tag: 'plain_text', content: '需要你的回答' }, template: 'blue' }
 }
 
 function skipButton(pendingId: string): unknown {
