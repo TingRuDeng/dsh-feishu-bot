@@ -5082,6 +5082,67 @@ describe('assembled bridge (M1 acceptance)', () => {
     }, { timeout: 5_000, interval: 20 })
   })
 
+  it('question: an abandoned request rejects once, without an unhandled throw', { timeout: 20_000 }, async () => {
+    // `skipped` is one arm of a Promise.race, and that arm used to THROW.
+    // Superseding, timing out, or answering in the Web GUI resolves it, so the
+    // throw could land after the race had settled, with nothing left to consume
+    // it. DSH's installFailLoud treats ANY unhandled rejection as a fatal load
+    // failure and exits the process, so this was a server-kill path.
+    //
+    // The arm now delivers a value and the awaiting site raises the error, so
+    // exactly one rejection exists and it is always the caller's to observe.
+    const rejections: unknown[] = []
+    const observe = (reason: unknown): void => { rejections.push(reason) }
+    process.on('unhandledRejection', observe)
+    try {
+      const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+      await deliver({ text: '/new' })
+      await deliver({ text: '保持一个开放任务' })
+      const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+      const first = ctx.waterfall(
+        'user-questions/request',
+        { agent, questions: [{ id: 'q1', question: '第一个问题？' }] },
+        () => Promise.reject(new Error('no answerer')),
+      )
+      await vi.waitFor(() => {
+        if (!feishu.cards.some(card => JSON.stringify(card.card).includes('第一个问题'))) {
+          throw new Error('first question card is not visible yet')
+        }
+      }, { timeout: 5_000, interval: 20 })
+
+      // The newer request supersedes the older one. This one is asserted too:
+      // leaving it unattended would reject during teardown and that rejection
+      // would be this test's own leak, not the bridge's.
+      const second = ctx.waterfall(
+        'user-questions/request',
+        { agent, questions: [{ id: 'q2', question: '第二个问题？' }] },
+        () => new Promise(() => {}),
+      )
+      const secondSettled = second.catch((error: unknown) => error)
+      // The caller still sees the abort, with its original code and message.
+      await expect(first).rejects.toMatchObject({ code: 'ASK_ABORTED' })
+      await new Promise(resolve => setTimeout(resolve, 300))
+
+      const questionLeaks = rejections.filter(
+        reason => reason instanceof Error && /not answered in Feishu/u.test(reason.message))
+      expect(questionLeaks).toEqual([])
+      // The second question is still open. Answer it through its own card so it
+      // settles here; leaving it open would reject during teardown, and that
+      // rejection would belong to this test rather than to the bridge.
+      const secondCard = feishu.cards.filter(
+        c => cardButtonValue(c.card, '跳过') !== undefined
+          && JSON.stringify(c.card).includes('第二个问题')).at(-1)
+      expect(secondCard).toBeDefined()
+      await feishu.clickCard(OWNER, secondCard!.messageId, cardButtonValue(secondCard!.card, '跳过'))
+      // A skip is a submitted answer with empty `selected`, not an abort, so
+      // this request settles normally.
+      await expect(secondSettled).resolves.toEqual({ answers: [{ id: 'q2', selected: [] }] })
+    } finally {
+      process.off('unhandledRejection', observe)
+    }
+  })
+
   it('still answers from Feishu when the Web GUI never answers', { timeout: 20_000 }, async () => {
     // The race must not make Feishu unusable when the Web answerer stays silent
     // (that is the phone-only case the channel exists for).

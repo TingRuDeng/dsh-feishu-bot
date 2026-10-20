@@ -2468,13 +2468,27 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       return answer
     }, (): Promise<AskUserQuestionAnswer> => new Promise<AskUserQuestionAnswer>(() => {}))
     // A free-text reply is the answer; see `answerPendingQuestionWithText`.
+    //
+    // The abandoned arm must NOT throw. It is one arm of this race, and it
+    // resolves whenever the question is settled by any other path — answered in
+    // the Web GUI, superseded, withdrawn, or skipped. If that resolution lands
+    // after the race has already settled elsewhere, a throw here has no consumer
+    // left: it becomes an unhandled rejection, which DSH's `installFailLoud`
+    // treats as a fatal load failure and exits the process on. Delivering a
+    // sentinel instead moves the error to this one awaiting site, so exactly one
+    // rejection exists and it always belongs to the caller.
     return Promise.race([
       answered,
-      skipped.then((reason): AskUserQuestionAnswer => {
-        throw new UserQuestionError(`question was not answered in Feishu (${reason})`, 'ASK_ABORTED')
-      }),
+      skipped.then(reason => ({ abandoned: reason as string }) as const),
       webAnswer,
-    ])
+    ]).then((outcome) => {
+      if (typeof outcome === 'object' && outcome !== null && 'abandoned' in outcome) {
+        throw new UserQuestionError(
+          `question was not answered in Feishu (${outcome.abandoned})`, 'ASK_ABORTED',
+        )
+      }
+      return outcome as AskUserQuestionAnswer
+    })
   }, { prepend: true })
 
   /**
