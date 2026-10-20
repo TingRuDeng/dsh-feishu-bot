@@ -4572,6 +4572,17 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       await pendingCards.delete(key)
     }
     for (const [messageId, specs] of byMessage) {
+      // A record whose card was shared with a task must not have that task's
+      // card overwritten by this approvals-only render. The sweep runs before
+      // anything is resumed, so no live tracker can own one yet; checking the
+      // trackers anyway keeps this from silently destroying a progress card if
+      // the startup order ever changes.
+      const ownedByTask = [...cards.values()].some(tracker => tracker.messageId === messageId)
+      if (ownedByTask) {
+        ctx.logger.warn('feishu-audit action=approval-freeze-skipped message=%s reason=card-is-a-task-card',
+          auditHash(messageId))
+        continue
+      }
       void ctx.feishu.patchCard(messageId, renderApprovalGroupCard(specs.map(spec => ({ spec, state: 'invalidated' }))))
         .catch((error: unknown) => {
           ctx.logger.warn('feishu-bridge stale approval card freeze failed: %s', safeErrorFact(error))

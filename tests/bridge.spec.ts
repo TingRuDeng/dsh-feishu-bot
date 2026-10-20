@@ -7,7 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import LlmRuntime, { createMessage, createUserMessage, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
@@ -2220,6 +2220,37 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(JSON.stringify(feishu.cards.at(-1)?.card)).toContain('1/2 待处理')
   })
 
+
+
+  it('freezes a stale approval card that no live tracker owns', { timeout: 20_000 }, async () => {
+    // The startup sweep exists to clear buttons left by a previous process:
+    // their owner is gone, so the card would otherwise keep dead buttons
+    // forever. This is the sweep's normal case and must keep working.
+    const root = await mkdtemp(join(tmpdir(), 'feishu-bridge-sweep-'))
+    dirs.push(root)
+    const storageDir = join(root, 'storages')
+    await mkdir(storageDir, { recursive: true })
+    await writeFile(join(storageDir, 'feishu_bot.json'), JSON.stringify({
+      unit: { name: 'feishu_bot', version: 1 },
+      global: null,
+      tables: {
+        pending_cards: {
+          pc_stale_1: {
+            kind: 'approval', pendingId: 'pc_stale_1', chatId: 'oc_chat_1',
+            approvalId: 'stale-approval', toolName: 'Bash',
+            sessionTitle: 'feishu-bridge-x', presentation: 'visible',
+            cardMessageId: 'card_stale',
+            createdAt: 1,
+          },
+        },
+      },
+    }), 'utf8')
+
+    const { feishu } = await mountBridge(new MockAdapter(['hang']), {}, root)
+    // Its own card is frozen, and the record is consumed.
+    expect(feishu.cards.some(card => card.messageId === 'card_stale'
+      && JSON.stringify(card.card).includes('已失效'))).toBe(true)
+  })
 
 
   it('settles an already-visible approval as unavailable when the bridge is disposed', { timeout: 20_000 }, async () => {
