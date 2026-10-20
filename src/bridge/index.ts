@@ -1479,10 +1479,25 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         // The projection already folded this direct input, so it owns the
         // task boundary (taskStartSeq) and the turn that opened it.
         const folded = currentTaskFold(session)
-        if (folded === undefined || folded.taskMessageId !== directMessageId) return
+        // The newest message gets its own card, and that card shows the WHOLE
+        // task it belongs to. A follow-up inside a running turn is
+        // supplementary input for the same task, so the new card continues the
+        // task's `taskStartSeq` instead of starting from this message: the
+        // operator sees every progress line gathered so far without scrolling
+        // back, which is the point of moving the card to where they last spoke.
+        //
+        // A message that begins a genuinely new task still gets its own
+        // boundary, which is what `folded.taskMessageId === directMessageId`
+        // reports once the projection has folded it.
+        const continuesTask = folded !== undefined
+          && folded.taskMessageId !== directMessageId
+          && !folded.settled
         tracker = {
-          turn: folded.snapshot.turn,
-          taskStartSeq: folded.taskStartSeq,
+          turn: folded === undefined || continuesTask
+            ? (typeof (event.data as { turn?: unknown }).turn === 'number'
+                ? (event.data as { turn: number }).turn : 0)
+            : folded.snapshot.turn,
+          taskStartSeq: continuesTask ? folded.taskStartSeq : (folded?.taskStartSeq ?? event.seq),
           taskMessageId: directMessageId,
           sessionId: binding.sessionId, messageId: undefined,
           dirty: false, terminalRequested: false,
@@ -1626,21 +1641,28 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       // that card's id — which is exactly what the click handler validates
       // against, so approval clicks keep resolving.
       //
-      // A tracker with no message id yet (its create is still in flight, or it
-      // failed) cannot host anything: falling through to a card of its own is
-      // what keeps an approval answerable instead of silently dropping it.
+      // Host this approval on the chat's CURRENT task card. `writeCardNow`
+      // opens that card when its create has not happened yet, which is the
+      // normal state right after the operator sends a follow-up message inside
+      // a running task: the tracker for the new task exists but its card is
+      // still queued behind the throttle. Requiring a message id here made the
+      // approval skip the new task and open a card of its own, so a decision
+      // that belonged to the message just sent appeared under the PREVIOUS
+      // task's card instead.
       const host = cards.get(group.chatId)
-      if (host !== undefined && host.messageId !== undefined
-        && host.sessionId === group.sessionId) {
-        group.messageId = host.messageId
+      if (host !== undefined && host.sessionId === group.sessionId) {
         operation = 'patch'
         host.decisionKeys.add(approvalDecisionKey(group))
         // Write it NOW rather than through the throttled actor: admission has
         // to know whether this item is visible before it lets the agent wait,
         // and a failed write must fall back to a card of its own instead of
-        // leaving the approval unanswerable.
+        // leaving the approval unanswerable. This also CREATES the card when
+        // the new task has not opened one yet, so the id must be read after.
         const written = await writeCardNow(group.chatId, host)
-        if (written.ok) return group.messageId
+        if (written.ok && host.messageId !== undefined) {
+          group.messageId = host.messageId
+          return group.messageId
+        }
         // The shared card refused this item, so drop the adoption and give the
         // item a card of its own. Repointing `groupOf` is part of that: the
         // click handler validates a button against the message id the item's
@@ -2435,9 +2457,19 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     const card = renderQuestionCard({ ...spec, questions })
     try {
       if (hostUsable) {
-        entry.messageId = host.messageId
-        entry.hostedByTask = true
+        // The task card is created here when it does not exist yet, which is
+        // the normal state right after a follow-up message opened a new task:
+        // its tracker exists but its card is still queued behind the throttle.
+        // Reading the id before the write left it undefined, so the settled
+        // card could never be patched and the buttons stayed live.
         adoptQuestionIntoTaskCard(boundChatId, host)
+        if (host.messageId === undefined) await writeCardNow(boundChatId, host)
+        if (host.messageId !== undefined) {
+          entry.messageId = host.messageId
+          entry.hostedByTask = true
+        } else {
+          entry.messageId = await ctx.feishu.sendCard(boundChatId, card)
+        }
       } else {
         entry.messageId = await ctx.feishu.sendCard(boundChatId, card)
       }

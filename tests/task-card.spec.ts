@@ -314,6 +314,29 @@ describe('Feishu task fold', () => {
     expect(JSON.stringify(settled)).not.toContain('intermediate')
   })
 
+  it('keeps the task and its progress when a follow-up arrives inside the turn', () => {
+    // Reported: sending a follow-up while a task ran made the newest card start
+    // blank, so the operator had to scroll back to see what had been done.
+    //
+    // DSH steers such a message into the OPEN turn: it is supplementary input
+    // for the same task, not a new one. The task must therefore survive, with
+    // only the display moving to the newest message.
+    seq = 0
+    const events = [
+      turnStart(1),
+      directUser('task-a'),
+      assistantText(1, 'work so far'),
+      // No turn/end: the operator replied while the task was still running.
+      directUser('follow-up'),
+    ]
+
+    const fold = reduceFeishuTask(events, events[0]!.seq)!
+    // The display moves to the newest message...
+    expect(fold.taskMessageId).toBe('follow-up')
+    // ...but the task boundary, and therefore the progress, does NOT restart.
+    expect(fold.taskStartSeq).toBe(events[1]!.seq)
+  })
+
   it('opens a second direct Feishu message as a distinct task boundary', () => {
     seq = 0
     const events = [

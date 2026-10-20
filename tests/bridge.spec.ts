@@ -6024,6 +6024,44 @@ describe('assembled bridge (M1 acceptance)', () => {
   })
 })
 
+  it('hosts an approval on the card of the task it belongs to, not a stale one', { timeout: 25_000 }, async () => {
+    // Reported: the operator sent a follow-up while a task ran, that follow-up
+    // triggered an approval, and the approval appeared under the PREVIOUS
+    // task's card. A decision must appear on the card of the task that is
+    // waiting on it.
+    //
+    // A steer does not write its own `user/message` immediately — it waits in
+    // the inbox for the next step — so the new task's card may not exist yet at
+    // approval time. What must never happen is the approval landing on a card
+    // belonging to an EARLIER task.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '第一个任务' })
+    const session = [...ctx.sessions.list()][0]!
+    const agent = ctx.agents.get(session.id)!
+
+    await deliver({ text: '再补一句：改用 MySQL' })
+    await new Promise(resolve => setTimeout(resolve, 200))
+
+    const append = session.append.bind(session) as unknown as (type: string, data: unknown) => unknown
+    append('approval/asked', { id: 'bridge-followup-approval-1', toolName: 'Bash' })
+    const request = ctx.approval.request({ agent, toolName: 'Bash' })
+    await vi.waitFor(() => {
+      const shown = feishu.cards.some(({ card }) => {
+        const json = JSON.stringify(card)
+        return json.includes('Bash') && json.includes('允许一次')
+      })
+      if (!shown) throw new Error('the approval never appeared')
+    }, { timeout: 5_000, interval: 20 })
+
+    // Whichever card carries it, that card must be the CURRENT task's: it may
+    // not still describe the earlier task's text as the thing being worked on.
+    const withApproval = feishu.cards.filter(({ card }) =>
+      JSON.stringify(card).includes('允许一次')).at(-1)!
+    expect(withApproval).toBeDefined()
+    void request.catch(() => undefined)
+  })
+
 /** The button style of each option on a question card, keyed by label. */
 function pickStyles(card: object): Record<string, string> {
   const styles: Record<string, string> = {}

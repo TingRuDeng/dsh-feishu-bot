@@ -602,6 +602,23 @@ export function foldFeishuTaskStep(
     const directId = directBoundTaskMessageId(event.data)
     if (directId !== null) {
       if (state.taskMessageId !== null) {
+        // A follow-up that arrives INSIDE a running task is supplementary input
+        // for that same task, not a new one: DSH steers it into the open turn
+        // rather than opening a turn of its own. Cutting the task there threw
+        // away every progress line gathered so far, so the operator's newest
+        // card started blank and the work they were watching moved to a card
+        // they had to scroll back to.
+        //
+        // The distinction is whether a turn is ALREADY open for this task. A
+        // message that opens a new turn starts a new task; a message that
+        // arrives with the task's turn still open is supplementary input, so
+        // the task is kept and only the display moves to the newest message.
+        if (state.openTurn && state.turn === state.lastEndedTurn + 1
+          && state.lastTurnEndSeq < state.taskStartSeq) {
+          state.taskMessageId = directId
+          state.scannedThrough = event.seq
+          return { applied: true, opened: false, boundsTask: false }
+        }
         state.boundedByNextTask = true
         // turn/start precedes user/message, so the first event of the next
         // human task may already have been tentatively observed. Roll the
