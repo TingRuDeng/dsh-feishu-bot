@@ -112,6 +112,17 @@ function itemLines(spec: ApprovalCardSpec): string {
  * @param items - the group's items in arrival order.
  * @returns the card JSON for msg_type `interactive` (send and patch alike).
  */
+/** The approval group's title, used as the card header when it stands alone. */
+export function approvalHeading(items: readonly ApprovalGroupItem[]): string {
+  const pending = items.filter(item => item.state === 'pending').length
+  return items.length > 1 ? `审批请求（${pending}/${items.length} 待处理）` : '审批请求'
+}
+
+/** The approval group's title as an in-card heading, for a merged card. */
+export function approvalHeadingElement(items: readonly ApprovalGroupItem[]): unknown {
+  return { tag: 'div', text: { tag: 'lark_md', content: `**${approvalHeading(items)}**` } }
+}
+
 export function renderApprovalGroupCard(items: readonly ApprovalGroupItem[]): FeishuActionCard {
   const pending = items.filter(item => item.state === 'pending').length
   if (pending === 0) {
@@ -129,10 +140,7 @@ export function renderApprovalGroupCard(items: readonly ApprovalGroupItem[]): Fe
     }
   }
   const header = {
-    title: {
-      tag: 'plain_text' as const,
-      content: items.length > 1 ? `审批请求（${pending}/${items.length} 待处理）` : '审批请求',
-    },
+    title: { tag: 'plain_text' as const, content: approvalHeading(items) },
     template: 'orange',
   }
   const elements: unknown[] = []

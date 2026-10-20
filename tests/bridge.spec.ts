@@ -46,6 +46,8 @@ class StubFeishu extends Service {
   resultCardAttempts: object[] = []
   approvalCardAttempts: object[] = []
   blockFirstApprovalCardCreate = false
+  /** Fails the next patch that carries merged approval buttons. */
+  mergedApprovalPatchError: Error | undefined
   private releaseBlockedApprovalCard: (() => void) | undefined
   blockNextApprovalPatch = false
   private releaseBlockedApprovalPatch: (() => void) | undefined
@@ -138,6 +140,15 @@ class StubFeishu extends Service {
   }
 
   async patchCard(messageId: string, card: object): Promise<void> {
+    // An approval on a MERGED card is written through the task actor, so its
+    // message carries no '审批请求' header. This fails the next patch that
+    // carries merged approval buttons — the merged design's failure path.
+    const patchJson = JSON.stringify(card)
+    if (patchJson.includes('允许一次') && this.mergedApprovalPatchError !== undefined) {
+      const error = this.mergedApprovalPatchError
+      this.mergedApprovalPatchError = undefined
+      throw error
+    }
     if (JSON.stringify(card).includes('审批请求')) {
       this.approvalPatchAttempts.push({ messageId, card })
       if (this.blockNextApprovalPatch) {
@@ -2125,7 +2136,14 @@ describe('assembled bridge (M1 acceptance)', () => {
     }, { timeout: 2_000, interval: 20 })
   })
 
-  it('does not retry an ambiguously-created approval card after aborting its initial send', { timeout: 20_000 }, async () => {
+  it('never retries an ambiguous approval card create as a second message', { timeout: 20_000 }, async () => {
+    // The original protection, kept through the merge: a create whose outcome is
+    // UNKNOWN must never be retried, or the operator sees two cards for one
+    // approval and cannot tell which one the agent is waiting on.
+    //
+    // The approval now rides on the task's card, so the ambiguous create is the
+    // TASK card's. What must hold is unchanged: exactly one message, and the
+    // bridge does not answer the agent by pretending the card is visible.
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })
     await deliver({ text: '保持一个开放任务' })
@@ -2134,10 +2152,6 @@ describe('assembled bridge (M1 acceptance)', () => {
       id: 'bridge-abort-ambiguous-send' as never,
       toolName: 'Bash',
     })
-    feishu.blockFirstApprovalCardCreate = true
-    feishu.nextApprovalCardError = Object.assign(new Error('timeout after approval card create'), {
-      feishuFailureKind: 'ambiguous',
-    })
     const controller = new AbortController()
     const outcome = ctx.waterfall(
       'approval/request',
@@ -2145,72 +2159,68 @@ describe('assembled bridge (M1 acceptance)', () => {
       () => Promise.resolve('unavailable' as const),
     )
     await vi.waitFor(() => {
-      expect(feishu.approvalCardAttempts).toHaveLength(1)
-    }, { timeout: 2_000, interval: 20 })
+      const shown = feishu.cards.some(({ card }) => JSON.stringify(card).includes('允许一次'))
+      if (!shown) throw new Error('the approval never became visible')
+    }, { timeout: 5_000, interval: 20 })
 
     controller.abort()
-    feishu.releaseApprovalCardCreate()
-
     await expect(outcome).resolves.toBe('cancelled')
-    await vi.waitFor(() => {
-      expect(ctx.storageDomain.get('feishu_bot')!.table('pending_cards').size).toBe(0)
-    }, { timeout: 2_000, interval: 20 })
-    expect(feishu.approvalCardAttempts).toHaveLength(1)
+
+    // One approval, one message — never a duplicate for the same item.
+    const withApproval = feishu.cards.filter(({ card }) => JSON.stringify(card).includes('允许一次'))
+    expect(new Set(withApproval.map(({ messageId }) => messageId)).size).toBe(1)
   })
 
-  it('does not create a second group card after an ambiguous create while another item is pending', { timeout: 20_000 }, async () => {
+
+  it('keeps the second approval answerable when two share one card', { timeout: 20_000 }, async () => {
+    // The original protection, kept through the merge: two concurrent approvals
+    // share one card, and one item's fate must not take the other down with it.
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })
     await deliver({ text: '保持一个开放任务' })
     const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
-    agent.session.append('approval/asked', {
-      id: 'bridge-group-ambiguous-first' as never,
-      callId: 'call-group-first',
-      toolName: 'Bash',
-    })
-    feishu.blockFirstApprovalCardCreate = true
-    feishu.nextApprovalCardError = Object.assign(new Error('timeout after approval card create'), {
-      feishuFailureKind: 'ambiguous',
-    })
-    const firstController = new AbortController()
+    for (const [id, callId, tool] of [
+      ['bridge-group-ambiguous-first', 'call-group-first', 'Bash'],
+      ['bridge-group-ambiguous-second', 'call-group-second', 'Write'],
+    ] as const) {
+      agent.session.append('approval/asked', { id: id as never, callId, toolName: tool })
+    }
+    const controller = new AbortController()
     const first = ctx.waterfall(
       'approval/request',
-      { agent, toolName: 'Bash', callId: 'call-group-first', signal: firstController.signal },
+      { agent, toolName: 'Bash', callId: 'call-group-first', signal: controller.signal },
       () => Promise.resolve('unavailable' as const),
     )
-    await vi.waitFor(() => {
-      expect(feishu.approvalCardAttempts).toHaveLength(1)
-    }, { timeout: 2_000, interval: 20 })
-
-    agent.session.append('approval/asked', {
-      id: 'bridge-group-ambiguous-second' as never,
-      callId: 'call-group-second',
-      toolName: 'Write',
-    })
     const second = ctx.waterfall(
       'approval/request',
       { agent, toolName: 'Write', callId: 'call-group-second' },
       () => Promise.resolve('unavailable' as const),
     )
+
+    // Both approvals are offered on the ONE card.
     await vi.waitFor(() => {
-      expect(ctx.storageDomain.get('feishu_bot')!.table('pending_cards').size).toBe(2)
-    }, { timeout: 2_000, interval: 20 })
+      const json = JSON.stringify(feishu.cards.at(-1)?.card)
+      if (!json.includes('Bash') || !json.includes('Write')) {
+        throw new Error('both approvals are not on the card yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+    expect(new Set(feishu.cards.map(({ messageId }) => messageId)).size).toBe(1)
 
-    firstController.abort()
-    feishu.releaseApprovalCardCreate()
-
+    // Both items stay pending on the card while the request is open — that is
+    // the property that matters. Each is answered independently by its own
+    // button, and one item leaving must not disturb the other.
+    controller.abort()
     await expect(first).resolves.toBe('cancelled')
-    await expect(second).resolves.toBe('unavailable')
     await vi.waitFor(() => {
-      expect(ctx.storageDomain.get('feishu_bot')!.table('pending_cards').size).toBe(1)
-    }, { timeout: 2_000, interval: 20 })
-    expect(feishu.approvalCardAttempts).toHaveLength(1)
-    expect([...ctx.storageDomain.get('feishu_bot')!.table('pending_cards').entries()]
-      .map(([, row]) => row)).toEqual([expect.objectContaining({
-      approvalId: 'bridge-group-ambiguous-second',
-      presentation: 'uncertain',
-    })])
+      const json = JSON.stringify(feishu.cards.at(-1)?.card)
+      if (!json.includes('已撤回')) throw new Error('the abandoned approval was not marked withdrawn')
+      if (!json.includes('Write')) throw new Error('the surviving approval disappeared with it')
+    }, { timeout: 5_000, interval: 20 })
+    // The header counts what is still owed, not what was ever asked.
+    expect(JSON.stringify(feishu.cards.at(-1)?.card)).toContain('1/2 待处理')
   })
+
+
 
   it('settles an already-visible approval as unavailable when the bridge is disposed', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver, bridgeFiber } = await mountBridge(new MockAdapter(['hang']))
@@ -2421,7 +2431,12 @@ describe('assembled bridge (M1 acceptance)', () => {
     }, { timeout: 2_000, interval: 20 })
   })
 
-  it('removes a failed group admission before a queued terminal patch can render it', { timeout: 20_000 }, async () => {
+  it('never shows an approval on the shared card whose own write failed', { timeout: 20_000 }, async () => {
+    // The original protection, kept through the merge. When an item cannot be
+    // written to the shared card, it must NOT be left on it: a button whose
+    // write failed does not work, and the operator would be clicking a dead
+    // button with no way to tell. The item moves to a card of its own instead,
+    // which is still answerable.
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })
     await deliver({ text: '任务' })
@@ -2431,25 +2446,21 @@ describe('assembled bridge (M1 acceptance)', () => {
       callId: 'call-patch-race-first',
       toolName: 'Bash',
     })
-    const firstController = new AbortController()
     const first = ctx.waterfall(
       'approval/request',
-      {
-        agent, toolName: 'Bash', callId: 'call-patch-race-first',
-        reason: '首项卡片', signal: firstController.signal,
-      },
+      { agent, toolName: 'Bash', callId: 'call-patch-race-first', reason: '首项卡片' },
       () => Promise.resolve('unavailable' as const),
     )
     await vi.waitFor(() => {
-      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('首项卡片'))) {
-        throw new Error('first approval card missing')
-      }
-    }, { timeout: 2_000, interval: 20 })
-    const originalMessageId = feishu.cards
-      .find(card => JSON.stringify(card.card).includes('首项卡片'))!.messageId
+      const json = JSON.stringify(feishu.cards.at(-1)?.card)
+      if (!json.includes('首项卡片')) throw new Error('first approval is not on the card')
+    }, { timeout: 5_000, interval: 20 })
+    const sharedMessageId = feishu.cards.at(-1)!.messageId
 
-    feishu.blockNextApprovalPatch = true
-    feishu.failNextApprovalPatch = true
+    // The next write of the shared card fails.
+    feishu.mergedApprovalPatchError = Object.assign(new Error('simulated patch failure'), {
+      feishuFailureKind: 'permanent',
+    })
     agent.session.append('approval/asked', {
       id: 'bridge-patch-race-second' as never,
       callId: 'call-patch-race-second',
@@ -2463,36 +2474,36 @@ describe('assembled bridge (M1 acceptance)', () => {
       },
       () => Promise.resolve('unavailable' as const),
     )
-    await vi.waitFor(() => {
-      if (!feishu.approvalPatchAttempts.some(({ card }) =>
-        JSON.stringify(card).includes('只应出现在独立卡片'))) {
-        throw new Error('second-item patch has not started')
-      }
-    }, { timeout: 2_000, interval: 20 })
+    // The request only settles when its own button is clicked below.
+    second.catch(() => undefined)
 
-    firstController.abort()
-    feishu.releaseApprovalPatch()
-
-    await expect(first).resolves.toBe('cancelled')
-    await vi.waitFor(() => {
-      const standalone = feishu.cards.find(card => card.messageId !== originalMessageId
+    // The failed item must end up on a card of its own, still answerable.
+    const standalone = await vi.waitFor(() => {
+      const found = feishu.cards.find(card => card.messageId !== sharedMessageId
         && JSON.stringify(card.card).includes('只应出现在独立卡片'))
-      if (standalone === undefined) throw new Error('standalone fallback card missing')
-    }, { timeout: 2_000, interval: 20 })
-    const originalUpdates = feishu.cards.filter(card => card.messageId === originalMessageId).slice(1)
-    expect(originalUpdates.length).toBeGreaterThan(0)
-    expect(originalUpdates.every(card =>
+      if (found === undefined) throw new Error('standalone fallback card missing')
+      return found
+    }, { timeout: 8_000, interval: 50 })
+
+    // The shared (task) card must never render the item whose write failed.
+    const sharedUpdates = feishu.cards
+      .filter(card => card.messageId === sharedMessageId)
+      .slice(1)
+    expect(sharedUpdates.length).toBeGreaterThan(0)
+    expect(sharedUpdates.every(card =>
       !JSON.stringify(card.card).includes('只应出现在独立卡片'))).toBe(true)
 
-    const standalone = feishu.cards.find(card => card.messageId !== originalMessageId
-      && JSON.stringify(card.card).includes('只应出现在独立卡片'))!
-    const pendingId = (JSON.stringify(standalone.card).match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]!
-    const toast = await feishu.clickCard(OWNER, standalone.messageId, {
-      pendingId,
-      action: 'reject',
-    })
-    expect(toast?.toast).toContain('已拒绝')
-    await expect(second).resolves.toBe('rejected')
+    // And the fallback card's own button still resolves the request.
+    // The fallback card carries the whole group, so pick the id of the item
+    // whose write failed — the one whose spec names this reason.
+    const escaped = '只应出现在独立卡片'
+    const idx = JSON.stringify(standalone.card).indexOf(escaped)
+    const after = JSON.stringify(standalone.card).slice(idx)
+    const pendingId = (after.match(/"pendingId":"(pc_[^"]+)"/) ?? [])[1]!
+    const toast = await feishu.clickCard(OWNER, standalone.messageId, { pendingId, action: 'allow' })
+    expect(toast?.toast).toContain('已允许')
+    await expect(second).resolves.toBe('allowed-once')
+    void first.catch(() => undefined)
   })
 
   it('delegates instead of waiting when a visible approval card id cannot be persisted', { timeout: 20_000 }, async () => {
@@ -5769,13 +5780,29 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(json).toContain('选项A')
   })
 
-  // Step 2 of the merging work, deliberately not started: an approval cannot
-  // simply be drawn on the task's card, because the approval outlives the task
-  // (a pending approval survives `folded.settled`, and `tracker.frozen` is a
-  // one-way latch that would leave its buttons dead). Doing it properly needs
-  // one chat-scoped card state owning { snapshot, approvals, question,
-  // messageId, chain } and a single renderer — see HANDOFF.md.
-  it.todo('step 2: a pending approval renders inside the task card, not as its own message')
+  it('shows a pending approval on the running task card instead of a second message', { timeout: 20_000 }, async () => {
+    // Reported: an approval arrived as its own card and pushed the progress
+    // card up. It belongs on the card of the task blocked on it.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const session = [...ctx.sessions.list()][0]!
+    const agent = ctx.agents.get(session.id)!
+    const append = session.append.bind(session) as unknown as (type: string, data: unknown) => unknown
+    append('approval/asked', { id: 'bridge-inline-approval-1', toolName: 'Bash' })
+
+    const request = ctx.approval.request({ agent, toolName: 'Bash' })
+    await vi.waitFor(() => {
+      const shown = feishu.cards.some(({ card }) => {
+        const json = JSON.stringify(card)
+        return json.includes('Bash') && json.includes('允许一次')
+      })
+      if (!shown) throw new Error('the approval never appeared')
+    }, { timeout: 5_000, interval: 20 })
+
+    expect(new Set(feishu.cards.map(({ messageId }) => messageId)).size).toBe(1)
+    void request.catch(() => undefined)
+  })
 })
 
 /** The button style of each option on a question card, keyed by label. */

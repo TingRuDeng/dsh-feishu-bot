@@ -60,6 +60,7 @@ import {
   foldFeishuTaskResults,
   isInternalTaskMessage,
   renderTaskCard,
+  type FeishuCard,
   type FeishuTaskFold,
   type TokenInfo,
 } from './task-card.ts'
@@ -77,7 +78,10 @@ import {
   planDurableRetention, planRetention, pruneProjectionCursors,
   sortPendingOutbox, watermarkKey,
 } from './reliability.ts'
-import { ITEM_STATE_COPY, renderApprovalGroupCard, type ApprovalCardSpec, type ApprovalItemState } from './approval.ts'
+import {
+  approvalHeadingElement, ITEM_STATE_COPY, renderApprovalGroupCard,
+  type ApprovalCardSpec, type ApprovalItemState,
+} from './approval.ts'
 import {
   QUESTION_CLICK, questionBodyElements, renderAnsweredQuestionCard, renderQuestionCard,
   type QuestionCardItem, type QuestionCardSpec, type QuestionClickValue,
@@ -1041,6 +1045,19 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     /** Bound session needed when a pending timer is promoted during drain. */
     sessionId: SessionIdString
     /**
+     * True while something on this card is still waiting to be answered.
+     *
+     * A settled task must stay writable as long as an approval or question on
+     * its card is undecided, or the re-render that clears those buttons can
+     * never happen and they stay on screen as dead buttons.
+     *
+     * The task actor is now the ONLY writer for a chat's card. Approvals and
+     * questions used to own a message id each and patch it directly, so two
+     * writers could overwrite one another and a settled task froze with live
+     * buttons on it. They now mark this tracker dirty instead.
+     */
+    decisionKeys: Set<string>
+    /**
      * Fold rebuilt from the durable event log, set only when the session is not
      * live (a task still running at startup). Without it the actor could not
      * render a card for a session the runtime has not resumed yet.
@@ -1056,10 +1073,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     lastPatchAt: number
     frozen: boolean
     timer: ReturnType<typeof setTimeout> | undefined
-    actor: Promise<void> | undefined
+    /**
+     * The in-flight write. Resolves with its outcome so a caller that
+     * piggybacked on the shared writer (an approval, a question) can tell
+     * whether its own update landed.
+     */
+    actor: Promise<{ ok: true } | { ok: false; error: unknown }> | undefined
   }
   const cards = new Map<string, CardTracker>() // key: chatId
-  const cardActors = new Set<Promise<void>>()
+  const cardActors = new Set<Promise<unknown>>()
   const CARD_EVENT_TYPES = new Set([
     'user/message', 'turn/start', 'tool/call', 'tool/result',
     'tool/code-dispatch', 'llm/retry', 'turn/end',
@@ -1071,13 +1093,92 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     tracker.timer = undefined
   }
 
+  /**
+   * The one card for this chat: the task's progress, plus every decision on it.
+   *
+   * The single renderer the whole design exists to have. `undefined` means there
+   * is nothing this tracker can honestly draw — no task fold and no decision.
+   */
+  const renderCard = (chatId: string, tracker: CardTracker): FeishuCard | undefined => {
+    const session = ctx.sessions.list().find(s => String(s.id) === (tracker.sessionId as string))
+    // A session still running at startup is not resumed yet, so it has no
+    // projection to read: the tracker carries the fold rebuilt from the durable
+    // log instead. Everything below needs only that fold, except the optional
+    // token meter, which is simply skipped.
+    const folded = session === undefined ? tracker.coldFold : currentTaskFold(session)
+    if (folded === undefined || folded.taskMessageId !== tracker.taskMessageId) {
+      // The task lines are unknowable (the session is gone, or this tracker
+      // belongs to an older task), but a decision still on the card is not: the
+      // card must be re-drawn so its buttons go away rather than being left on
+      // screen as dead buttons nothing will ever update again.
+      if (tracker.decisionKeys.size === 0) return undefined
+      return renderDecisionOnlyCard(chatId)
+    }
+    const meter = ctx.get('tokenMeter') as { measure?: (s: unknown) => { totalTokens: number; baseline: { kind: string } } } | undefined
+    let tokens: TokenInfo | undefined
+    try {
+      const measured = session === undefined ? undefined : meter?.measure?.(session)
+      if (measured !== undefined) {
+        tokens = { totalTokens: measured.totalTokens, anchored: measured.baseline.kind === 'usage' }
+      }
+    } catch { /* card facts remain valid without token measurement */ }
+    const cwd = session?.header.cwd
+    return renderTaskCard(folded.snapshot, tokens, {
+      ...(cwd === undefined ? {} : { title: workspaceLabel(cwd) }),
+      progressDetail: config.progressDetail,
+      ...(tracker.resumed === true ? { resumed: true } : {}),
+      ...cardDecisions(chatId),
+    })
+  }
+
+  /**
+   * Render and write a chat's card exactly once, right now.
+   *
+   * Used when an approval or question needs its update to have LANDED before
+   * the caller proceeds — admission must know whether the item is visible, and
+   * a failure must fall back to a card of its own. The throttled actor cannot
+   * promise that: its `finally` may start another run, so awaiting it says
+   * nothing about whether this update was written.
+   * @returns the write outcome.
+   */
+  const writeCardNow = async (
+    chatId: string, tracker: CardTracker,
+  ): Promise<{ ok: true } | { ok: false; error: unknown }> => {
+    if (tracker.messageId === undefined) {
+      // Serialize behind any create already in flight so one card is created.
+      if (tracker.actor !== undefined) await tracker.actor
+    }
+    try {
+      const card = renderCard(chatId, tracker)
+      if (card === undefined) return { ok: true }
+      if (tracker.messageId === undefined) {
+        tracker.messageId = await ctx.feishu.sendCard(chatId, card)
+      } else {
+        await ctx.feishu.patchCard(tracker.messageId, card)
+      }
+      tracker.lastPatchAt = Date.now()
+      return { ok: true }
+    } catch (error: unknown) {
+      return { ok: false, error }
+    }
+  }
+
   const startCardActor = (
     chatId: string, sessionId: SessionIdString, tracker: CardTracker,
   ): void => {
-    if (tracker.actor !== undefined || tracker.frozen || !tracker.dirty) return
+    // A frozen task whose card still holds an undecided approval or question
+    // must keep updating: that re-render is how the buttons are cleared once
+    // they are answered. Freezing unconditionally is what left live-looking
+    // buttons on a message nothing would ever write again.
+    const writable = !tracker.frozen || tracker.decisionKeys.size > 0
+    if (tracker.actor !== undefined || !tracker.dirty || !writable) return
     clearCardTimer(tracker)
     tracker.dirty = false
     tracker.terminalRequested = false
+    // The outcome of THIS actor run, so a caller that piggybacked on the shared
+    // writer (an approval or a question) can tell whether its own update landed
+    // and fall back to a card of its own when it did not.
+    let lastCardWrite: { ok: true } | { ok: false; error: unknown } | undefined
     const actor = (async () => {
       try {
         const session = ctx.sessions.list().find(s => String(s.id) === (sessionId as string))
@@ -1086,7 +1187,18 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         // durable log instead. Everything below needs only that fold, except
         // the optional token meter, which is simply skipped.
         const folded = session === undefined ? tracker.coldFold : currentTaskFold(session)
-        if (folded === undefined || folded.taskMessageId !== tracker.taskMessageId) return
+        if (folded === undefined || folded.taskMessageId !== tracker.taskMessageId) {
+          // No fold means the session is gone (most often: the bridge is being
+          // disposed) or the tracker belongs to an older task. The task lines
+          // are then unknowable — but a decision still on the card is not: it
+          // must be re-rendered so its buttons go away, instead of being left
+          // on screen as dead buttons nothing will ever update again.
+          if (tracker.messageId === undefined || tracker.decisionKeys.size === 0) return
+          await ctx.feishu.patchCard(tracker.messageId, renderDecisionOnlyCard(chatId))
+          tracker.lastPatchAt = Date.now()
+          lastCardWrite = { ok: true }
+          return
+        }
         const snapshot = folded.snapshot
         // tokenMeter is optional: measurement failure removes only the token line.
         const meter = ctx.get('tokenMeter') as { measure?: (s: unknown) => { totalTokens: number; baseline: { kind: string } } } | undefined
@@ -1104,7 +1216,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           ...(title === undefined ? {} : { title }),
           progressDetail: config.progressDetail,
           ...(tracker.resumed === true ? { resumed: true } : {}),
-          ...pendingQuestionElements(chatId),
+          ...cardDecisions(chatId),
         })
         if (tracker.messageId === undefined) {
           tracker.messageId = await ctx.feishu.sendCard(chatId, card)
@@ -1112,23 +1224,31 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           await ctx.feishu.patchCard(tracker.messageId, card)
         }
         tracker.lastPatchAt = Date.now()
+        lastCardWrite = { ok: true }
         if (folded.settled) tracker.frozen = true
       } catch (error: unknown) {
         // A failed/ambiguous create must never be retried as a second card.
         // Terminal text replies use the durable delivery path instead.
+        lastCardWrite = { ok: false, error }
         tracker.frozen = true
         ctx.logger.warn('feishu-bridge card update failed for %s: %s', auditHash(chatId), safeErrorFact(error))
       } finally {
         tracker.actor = undefined
+        // A frozen tracker with nothing left to show is finished; only a
+        // pending decision keeps it alive, and that decision re-marks it dirty
+        // itself, so there is nothing to chain here.
         if (drainExpired) tracker.frozen = true
-        if (tracker.frozen) clearCardTimer(tracker)
+        if (tracker.frozen && tracker.decisionKeys.size === 0) clearCardTimer(tracker)
         else if (tracker.dirty && tracker.terminalRequested) {
           startCardActor(chatId, sessionId, tracker)
         } else if (tracker.dirty) {
           scheduleCard(chatId, sessionId, tracker)
         }
       }
-    })()
+      // A path that returned before writing anything (nothing to render) still
+      // counts as success: the caller's item simply did not need the card.
+      return lastCardWrite ?? { ok: true as const }
+    })() as Promise<{ ok: true } | { ok: false; error: unknown }>
     tracker.actor = actor
     cardActors.add(actor)
     void actor.then(
@@ -1159,6 +1279,54 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
    * merely pushed the progress card further up the chat, so a couple of
    * questions buried the thing the operator was watching.
    */
+  const approvalElementsFor = (chatId: string): readonly unknown[] => {
+    // A settled group is rotated out of `approvalGroups` into
+    // `settledApprovalGroups`; both must be consulted or the collapsed
+    // "已允许" state would never reach the card.
+    const group = approvalGroups.get(chatId)
+      ?? [...settledApprovalGroups.values()]
+        .find(settled => settled.group.chatId === chatId)?.group
+    if (group === undefined) return []
+    const items = [...group.items.values()]
+    if (items.length === 0) return []
+    return [approvalHeadingElement(items), ...(renderApprovalGroupCard(items).elements as unknown[])]
+  }
+
+  /**
+   * A minimal card holding only this chat's decisions, for when the task's own
+   * progress can no longer be read (the session is gone).
+   *
+   * Used on dispose: the approval's buttons must be cleared even though the
+   * task snapshot behind them is no longer available.
+   */
+  const renderDecisionOnlyCard = (chatId: string): FeishuCard => {
+    const decisions = cardDecisions(chatId)
+    return {
+      config: { wide_screen_mode: true },
+      header: { title: { tag: 'plain_text', content: '审批' }, template: 'orange' },
+      elements: decisions.interactive === undefined ? [] : [...decisions.interactive],
+    }
+  }
+
+  /**
+   * Every decision this chat's card must show: approvals (pending or settled)
+   * followed by the question, if any.
+   *
+   * ONE composer, so there is one card. Approvals and questions used to render
+   * onto message ids of their own, which is what pushed the progress card out
+   * of view and let two writers overwrite each other.
+   */
+  const cardDecisions = (chatId: string): { interactive?: readonly unknown[] } => {
+    const parts: unknown[] = [...approvalElementsFor(chatId)]
+    const question = pendingQuestionElements(chatId)
+    if (question.interactive !== undefined) {
+      if (parts.length > 0) parts.push({ tag: 'hr' })
+      parts.push(...question.interactive)
+    }
+    if (parts.length === 0) return {}
+    return { interactive: parts }
+  }
+
   const pendingQuestionElements = (chatId: string): { interactive?: readonly unknown[] } => {
     const pendingId = pendingQuestionOfChat.get(chatId)
     if (pendingId !== undefined) {
@@ -1195,7 +1363,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
   const requestCard = (
     chatId: string, sessionId: SessionIdString, tracker: CardTracker, terminal: boolean,
   ): void => {
-    if (tracker.frozen) return
+    if (tracker.frozen && tracker.decisionKeys.size === 0) return
     tracker.dirty = true
     if (terminal) {
       tracker.terminalRequested = true
@@ -1288,6 +1456,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       terminalRequested: false,
       lastPatchAt: 0,
       frozen: false,
+      decisionKeys: new Set<string>(),
       timer: undefined,
       actor: undefined,
     }
@@ -1316,7 +1485,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
           taskMessageId: directMessageId,
           sessionId: binding.sessionId, messageId: undefined,
           dirty: false, terminalRequested: false,
-          lastPatchAt: 0, frozen: false, timer: undefined, actor: undefined,
+          lastPatchAt: 0, frozen: false, decisionKeys: new Set<string>(), timer: undefined, actor: undefined,
         }
         cards.set(chatId, tracker)
       } else if (tracker === undefined) {
@@ -1433,6 +1602,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     }
   }
 
+  /**
+   * The card-claim key for an approval group.
+   *
+   * Keyed by the group's pending ids so a settled group releases its claim
+   * without disturbing another group that still owes the operator a decision.
+   */
+  const approvalDecisionKey = (group: ApprovalGroup): string =>
+    `approval:${[...group.items.keys()].sort().join(',')}`
+
   const pushGroup = async (
     group: ApprovalGroup, admittedPendingId?: string,
   ): Promise<ApprovalPushResult> => {
@@ -1442,6 +1620,50 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       // issue a second create when the first message id never became known.
       if (group.messageId === undefined
         && ![...group.items.values()].some(item => item.state === 'pending')) return ''
+      // Hand this update to the chat's card actor when the task card can host
+      // it. The actor is the single writer, so `group.messageId` simply becomes
+      // that card's id — which is exactly what the click handler validates
+      // against, so approval clicks keep resolving.
+      //
+      // A tracker with no message id yet (its create is still in flight, or it
+      // failed) cannot host anything: falling through to a card of its own is
+      // what keeps an approval answerable instead of silently dropping it.
+      const host = cards.get(group.chatId)
+      if (host !== undefined && host.messageId !== undefined
+        && host.sessionId === group.sessionId) {
+        group.messageId = host.messageId
+        operation = 'patch'
+        host.decisionKeys.add(approvalDecisionKey(group))
+        // Write it NOW rather than through the throttled actor: admission has
+        // to know whether this item is visible before it lets the agent wait,
+        // and a failed write must fall back to a card of its own instead of
+        // leaving the approval unanswerable.
+        const written = await writeCardNow(group.chatId, host)
+        if (written.ok) return group.messageId
+        // The shared card refused this item, so drop the adoption and give the
+        // item a card of its own. Repointing `groupOf` is part of that: the
+        // click handler validates a button against the message id the item's
+        // group owns, so a group left pointing at the shared card would reject
+        // the fallback card's own buttons.
+        host.decisionKeys.delete(approvalDecisionKey(group))
+        const fallback: ApprovalGroup = {
+          chatId: group.chatId,
+          sessionId: group.sessionId,
+          createUncertain: false,
+          items: group.items,
+          chain: Promise.resolve(),
+        }
+        const previous = group
+        group = fallback
+        // Only move ids that still point at the old group: another item's
+        // fallback may already own its own.
+        for (const id of fallback.items.keys()) {
+          if (groupOf.get(id) === previous) groupOf.set(id, fallback)
+        }
+        if (approvalGroups.get(group.chatId) === previous) {
+          approvalGroups.set(group.chatId, fallback)
+        }
+      }
       const card = renderApprovalGroupCard([...group.items.values()])
       if (group.messageId === undefined) {
         operation = 'send'
@@ -1535,7 +1757,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       approvalGroups.delete(group.chatId)
       settledApprovalGroups.set(`${group.chatId}:${group.sessionId}`, { group })
     }
+    // The card's claim on a decision is released HERE, before re-rendering: the
+    // key exists so a settled task keeps its card writable while something is
+    // still undecided, and this update is the one that clears the buttons.
+    // Leaving the key behind would keep the tracker alive forever; removing it
+    // before the write would refuse the very update that shows the outcome.
+    const host = cards.get(group.chatId)
     void trackBackground(pushGroup(group)).then((result) => {
+      host?.decisionKeys.delete(approvalDecisionKey(group))
+      if (anyPending) host?.decisionKeys.add(approvalDecisionKey(group))
       if (!result.ok) {
         ctx.logger.warn('feishu-audit action=approval-settle-update-failed chat=%s operation=%s',
           auditHash(group.chatId), result.operation)
