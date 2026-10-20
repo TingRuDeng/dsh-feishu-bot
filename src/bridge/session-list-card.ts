@@ -1,5 +1,5 @@
 import { escapeLarkMarkdownLiteral, normalizeLarkPlainText } from './lark-markdown.ts'
-import { formatSessionDisplayTitle } from './display.ts'
+import { formatSessionDisplayTitle, sessionChoiceTitle } from './display.ts'
 
 /** One session choice rendered on the Feishu `/ls` navigation card. */
 export interface SessionListChoice {
@@ -124,7 +124,10 @@ export function renderSessionListCard(input: SessionListCardInput): SessionListC
   }]
   input.choices.slice(offset, offset + SESSION_LIST_PAGE_SIZE).forEach((choice, localIndex) => {
     const index = offset + localIndex
-    const title = formatSessionDisplayTitle(normalizeLarkPlainText(choice.title) || '未命名会话', workspaceName)
+    // The card header already names this workspace, so repeating it per row
+    // only crowds out the session title the operator is choosing between.
+    const title = sessionChoiceTitle(
+      normalizeLarkPlainText(choice.title) || '未命名会话', workspaceName, workspaceName)
     elements.push(button(`${index + 1}. ${title}`, {
       kind: 'session-list', action: 'select', token: input.token,
       workspaceIndex: input.workspaceIndex, index,
@@ -161,7 +164,9 @@ export function renderSessionListStatusCard(
     bound: { title: '会话已绑定', template: 'green', detail: '绑定完成，直接发送消息即可继续任务。' },
     failed: { title: '绑定失败', template: 'red', detail: detail ?? '请重新发送 /ls 后再试。' },
   }[status]
-  const title = escapeLarkMarkdownLiteral(formatSessionDisplayTitle(choice.title, choice.workspace))
+  // The card states the workspace on its own line below, so the title row
+  // carries only the session name.
+  const title = escapeLarkMarkdownLiteral(sessionChoiceTitle(choice.title, choice.workspace, choice.workspace))
   const workspace = escapeLarkMarkdownLiteral(choice.workspace)
   const detailText = escapeLarkMarkdownLiteral(presentation.detail)
   const modelLines = status === 'bound' && modelDisplay !== undefined
