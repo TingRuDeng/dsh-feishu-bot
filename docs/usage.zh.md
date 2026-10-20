@@ -33,6 +33,11 @@ chmod 600 ~/.dsh/.credentials.yaml
 
 ## 3. 安装插件
 
+> **切换到正式版 DSH 时必读**：[deploy-on-release-dsh.md](deploy-on-release-dsh.md)。
+> 本机当前是源码联调（`link:` 指向相邻 checkout），正式版 DSH 下插件解析不到
+> `@deepseek-ai/*`，且 npm `latest`（rc.11）落后源码 49 个提交、不含卡片合并。
+> 该文档给出实测断点与两条可行路径。
+
 在 `deepseek-harness` 仓库根目录执行：
 
 ```sh

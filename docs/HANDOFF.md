@@ -1,21 +1,24 @@
 # 交接文档：M6 发布前可靠性加固
 
-**先读**：[usage.zh.md](usage.zh.md)（部署与使用）、[design.md](design.md)（架构与决策）、[implementation.md](implementation.md)（里程碑记录）、[README.md](../README.md)（配置参考与安全边界）。
+**先读**：[deploy-on-release-dsh.md](deploy-on-release-dsh.md)（**切换到正式版 DSH 的部署步骤与实测断点**）、[usage.zh.md](usage.zh.md)（部署与使用）、[design.md](design.md)（架构与决策）、[implementation.md](implementation.md)（里程碑记录）、[README.md](../README.md)（配置参考与安全边界）。
 
 ## 当前状态
 
-- M0–M5 功能基线已存在；M6 可靠性阶段 0–4 已完成自动化实现，阶段 5 的文档已按当前源码校准，真实飞书故障矩阵仍待执行。
-- 阶段 6.1 已把卡片与终态投影从内部 turn 粒度提升为绑定会话的 Web/飞书直接用户任务粒度：同一任务的 subagent report/settled continuation 只更新原卡，含 tool-call 的过程文本不投影，全部直接子代理 settled 后只物化一次最新结果；`/release` 后停止同步。真实飞书同类任务仍需用户最终复测。
-- 阶段 6 已建立 `scripts/release-preview.mjs` 单一门禁：release bundle 内联除 Cordis peer 外的运行时依赖，packed manifest 不含源码联调用的 `link:`，并完成 tarball 白名单、隔离安装、四入口导入、干净 DSH web Profile 安装/配置快照和 SHA-256。当前本地产物由 dirty 工作树生成，脚本明确标为 `publishable: false`；真实 web Profile 已切换到 tarball 并通过启动/HTTP smoke，飞书消息与故障矩阵继续由用户实际使用验收。
-- 阶段 6.4 已把 release-preview workflow 的 checkout、setup-node 与 upload-artifact 全部固定到官方稳定版本的完整 commit SHA。
-- 阶段 6.5 建立了 tag-only RC workflow：不使用 GitHub 只保留一个 pending run 的原生 concurrency；受保护 Environment 放行后，publish job 以 `actions: read` 按 `run_number` 等待所有更早 workflow 进入终态。正式 workflow rerun 被拒绝，失败后必须创建新的更高 RC tag。只读 build job 产生唯一 tarball、checksum、CycloneDX 1.7 SBOM 和 descriptor，独立 attestation job 复核四文件摘要后才取得 OIDC/attestation 权限；GitHub build provenance 与 SBOM predicate 均用固定 Action SHA 生成并按 workflow、tag、commit、hosted runner 验签。阶段 6.8 已按用户决策把原 next-only 通道收敛为 npm `latest`：候选必须严格高于当前 `latest`，version endpoint 与根 packument 共用有界 no-store retry，重新下载后同时验证 npm 签名/SLSA statement 与 Sigstore 证书中的 repository/workflow/ref/commit/hosted-runner identity，最后才发布 GitHub Prerelease。
-- 发布 workflow 会在 draft 创建前后、npm publish 前和 Release finalize 前解析轻量或 annotated tag 并要求其最终 commit 等于 `GITHUB_SHA`。tag 检查与远程写入仍存在不可原子消除的窄窗口；远端现已启用 Action SHA pinning、阻止既有 RC tag 更新/删除的 ruleset 和 Immutable Releases，并以受保护的 `npm-release` Environment 承载首包 bootstrap。draft asset 的最终 GET 校验与公开 PATCH 仍不是原子操作，finalize 期间必须排除其他 `contents: write` 修改；PATCH 后校验失败可能留下已经短暂公开或被锁定的异常 Prerelease，应按发布事故处理。
-- 首包 bootstrap 只允许 package 尚不存在且 `NPM_BOOTSTRAP_GIT_SHA` 等于已批准 commit；临时 `NPM_TOKEN` 只进入该 publish step。包存在后 bootstrap 永久被代码拒绝，后续必须使用 Trusted Publishing OIDC。rc.5 的 run `31949610430` 已完成 build 与两类 attestation，并创建包含六个附件的 Draft Release `371332167`，但 `stage_draft` 随后通过 tag endpoint 查询未发布 Draft 时收到 404；该 run 结束时 npm package 尚不存在。该 run、tag 和 Draft 必须保留，不能重跑、移动、删除或复用。
-- rc.6 run `31950986283` 已证明分页 Release 列表修复有效：build、attestation 与 Draft `371339257` 的六附件暂存均成功。受保护 Environment 放行后，`publish_npm` 以 `contents: read` 按 Release ID 复核同一 Draft 时返回 403，因此 npm pin、preflight、publish、provenance 与 finalize 全部未执行；该 run 结束时 npm package 仍不存在。rc.6 的 run、tag、Draft 与附件必须保留，不能重跑、移动、删除或复用。
-- rc.7 run `31989507142` 的 build、双 attestation、Draft `371504770` 六附件暂存和 npm bootstrap publish 均成功；npm 版本接口、registry tarball、integrity 和 provenance 已可用，但首次包的根 packument 紧接着返回 404，workflow 因而失败并正确跳过 finalize。npm 与 Draft tarball 的 SHA-256 均为 `e0c4f8d99261f743338a98e49dfbf114c764201fdf179210c174df7a2e6a182d`，两类 GitHub attestation 与 npm provenance 已独立验签。rc.7 npm 包已发布，GitHub Release 仍是六附件 Draft；不得重跑、移动、删除、覆盖或手工 finalize。
-- 当前工作树继续保留本地 `link:../deepseek-harness/...` 依赖用于源码联调；它们未进入正式 tarball。rc.8 保留 npm 前 Draft 即时复核和 `publish_npm` 的受约束 job 级 `contents: write`，把 manifest、OIDC publish、单调性与发布后验收统一切换到 `latest`，并对 version endpoint 与根 packument 共用可测试的有界 retry。`next` 已退役并从远端删除；公开 registry 当前只保留 `latest=0.1.0-rc.8`。
-- npm Trusted Publisher 已精确绑定 `TingRuDeng/dsh-feishu-bot`、`release.yml` 和 `npm-release`，仅允许 `npm publish`；Publishing access 已收紧为禁止 bypass 2FA token。GitHub `npm-release` Environment 仅保留 `NPM_AUTH_MODE=oidc` 且没有 secrets，bootstrap commit 变量、GitHub token secret 与 npm bootstrap token 均已撤销。刷新 npm token 列表确认另外两个既有过期 token 未被改动。
-- rc.8 run `32002958510` 的 build、双 attestation、六附件 Draft、Trusted Publishing OIDC、npm registry/provenance 验证和 GitHub finalize 已全部成功。`@tingrudeng/dsh-feishu-bot@0.1.0-rc.8` 已成为唯一 `latest`，无 `next`；公开 Prerelease 的六附件齐全，GitHub/npm tarball 字节一致，大小 650,603 bytes，SHA-256 为 `189d2471ac3be13df5d5c5d6474ee81b31e6493c86fae17f0d4dd2a3f63c40fa`。源码 Profile 的既有 boot 冒烟、用户真机 `/ls` 验收、tarball-backed Profile smoke 与供应链验收仍是不同证据；真实飞书故障矩阵不能由发布结果代替。
+**先读本文档顶部的部署交接说明**：本机目前是源码联调（`link:` 指向 `../deepseek-harness`），
+切换到正式版 DSH 必须先处理依赖解析，步骤与实测断点见 [deploy-on-release-dsh.md](deploy-on-release-dsh.md)。
+
+- **代码基线（2026-10-20）**：分支 `master`，工作树干净，**领先 `origin/master` 49 个提交**（未推送）。
+  `npm run typecheck` 0 errors；`npm test` **33 个文件 / 568 通过**；`npm run build` 成功。
+- **版本号陷阱**：本地 `package.json` 是 `0.1.0-rc.11`，与 npm `latest` **同号但内容不同**——
+  已发布的 rc.11 打在 `2231480`（alpha.2 兼容）上，不含本轮任何卡片合并工作。
+  重新发布时必须先提版本号，否则 tag 会与已有版本冲突。
+- **卡片合并已完成**：提问与审批都并入任务卡，一个会话同一时刻只有一条消息。细节见下节。
+- **部署**：本机 profile 已部署当前构建，`diff -rq lib <profile>/lib` 输出 IDENTICAL。
+  构建产物已确认不含 `link:` 依赖。
+- M0–M5 功能基线已存在；M6 可靠性阶段 0–4 已完成自动化实现，阶段 5 的文档已按当前源码校准，
+  **真实飞书故障矩阵仍待执行**（见本文档末节）。
+- 阶段 6 的发布链路已完整建立（Trusted Publishing OIDC、双 attestation、SBOM、
+  Draft → npm `latest` → Prerelease）。**当前唯一 `latest` 是 `0.1.0-rc.11`，落后 49 个提交。**
 
 ## 既有体验能力
 
@@ -104,6 +107,12 @@
 
 - `tracker.frozen` 与审批寿命无关：`decisionKeys` 非空时 frozen 的 tracker 仍可写，`settleItem` 每次都会把决策键重新标脏。
 - `settleItem` 把 group 移入 `settledApprovalGroups` 不再矛盾：已结算的 group 仍然参与渲染（`已允许`／`已撤回` 的痕迹要留下），只是不再欠决定。
+
+## 待清理（可选，不影响功能）
+
+- `git stash drop stash@{0}`：该 stash 是第一步审批合并失败尝试的残留，已被后续提交取代。
+- `docs/step2-approval-merge-wip.patch`：同一次失败尝试的存档，仅作历史记录。
+- 磁盘上 7 个空白 session（用户明确表示暂不清理）。
 
 ## 不要踩的边界
 

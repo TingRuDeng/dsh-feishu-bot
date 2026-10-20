@@ -17,6 +17,13 @@ Status: M0–M7 product work and the M6 reliability implementation are covered b
 
 For Feishu-console setup, credentials, allowlists, startup, commands, and troubleshooting, see the [中文使用指南](docs/usage.zh.md).
 
+> **Migrating from a source checkout to a released DSH build?** Read
+> [docs/deploy-on-release-dsh.md](docs/deploy-on-release-dsh.md) first. The
+> source-linked setup resolves `@deepseek-ai/*` through the adjacent
+> `deepseek-harness` checkout, which a released install does not provide; and
+> the published `latest` is 49 commits behind `master`, without either card
+> merge.
+
 ```sh
 dsh plugin --profile web add /path/to/dsh-feishu-bot
 dsh --profile web --dump-config   # expect gateway, bridge, and invariant rows
