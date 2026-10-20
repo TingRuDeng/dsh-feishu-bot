@@ -2167,6 +2167,25 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
    */
   const settledQuestionNote = new Map<string, { sessionId: string; note: string }>()
 
+  /**
+   * Confirmation shown when FEISHU itself settled the request.
+   *
+   * The Web GUI renders its own prompt from a waterfall listener, and this
+   * answer resolves that shared waterfall without telling the browser: the
+   * harness deliberately lets the losing channel settle silently
+   * (`tests/waterfall-race.spec.ts` asserts it). An open Web prompt therefore
+   * stays on screen, and nothing in the bridge can retire it — the request
+   * signal it would need to abort belongs to the whole tool call.
+   *
+   * Rather than leave the operator with two answers that disagree, say plainly
+   * that this side is finished and the other side needs dismissing. The host
+   * closes the prompt on the next session switch or reload.
+   * @param what - the answer or skip just recorded.
+   * @returns the toast text.
+   */
+  const answeredHereToast = (what: string): string =>
+    `已在飞书${what}；Web 端若仍显示该提问，切换会话或刷新页面即可消失`
+
   /** Answer copy for one settled question, as the collapsed card shows it. */
   const describeAnswer = (questions: readonly QuestionCardItem[], answer: AskUserQuestionAnswer): string => {
     const parts: string[] = []
@@ -2585,8 +2604,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         .map(index => options[index]?.label)
         .filter((label): label is string => label !== undefined)
       await repaintQuestion(entry)
-      settleIfEveryQuestionAnswered(entry, pendingId)
-      return { toast: `已确认：${labels.join('、')}` }
+      const settledNow = settleIfEveryQuestionAnswered(entry, pendingId)
+      return { toast: settledNow ? answeredHereToast(labels.join('、')) : `已确认：${labels.join('、')}` }
     }
     return { toast: '该操作已失效' }
   }
@@ -2619,7 +2638,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (value?.kind === 'question') {
       const questionValue = value as unknown as QuestionClickValue
       return handleQuestionClick(
-        questionValue.pendingId, questionValue.action, questionValue.optionIndex, questionValue.questionId,
+        questionValue.pendingId, questionValue.action, questionValue.optionIndex,
+        questionValue.questionId, action,
       )
     }
     if (value?.kind === 'session-list') return handleSessionListCardAction(action, value)

@@ -109,3 +109,61 @@ describe('waterfall mechanics for plan α', () => {
     expect(result).toBe('web-approved')
   })
 })
+
+describe('abort-to-notify: can the bridge retire the losing Web channel?', () => {
+  it('bridge answer survives its own abort of the shared signal', async () => {
+    // The Web client keeps its card until the request it awaits settles, so the
+    // bridge must settle it. Aborting the shared signal is the only channel it
+    // has, and this asserts that doing so cannot retract the answer the bridge
+    // already produced.
+    const ctx = new Context()
+    const lifetime = new AbortController()
+    let webSettled = false
+    ctx.on('test/approve', async (tag, next) => {
+      // The Web listener parks on its own lifetime, as the client panel does.
+      try {
+        return await new Promise<string>((resolve, reject) => {
+          lifetime.signal.addEventListener('abort', () => {
+            webSettled = true
+            reject(new Error('delegated'))
+          }, { once: true })
+        })
+      } catch (error) {
+        if (String(error).includes('delegated')) return next()
+        throw error
+      }
+    })
+    ctx.on('test/approve', async (tag, next) => {
+      const web = next()
+      const feishu = Promise.resolve('feishu-approved')
+      const raced = await Promise.race([feishu, web])
+      // The bridge retires the Web card only AFTER its own outcome is fixed.
+      lifetime.abort()
+      return raced
+    }, { prepend: true })
+
+    const result = await ctx.waterfall('test/approve', 'x', async () => 'inner')
+    expect(result).toBe('feishu-approved')
+    expect(webSettled).toBe(true)
+  })
+
+  it('aborting does not let the vetoing Web listener overwrite the answer', async () => {
+    // Once the Web listener is retired it falls through to next(); the inner
+    // fallback must not become the answer for a request already decided.
+    const ctx = new Context()
+    const lifetime = new AbortController()
+    ctx.on('test/approve', async (tag, next) => {
+      await new Promise<void>(resolve => lifetime.signal.addEventListener('abort', () => resolve(), { once: true }))
+      return next()
+    })
+    ctx.on('test/approve', async (tag, next) => {
+      const web = next()
+      const raced = await Promise.race([Promise.resolve('feishu-approved'), web])
+      lifetime.abort()
+      return raced
+    }, { prepend: true })
+
+    const result = await ctx.waterfall('test/approve', 'x', async () => 'inner-fallback')
+    expect(result).toBe('feishu-approved')
+  })
+})

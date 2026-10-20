@@ -1796,6 +1796,11 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(value).toBeDefined()
     const toast = await feishu.clickCard(OWNER, sent.messageId, { pendingId: value, action: 'allow' })
     expect(toast?.toast).toContain('已允许')
+    // The Web GUI's own prompt is retired by ITS waterfall listener, which this
+    // answer resolves without telling the browser (the harness lets a losing
+    // channel settle silently). Nothing in the bridge can close it, so the
+    // confirmation must say so instead of leaving two frontends disagreeing.
+    expect(toast?.toast).toContain('刷新页面')
     expect(await outcome).toBe('allowed-once')
     // The pending card froze into the decided state.
     const frozen = feishu.cards.at(-1)!
@@ -4769,11 +4774,18 @@ describe('assembled bridge (M1 acceptance)', () => {
     const questionCard = feishu.cards.findLast(card => JSON.stringify(card.card).includes('要用哪个数据库'))!
     const value = cardButtonValue(questionCard.card, 'Postgres')
     expect(value).toBeDefined()
-    await feishu.clickCard(OWNER, questionCard.messageId, value)
+    const toast = await feishu.clickCard(OWNER, questionCard.messageId, value)
 
     await expect(outcome).resolves.toEqual({
       answers: [{ id: 'q1', selected: ['Postgres'] }],
     })
+    // The Web GUI renders its own prompt from a waterfall listener, and the
+    // harness deliberately lets the losing channel settle silently, so THAT
+    // prompt is not retired by this answer. The bridge cannot close it — the
+    // request signal it would abort belongs to the whole tool call — so the
+    // confirmation must say the other side still needs dismissing.
+    expect(toast?.toast).toContain('已在飞书')
+    expect(toast?.toast).toContain('刷新页面')
   })
 
   it('accepts a free-text Feishu message as the answer to a pending question', { timeout: 20_000 }, async () => {
