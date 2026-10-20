@@ -65,6 +65,7 @@ const taskStateSchema = z.object({
     startedChildren: z.array(z.string()),
     settledChildren: z.array(z.string()),
     resultCandidates: z.record(z.string(), z.object({ seq: z.number(), text: z.string() })),
+    assistantNotes: z.array(z.string()).default([]),
     result: z.object({ seq: z.number(), text: z.string() }).optional(),
   }).nullable(),
 })

@@ -44,6 +44,15 @@ export interface TaskCardSnapshot {
    * reads this list, which is per-call and therefore lossless.
    */
   currentToolsList?: readonly ToolProgressEntry[]
+  /**
+   * What the agent has SAID during this task, newest last.
+   *
+   * The card used to show only what the tools did, so the operator read a list
+   * of file reads and commands with no idea what any of it was for. The Web GUI
+   * interleaves the assistant's own text with the tool rows for exactly this
+   * reason, and it is the part a person reads first.
+   */
+  assistantNotes?: readonly string[]
   /** Names of the last few COMPLETED tools, oldest first (scrolling progress). */
   recentTools: string[]
   /**
@@ -299,6 +308,32 @@ function assistantResult(data: unknown): string | null {
   return text === '' ? null : text
 }
 
+/**
+ * The prose of one assistant message, regardless of whether it also calls tools.
+ *
+ * {@link assistantResult} deliberately ignores a message that carries a
+ * `tool-call` block, because only a pure-text message is a usable final result.
+ * For progress the opposite is true: the sentence explaining WHY a tool is
+ * about to run is usually attached to the message that calls it, so ignoring
+ * those loses most of what the agent says.
+ * @param data - one `assistant/message` payload.
+ * @returns the text, or null when the message says nothing.
+ */
+function assistantProse(data: unknown): string | null {
+  if (typeof data !== 'object' || data === null) return null
+  const content = (data as { message?: { content?: unknown } }).message?.content
+  if (!Array.isArray(content)) return null
+  const text = content
+    .filter((block): block is { type: string; text: string } =>
+      typeof block === 'object' && block !== null
+      && (block as { type?: unknown }).type === 'text'
+      && typeof (block as { text?: unknown }).text === 'string')
+    .map(block => block.text)
+    .join('')
+    .trim()
+  return text === '' ? null : text
+}
+
 /** tool/result's pairing id, read from its ToolResultBlock; null when absent. */
 function resultCallId(data: unknown): string | null {
   const message = (data as { message?: { content?: unknown } }).message
@@ -524,6 +559,8 @@ export interface FeishuTaskFoldState {
   startedChildren: string[]
   settledChildren: string[]
   resultCandidates: Record<string, { seq: number; text: string }>
+  /** Assistant prose emitted so far in this task, oldest first. */
+  assistantNotes: string[]
   result?: { seq: number; text: string }
 }
 
@@ -555,6 +592,7 @@ export function initFeishuTaskFoldState(fromSeq: number): FeishuTaskFoldState {
     startedChildren: [],
     settledChildren: [],
     resultCandidates: {},
+    assistantNotes: [],
   }
 }
 
@@ -686,6 +724,7 @@ function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): voi
   const settledChildren = new Set(state.settledChildren)
   const resultCandidates = new Map(
     Object.entries(state.resultCandidates).map(([key, value]) => [Number(key), value] as const))
+  const assistantNotes = [...state.assistantNotes]
   let result = state.result
 
   {
@@ -750,6 +789,16 @@ function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): voi
       case 'assistant/message': {
         const text = assistantResult(event.data)
         if (text !== null) resultCandidates.set(turn, { seq: event.seq, text })
+        // Record what the agent SAID, tool-calling messages included: the
+        // sentence before a command is the only thing that explains why it ran.
+        const prose = assistantProse(event.data)
+        if (prose !== null) {
+          assistantNotes.push(prose)
+          // Keep the fold bounded. It is persisted in the Session projection, so
+          // retaining every note would grow the durable state with the length
+          // of the task — and only the newest few are ever rendered.
+          while (assistantNotes.length > TASK_CARD_MAX_NOTES) assistantNotes.shift()
+        }
         break
       }
       case 'turn/end': {
@@ -795,6 +844,7 @@ function applyFeishuTaskEvent(state: FeishuTaskFoldState, event: CardEvent): voi
   state.settledChildren = [...settledChildren]
   state.resultCandidates = Object.fromEntries(
     [...resultCandidates].map(([key, value]) => [String(key), value]))
+  state.assistantNotes = assistantNotes
   state.result = result
 }
 
@@ -829,6 +879,7 @@ export function feishuTaskFoldFromState(state: FeishuTaskFoldState): FeishuTaskF
       // Per-call rows: two calls to one tool name stay distinguishable.
       currentToolsList: Object.entries(openTools)
         .map(([callId, name]) => toProgressEntry(name, state.openToolDetails[callId])),
+      assistantNotes: state.assistantNotes,
       recentTools: state.recentTools,
       recentToolDetails: Object.fromEntries(
         state.recentTools.map((name, index) => [name, state.recentToolDetails[index]])),
@@ -1072,6 +1123,23 @@ export interface TaskCardContext {
  * @param context - optional presentation context (workspace title).
  * @returns the card JSON for msg_type `interactive`.
  */
+/** How many of the agent's own notes are kept and rendered (newest last). */
+export const TASK_CARD_MAX_NOTES = 3
+
+/** Longest single note kept on a card, in characters. */
+const TASK_CARD_NOTE_MAX_CHARS = 300
+
+/**
+ * Shorten one note to fit, marking the cut.
+ * @param note - the assistant's prose.
+ * @param max - character budget.
+ * @returns the note, clipped with an ellipsis when it was too long.
+ */
+function clipNote(note: string, max: number): string {
+  const flat = note.replace(/\s+/gu, ' ').trim()
+  return flat.length <= max ? flat : `${flat.slice(0, max - 1)}…`
+}
+
 export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, context?: TaskCardContext): FeishuCard {
   const { title, template } = STATUS_HEADER[snapshot.status]
   const detail = normalizeProgressDetail(context?.progressDetail)
@@ -1080,6 +1148,22 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   // not whether the task has moved on since. Saying so prevents the operator
   // from mistaking a resumed card for a live one.
   if (context?.resumed === true) lines.push('🔄 已从重启前的记录恢复，下方为当时进度')
+  // What the agent SAID, before the list of what it ran. This is the part a
+  // person reads to understand the work; a card of file reads and commands
+  // alone never explains what any of it was for. Only the most recent notes are
+  // kept so a long task cannot push the live progress off the card.
+  // A COMPLETED task already prints its final answer as the task result, so
+  // repeating the last note would say the same thing twice on the same card.
+  // Only the running card needs the explanation of work in progress.
+  const notes = snapshot.status === 'running' ? (snapshot.assistantNotes ?? []) : []
+  if (detail !== 'concise' && notes.length > 0) {
+    for (const note of notes.slice(-TASK_CARD_MAX_NOTES)) {
+      lines.push(escapeLarkMarkdownLiteral(clipNote(note, TASK_CARD_NOTE_MAX_CHARS)))
+    }
+    if (notes.length > TASK_CARD_MAX_NOTES) {
+      lines.push(`（省略了更早的 ${notes.length - TASK_CARD_MAX_NOTES} 段说明）`)
+    }
+  }
   if (snapshot.status === 'running') {
     if (snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0) {
       // Describe what the agent is DOING, in the Web GUI's own vocabulary.

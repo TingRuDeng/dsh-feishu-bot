@@ -18,6 +18,39 @@ const base = {
 }
 
 describe('renderTaskCard', () => {
+  it('shows what the agent said, above the tool rows', () => {
+    // The list of file reads says nothing about WHY they happened; the agent's
+    // own sentence is the part a person reads first.
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['Bash'],
+      currentToolsList: [{ name: 'Bash', detail: 'npm test' }],
+      assistantNotes: ['先跑一遍测试确认基线。'],
+      toolCallCount: 1,
+    })
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('先跑一遍测试确认基线。')
+    // Said first, then what ran.
+    expect(body.indexOf('先跑一遍测试确认基线。')).toBeLessThan(body.indexOf('正在执行命令'))
+  })
+
+  it('keeps only the newest notes so live progress stays on the card', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['Bash'],
+      currentToolsList: [{ name: 'Bash', detail: 'npm test' }],
+      assistantNotes: ['第一条说明', '第二条说明', '第三条说明', '第四条说明', '第五条说明'],
+      toolCallCount: 1,
+    })
+    const body = card.elements[0]!.text.content
+    // The oldest give way, the newest survive.
+    expect(body).not.toContain('第一条说明')
+    expect(body).toContain('第五条说明')
+    expect(body).toContain('省略了更早的 2 段说明')
+  })
+
   it('running with no tools shows the single waiting hint', () => {
     const card = renderTaskCard({ ...base, status: 'running', currentTools: [] })
     const json = JSON.stringify(card)

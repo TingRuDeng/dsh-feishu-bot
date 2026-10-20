@@ -311,7 +311,38 @@ describe('Feishu task fold', () => {
     expect(settled.settled).toBe(true)
     expect(settled.snapshot.status).toBe('completed')
     expect(settled.result?.text).toBe('final answer')
-    expect(JSON.stringify(settled)).not.toContain('intermediate')
+    // The RESULT must not carry the intermediate text: that is what the model
+    // and the transcript consume as this task's answer. `assistantNotes` is a
+    // separate card-facing field that deliberately keeps what the agent said,
+    // so the assertion is scoped to the result rather than the whole state.
+    expect(settled.result?.text).not.toContain('intermediate')
+  })
+
+  it('keeps what the agent SAID, including messages that also call tools', () => {
+    // Reported: the card showed only file reads and commands, so the operator
+    // could not tell what any of it was for. The sentence explaining the work
+    // rides on the same message that calls the tool, which is exactly the
+    // message the final-result reader ignores.
+    seq = 0
+    const events = [
+      turnStart(1),
+      directUser('task-a'),
+      ev('assistant/message', {
+        turn: 1,
+        message: { content: [
+          { type: 'text', text: '先看登录相关代码。' },
+          { type: 'tool-call', toolCallId: 'c1', name: 'grep' },
+        ] },
+      }),
+      ev('tool/call', { turn: 1, callId: 'c1', name: 'grep', arguments: JSON.stringify({ pattern: 'login' }) }),
+      ev('assistant/message', {
+        turn: 1,
+        message: { content: [{ type: 'text', text: '找到问题了。' }] },
+      }),
+    ]
+
+    const fold = reduceFeishuTask(events, events[0]!.seq)!
+    expect(fold.snapshot.assistantNotes).toEqual(['先看登录相关代码。', '找到问题了。'])
   })
 
   it('keeps the task and its progress when a follow-up arrives inside the turn', () => {
