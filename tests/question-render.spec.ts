@@ -37,6 +37,25 @@ describe('renderQuestionCard', () => {
     expect(JSON.stringify(card)).toContain('a \\\\(Recommended\\\\)')
   })
 
+  it('tells the operator they can type an answer even when options exist', () => {
+    // The buttons are shortcuts, not the whole vocabulary. The Web composer
+    // always accepts free text beside the options, so a Feishu card that only
+    // showed buttons read as "pick one of these or nothing" and hid the very
+    // ability the other frontend offers.
+    const card = renderQuestionCard({
+      pendingId: 'p1',
+      questions: [{
+        id: 'q1',
+        question: '要用哪个数据库？',
+        options: [{ label: 'Postgres' }, { label: 'SQLite' }],
+      }],
+      picked: {},
+      sessionTitle: 'demo',
+    })
+    const text = JSON.stringify(card)
+    expect(text).toContain('也可以直接回复本条消息')
+  })
+
   it('offers a way out of a question with no options, which cannot be clicked', () => {
     // Free-text questions render no option buttons; without a skip the operator
     // would have no control at all and the card would look broken.

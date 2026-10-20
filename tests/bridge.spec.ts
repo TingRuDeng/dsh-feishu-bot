@@ -4816,6 +4816,43 @@ describe('assembled bridge (M1 acceptance)', () => {
     })
   })
 
+  it('accepts a typed answer to a question that also offers options', { timeout: 20_000 }, async () => {
+    // The options are shortcuts, not the whole vocabulary. The Web composer
+    // always accepts free text beside them, so a Feishu reply on an
+    // option-bearing question must answer it too. It previously could not: the
+    // completion check looked only at picks, so the text was recorded but the
+    // request never settled and the agent waited forever.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const outcome = ctx.waterfall(
+      'user-questions/request',
+      {
+        agent,
+        questions: [{
+          id: 'q1',
+          question: '要用哪个数据库？',
+          options: [{ label: 'Postgres' }, { label: 'SQLite' }],
+        }],
+      },
+      () => Promise.reject(new Error('no answerer')),
+    )
+    await vi.waitFor(() => {
+      if (!feishu.cards.some(card => JSON.stringify(card.card).includes('要用哪个数据库'))) {
+        throw new Error('question card is not visible yet')
+      }
+    }, { timeout: 5_000, interval: 20 })
+
+    // None of the offered labels fit, so the operator types their own choice.
+    await deliver({ text: '用 MySQL' })
+
+    await expect(outcome).resolves.toEqual({
+      answers: [{ id: 'q1', selected: [], custom: '用 MySQL' }],
+    })
+  })
+
   it('collects every choice for a multi-select question', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
     await deliver({ text: '/new' })

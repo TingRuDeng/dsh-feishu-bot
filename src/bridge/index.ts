@@ -2539,10 +2539,16 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         .filter((label): label is string => label !== undefined),
       ...(entry.freeText?.[question.id] === undefined ? {} : { custom: entry.freeText[question.id] }),
     }))
-    const complete = entry.questions.every(question =>
-      (question.options ?? []).length > 0
-        ? answers.find(a => a.id === question.id)!.selected.length > 0
-        : entry.freeText?.[question.id] !== undefined)
+    // A question is answered by EITHER a picked option or a typed one. The
+    // options are shortcuts, not the whole vocabulary: the Web composer always
+    // accepts free text beside them, and an operator who replies in the chat on
+    // a question that happens to have options was previously left stuck — the
+    // text was recorded on the entry but never counted, so the request could
+    // never settle.
+    const complete = entry.questions.every((question) => {
+      const answer = answers.find(candidate => candidate.id === question.id)
+      return (answer?.selected.length ?? 0) > 0 || entry.freeText?.[question.id] !== undefined
+    })
     ctx.logger.info('feishu-audit action=question-answered-by-text chat=%s pending=%s bytes=%d complete=%s',
       auditHash(message.chatId), auditHash(pendingId), Buffer.byteLength(text, 'utf8'), String(complete))
     if (complete) settleQuestion(pendingId, { kind: 'answer', answer: { answers } })

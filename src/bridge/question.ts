@@ -121,6 +121,15 @@ export function questionBodyElements(spec: QuestionCardSpec): unknown[] {
         text: { tag: 'lark_md', content: '（直接回复本条消息即可作答）' },
       })
     } else {
+      // The buttons are shortcuts, not the whole vocabulary. The Web composer
+      // always offers a free-text field beside the options, and an operator who
+      // wants something none of these labels says must be told that replying
+      // in the chat still answers this question — without the hint the card
+      // reads as "pick one of these or nothing".
+      elements.push({
+        tag: 'div',
+        text: { tag: 'lark_md', content: '（也可以直接回复本条消息，输入其他答案）' },
+      })
       const picked = spec.picked[question.id] ?? []
       elements.push({
         tag: 'action',
