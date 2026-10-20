@@ -2216,8 +2216,11 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     if (pendingQuestionOfChat.get(entry.chatId) === pendingId) {
       pendingQuestionOfChat.delete(entry.chatId)
     }
-    if (outcome.kind === 'answer') entry.settle(outcome.answer)
-    else entry.abandon(outcome.reason)
+    if (outcome.kind === 'answer') {
+      entry.settle(outcome.answer)
+    } else {
+      entry.abandon(outcome.reason)
+    }
     // Record the settled copy on the entry. The publish path replays it once
     // it knows a message id, which matters when a question is superseded while
     // its own send is still in flight: without this the abandoned card would
@@ -2568,19 +2571,47 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
    * @param action - pick | confirm | skip.
    * @param optionIndex - the option a pick names.
    * @param questionId - which question of the request the button belongs to.
+   * @param click - the raw click, validated for identity and card context.
    * @returns the toast to show the operator.
    */
   const handleQuestionClick = async (
     pendingId: string, action: string, optionIndex: number | undefined,
-    questionId: string | undefined,
+    questionId: string | undefined, click: FeishuCardAction,
   ): Promise<{ toast: string }> => {
     const entry = pendingQuestions.get(pendingId)
     if (entry === undefined) {
       return { toast: '该提问已结束' }
     }
+    // Authorization comes BEFORE any state change. A Feishu interactive card
+    // survives being forwarded, and a forwarded card keeps its buttons, so a
+    // click arriving here is not necessarily from the operator: the approval
+    // channel has always checked this, and the question channel must too.
+    if (!config.allowedOpenIds.includes(click.operatorOpenId)) {
+      ctx.logger.warn('feishu-audit action=question-click-rejected operator=%s message=%s pending=%s reason=allowlist',
+        auditHash(click.operatorOpenId), auditHash(click.messageId), auditHash(pendingId))
+      return { toast: '你没有权限回答此提问' }
+    }
+    // A question belongs to the chat that was bound when it was asked. A click
+    // from another chat is a forwarded copy, whose buttons must not answer it.
+    if (pendingQuestionOfChat.get(click.chatId) !== pendingId) {
+      ctx.logger.warn('feishu-audit action=question-click-rejected operator=%s chat=%s message=%s pending=%s reason=card-context',
+        auditHash(click.operatorOpenId), auditHash(click.chatId),
+        auditHash(click.messageId), auditHash(pendingId))
+      return { toast: '该按钮不属于当前对话' }
+    }
     if (action === QUESTION_CLICK.skip) {
-      settleQuestion(pendingId, { kind: 'abandon', reason: 'skipped-by-operator' })
-      return { toast: '已跳过该提问' }
+      // Skipping is a legitimate ANSWER, not an abandon: the tool documents a
+      // submitted skipped item as one with empty `selected` and no `custom`,
+      // and the still-answerable `pending` state is a different thing. Settling
+      // it as answered is also what lets every other frontend close its prompt,
+      // because only an answer batch reaches the projection they render from.
+      settleQuestion(pendingId, {
+        kind: 'answer',
+        answer: {
+          answers: entry.questions.map(question => ({ id: question.id, selected: [] })),
+        },
+      })
+      return { toast: answeredHereToast('已跳过') }
     }
     // A one-question request may omit the id; a batch always carries one, and
     // falling back to the first question is only safe when there is one.
@@ -2608,8 +2639,8 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       // answered form, so without this first paint the operator never saw their
       // own choice being accepted — the pick appeared to do nothing.
       await repaintQuestion(entry)
-      settleIfEveryQuestionAnswered(entry, pendingId)
-      return { toast: `已选择：${option.label}` }
+      const settledNow = settleIfEveryQuestionAnswered(entry, pendingId)
+      return { toast: settledNow ? answeredHereToast(option.label) : `已选择：${option.label}` }
     }
     if (action === QUESTION_CLICK.confirm) {
       const picked = entry.spec.picked[question.id] ?? []
@@ -2732,17 +2763,19 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     ctx.logger.info('feishu-audit action=approval-click-decided operator=%s message=%s pending=%s approval=%s outcome=%s',
       auditHash(action.operatorOpenId), auditHash(action.messageId), auditHash(pendingId),
       auditHash(entry.approvalId), outcome)
-    return { toast: verb === 'allow' ? '已允许（本次）' : '已拒绝' }
+    // Resolving the shared request does not retire the browser's own prompt:
+    // the harness lets a losing waterfall channel settle silently, so the Web
+    // GUI keeps showing this approval until the operator reloads. Say that
+    // here rather than let two frontends disagree without explanation.
+    return {
+      toast: `${verb === 'allow' ? '已允许（本次）' : '已拒绝'}；Web 端若仍显示，切换会话或刷新页面即可消失`,
+    }
   })
   unregisterEarlyHandlersOnDispose = () => {
     unregisterApprovalRequests()
     unregisterCardActions()
   }
 
-  type BindingOwnership = {
-    ownership: 'existing' | 'created-here'
-    dispose?: () => Promise<void>
-  }
   type BindingFailureReason =
     | 'binding-write-failed'
     | 'binding-state-uncertain'

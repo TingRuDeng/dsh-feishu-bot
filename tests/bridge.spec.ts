@@ -37,7 +37,6 @@ import * as bridge from '../src/bridge/index.ts'
 import type { FeishuInboundMessage } from '../src/gateway/index.ts'
 import { resultCardEnvelopeBytes } from '../src/bridge/result-card.ts'
 
-/** Stub transport: records sends, never talks to Feishu. */
 class StubFeishu extends Service {
   sent: { chatId: string; text: string }[] = []
   cards: { messageId: string; card: object }[] = []
@@ -2176,7 +2175,6 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(new Set(withApproval.map(({ messageId }) => messageId)).size).toBe(1)
   })
 
-
   it('keeps the second approval answerable when two share one card', { timeout: 20_000 }, async () => {
     // The original protection, kept through the merge: two concurrent approvals
     // share one card, and one item's fate must not take the other down with it.
@@ -2225,8 +2223,6 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(JSON.stringify(feishu.cards.at(-1)?.card)).toContain('1/2 待处理')
   })
 
-
-
   it('freezes a stale approval card that no live tracker owns', { timeout: 20_000 }, async () => {
     // The startup sweep exists to clear buttons left by a previous process:
     // their owner is gone, so the card would otherwise keep dead buttons
@@ -2256,7 +2252,6 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(feishu.cards.some(card => card.messageId === 'card_stale'
       && JSON.stringify(card.card).includes('已失效'))).toBe(true)
   })
-
 
   it('settles an already-visible approval as unavailable when the bridge is disposed', { timeout: 20_000 }, async () => {
     const { ctx, feishu, deliver, bridgeFiber } = await mountBridge(new MockAdapter(['hang']))
@@ -3206,8 +3201,13 @@ describe('assembled bridge (M1 acceptance)', () => {
     expect(feishu.sent.at(-1)!.text).toContain('其他操作更新')
   })
 
-  it('bounds created-session cleanup without changing the primary binding failure result', { timeout: 20_000 }, async () => {
-    const { ctx, deliver } = await mountBridge(new MockAdapter([]), { bindingCleanupTimeoutMs: 10 })
+  it('reports the primary binding failure without a bridge-side session cleanup', { timeout: 20_000 }, async () => {
+    // The bridge deliberately performs no disposal of a session it created: a
+    // cold resume or /new agent is closed by `agent-loop`'s `resumeWith`
+    // `finally` on every failure path, so a second `dispose()` here would
+    // release it twice. What still matters is that the durable outcome reports
+    // the binding failure itself, not a cleanup side effect.
+    const { ctx, deliver } = await mountBridge(new MockAdapter([]))
     const originalCreate = ctx.agents.create.bind(ctx.agents)
     Object.defineProperty(ctx.agents, 'create', {
       configurable: true,
@@ -3369,8 +3369,8 @@ describe('assembled bridge (M1 acceptance)', () => {
     const sessionCard = feishu.cards.findLast(item => item.messageId === listing.messageId)!
     expect(JSON.stringify(sessionCard.card)).toContain('Alpha 的真实标题')
     expect(JSON.stringify(sessionCard.card)).not.toContain('Beta 的真实标题')
-    const sessionValue = cardButtonValue(sessionCard.card, '1. 【alpha】Alpha 的真实标题')
-      ?? cardButtonValue(sessionCard.card, '2. 【alpha】Alpha 的真实标题')
+    const sessionValue = cardButtonValue(sessionCard.card, '1. Alpha 的真实标题')
+      ?? cardButtonValue(sessionCard.card, '2. Alpha 的真实标题')
     expect(sessionValue).toMatchObject({
       action: 'select', workspaceIndex: (workspaceValue as { index: number }).index,
       index: expect.any(Number),
@@ -3570,8 +3570,11 @@ describe('assembled bridge (M1 acceptance)', () => {
     await drain()
     const sessions = feishu.cards.findLast(item => item.messageId === listing!.messageId)!
     expect(JSON.stringify(sessions.card)).toContain('排查飞书任务失败')
-    expect(cardButtonValue(sessions.card, `1. 【${basename(root)}】排查飞书任务失败`)
-      ?? cardButtonValue(sessions.card, `2. 【${basename(root)}】排查飞书任务失败`)).toBeDefined()
+    // The page header already names this workspace, so the row carries only the
+    // session title. Repeating the prefix per row pushed the title out of view.
+    expect(cardButtonValue(sessions.card, '1. 排查飞书任务失败')
+      ?? cardButtonValue(sessions.card, '2. 排查飞书任务失败')).toBeDefined()
+    expect(JSON.stringify(sessions.card)).not.toContain(`【${basename(root)}】`)
     expect(feishu.sessionListDeliveries).toEqual([{
       deliveryId: 'om_in_1',
       stage: 'session-list-card',
@@ -4887,6 +4890,9 @@ describe('assembled bridge (M1 acceptance)', () => {
       { agent, questions: [{ id: 'q1', question: '第一个问题？' }] },
       () => Promise.reject(new Error('no answerer')),
     )
+    // Handler first, assertion later: this request is rejected by the supersede
+    // below, and until something observes it the rejection is unhandled.
+    const firstSettled = first.catch((error: unknown) => error)
     await vi.waitFor(() => {
       if (!feishu.cards.some(card => JSON.stringify(card.card).includes('第一个问题'))) {
         throw new Error('first question card is not visible yet')
@@ -4898,6 +4904,10 @@ describe('assembled bridge (M1 acceptance)', () => {
       { agent, questions: [{ id: 'q2', question: '第二个问题？' }] },
       () => Promise.reject(new Error('no answerer')),
     )
+    // Attach a handler BEFORE anything can reject: this request is settled by a
+    // click near the end of the test, and a rejection observed only later counts
+    // as unhandled in the meantime.
+    const secondSettled = second.catch((error: unknown) => error)
     await vi.waitFor(() => {
       if (!feishu.cards.some(card => JSON.stringify(card.card).includes('第二个问题'))) {
         throw new Error('second question card is not visible yet')
@@ -4905,7 +4915,7 @@ describe('assembled bridge (M1 acceptance)', () => {
     }, { timeout: 5_000, interval: 20 })
 
     // The superseded call is released, so its agent is not stuck.
-    await expect(first).rejects.toThrow(/not answered in Feishu/)
+    await expect(firstSettled).resolves.toMatchObject({ message: expect.stringMatching(/not answered in Feishu/u) })
     // The FIRST question's card must drop its buttons and say it went
     // unanswered. The stub keeps every card version, so assert on the last card
     // that still mentions the superseded question rather than on the newest
@@ -4926,7 +4936,8 @@ describe('assembled bridge (M1 acceptance)', () => {
       && JSON.stringify(c.card).includes('第二个问题')).at(-1)
     expect(card).toBeDefined()
     await feishu.clickCard(OWNER, card!.messageId, cardButtonValue(card!.card, '跳过'))
-    await expect(second).rejects.toThrow(/not answered in Feishu/)
+    // Skipping answers the request; it is not an abort.
+    await expect(secondSettled).resolves.toEqual({ answers: [{ id: 'q2', selected: [] }] })
   })
 
   it('leaves slash commands usable while a question is open', { timeout: 20_000 }, async () => {
@@ -5620,6 +5631,74 @@ describe('assembled bridge (M1 acceptance)', () => {
       if (stillLive) throw new Error('the card still looks answerable after the session was released')
     }, { timeout: 5_000, interval: 20 })
   })
+
+  it('question: a clicker outside the allowlist cannot answer a pending question', { timeout: 20_000 }, async () => {
+    // Feishu lets an interactive card be forwarded, and a forwarded card keeps
+    // its buttons. The approval channel already refused such a click; the
+    // question channel dispatched on `kind === 'question'` BEFORE any
+    // authorization, so any forwarded recipient could answer for the operator
+    // and steer the agent's next step.
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const asked = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '机密选择', options: [{ label: '甲' }, { label: '乙' }] }] },
+      () => new Promise(() => {}),
+    )
+
+    const card = await vi.waitFor(() => {
+      const found = feishu.cards
+        .filter(({ card }) => cardButtonValue(card, '甲') !== undefined).at(-1)
+      if (found === undefined) throw new Error('the question card never appeared')
+      return found
+    }, { timeout: 5_000, interval: 20 })
+
+    const intruder = await feishu.clickCard('ou_intruder', card.messageId, cardButtonValue(card.card, '甲'))
+    expect(intruder?.toast).toContain('没有权限')
+    // The intruder's pick must not have been recorded.
+    await expect(Promise.race([
+      asked.then(() => 'settled'),
+      new Promise<'pending'>(resolve => setTimeout(() => resolve('pending'), 50)),
+    ])).resolves.toBe('pending')
+
+    // The rightful owner can still answer.
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '乙'))
+    expect(JSON.stringify(await asked)).toContain('乙')
+  })
+
+  it('question: a card forwarded to another chat cannot answer the question', { timeout: 20_000 }, async () => {
+    const { ctx, feishu, deliver } = await mountBridge(new MockAdapter(['hang']))
+    await deliver({ text: '/new' })
+    await deliver({ text: '保持一个开放任务' })
+    const agent = [...ctx.sessions.list()].map(s => ctx.agents.get(s.id)).find(a => a !== undefined)!
+
+    const asked = ctx.waterfall(
+      'user-questions/request',
+      { agent, questions: [{ id: 'q1', question: '只在此会话作答', options: [{ label: '甲' }] }] },
+      () => new Promise(() => {}),
+    )
+
+    const card = await vi.waitFor(() => {
+      const found = feishu.cards
+        .filter(({ card }) => cardButtonValue(card, '甲') !== undefined).at(-1)
+      if (found === undefined) throw new Error('the question card never appeared')
+      return found
+    }, { timeout: 5_000, interval: 20 })
+
+    const forwarded = await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '甲'), 'oc_forwarded')
+    expect(forwarded?.toast).toContain('不属于')
+    await expect(Promise.race([
+      asked.then(() => 'settled'),
+      new Promise<'pending'>(resolve => setTimeout(() => resolve('pending'), 50)),
+    ])).resolves.toBe('pending')
+
+    await feishu.clickCard(OWNER, card.messageId, cardButtonValue(card.card, '甲'))
+    expect(JSON.stringify(await asked)).toContain('甲')
+  })
+
   it('answers a question hosted on the task card, exactly as a standalone one', { timeout: 20_000 }, async () => {
     // The buttons moved onto the task's card. A click must still resolve: it is
     // matched by the question's own pendingId, not by the message it sits on.
@@ -5783,7 +5862,6 @@ describe('assembled bridge (M1 acceptance)', () => {
     }, { timeout: 5_000, interval: 20 })
 
     // Answer the first question by replying in the chat.
-    console.error('T2PROBE beforeFirst=%d', feishu.cards.length)
     await deliver({ text: '一答' })
     let settledEarly = false
     void asked.then(() => { settledEarly = true }, () => { settledEarly = true })
