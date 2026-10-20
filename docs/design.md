@@ -377,8 +377,7 @@ bridge listener 收到 approval/request
 - **`/ls` 导航与动作校验**：工作空间与会话两级均每页最多 7 项，使用 CardKit 2.0 标题按钮并在原卡完成进入、返回和翻页；单会话工作空间直接绑定。随机 144-bit token 绑定 chat、发起人、原卡 message id、固定分组/顺序与 `listingTtlMs`。按钮 payload 只含 kind/action/token/level/page/workspaceIndex/index，不含 cwd 或 session id。动作先快速返回 toast，再进入既有 chat FIFO 执行 projection、patch 或绑定；异步 patch 失败发送可见文本回执。选择前重新校验 allowlist、来源 chat/message、操作者、token/TTL、active binding 的 `boundBy`、workspace 与归档状态。选择与文本 `/use` 共用同一绑定事务；完成后原卡定格绿色/红色，终态 patch 失败改发文本回执。双击、旧卡与转发卡均拒绝。
 - **`/ls` 投递形态与编号**：建卡使用稳定 delivery identity。只有确定性卡片能力/内容拒绝才发送最多 20 条的命名编号文本列表；timeout、断连和 5xx 等模糊失败保留原形态，不跨形态补发。模糊失败拿不到原卡 message id，无法证明点击来自原卡，故任何迟到卡片点击都 fail-closed 并要求重发 `/ls`。正常卡片路径的 `/use <编号>` 仅引用当前已打开工作空间的稳定会话顺序，返回首层即清空；`/use` 在解析后再次校验归档状态，完整 id 也不能绕过。进程重启后内存快照失效，须重发 `/ls`。
 - **绑定事务顺序与资源补偿**：`/use` 与 `/new` 共用 binding switch helper：先 resolver/创建，准备目标 projection cursor，再提交 `active` binding。helper 记录旧 binding、candidate after-image 与 handle 来源；任一步失败都进入同一补偿边界：
-  - `ownership: 'created-here'`：失败 ⇒ 在独立 `bindingCleanupTimeoutMs` 内调用本次 handle 的 `dispose()`；超时留下固定字段审计，但不覆盖主失败原因。`/new` 已把 sessionId 记入 command record（§6.2），失败回帖据此给出 id 供核实。
-  - `ownership: 'existing'`（Web 或其他 chat 已在使用）：绑定写失败 ⇒ **绝不 dispose**，仅回帖错误。
+  - **bridge 不做 dispose 补偿**（对 `created-here` 与 `existing` 一视同仁）：冷恢复或 `/new` 创建的 agent 由 `agent-loop` 的 `resumeWith` 负责释放——它的 `finally` 在 setup 与 publication 的**每一条**失败路径上 `await handle?.close()`。bridge 再调一次 `dispose()` 会双重释放，因此旧版的 `ownership: 'created-here'` 分支连同 `bindingCleanupTimeoutMs` 配置项已删除。binding 写失败 ⇒ 仅回帖错误，不动 agent。`/new` 已把 sessionId 记入 command record（§6.2），失败回帖据此给出 id 供核实。
   - 若 binding 写可能已生效，只有当前值仍等于本次 candidate after-image 才恢复旧 binding；发现后续操作已写入更新值时不回滚，避免覆盖并发新状态。为目标新建的 cursor 也只在安全条件下补偿。
   - 绑定写成功但回帖失败：命令已 committed，重复 event 走 §6.2 重发结果路径。
 - **`unavailable` 状态只产生于重启恢复**：启动校验发现绑定的 session 不存在或装载持续失败 ⇒ 标记 `unavailable` 并通知。其生命周期：
@@ -440,7 +439,7 @@ bridge listener 收到 approval/request
 | `sendRetryBaseMs` / `sendMaxAttempts` | 500 / 4 | 文本与卡片创建共享的指数退避基数和最大尝试次数 |
 | `sendCircuitCooldownMs` / Gateway `disposeDrainTimeoutMs` | 30000 / 5000 | 单 chat 熔断冷却与 Gateway create/patch 关闭排空上限 |
 | `recoveryTtlMs` | 86400000 | received/recovering 入站项可恢复期限 |
-| `bindingCleanupTimeoutMs` / Bridge `disposeDrainTimeoutMs` | 5000 / 5000 | binding 创建者补偿超时与 Bridge 全工作 drain 上限 |
+| Bridge `disposeDrainTimeoutMs` | 5000 | Bridge 全工作 drain 上限（binding 侧无独立补偿超时，见 §6.6） |
 | `inboundRetentionMs` / `inboundMaxRecords` | 604800000 / 50000 | 终态入站保留期与硬容量；可恢复行不因容量被删 |
 | `outboundRetentionMs` / `outboundMaxRecords` | 604800000 / 10000 | 旧 outbox/dead-letter 终态保留期与硬容量 |
 | `outboundPendingTtlMs` | 86400000 | 旧 pending 段超期后 abandoned 并清正文 |

@@ -130,8 +130,6 @@ export interface Config {
   cardThrottleMs: number
   /** Maximum age of received/recovering work eligible for restart recovery. */
   recoveryTtlMs: number
-  /** Maximum time to wait while releasing a target created by a failed binding switch. */
-  bindingCleanupTimeoutMs: number
   /** Maximum time Bridge disposal waits for already accepted work. */
   disposeDrainTimeoutMs: number
   /** Retention period for terminal inbound rows. */
@@ -181,7 +179,6 @@ const ConfigSchema: z<Config> = z.object({
   listingTtlMs: z.natural().default(300_000),
   cardThrottleMs: z.natural().default(1_000),
   recoveryTtlMs: z.natural().default(86_400_000),
-  bindingCleanupTimeoutMs: z.natural().default(5_000),
   disposeDrainTimeoutMs: z.natural().default(5_000),
   inboundRetentionMs: z.natural().default(604_800_000),
   inboundMaxRecords: z.natural().default(50_000),
@@ -2743,34 +2740,6 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     }
   }
 
-  /** Release only a capability created by this switch, without blocking the command indefinitely. */
-  const cleanupBindingTarget = async (
-    chatId: FeishuChatId, target: SessionIdString, dispose: () => Promise<void>,
-  ): Promise<'disposed' | 'failed' | 'timeout'> => {
-    const cleanup = Promise.resolve().then(dispose).then(
-      () => 'disposed' as const,
-      (error: unknown) => {
-        ctx.logger.error('feishu-bridge binding target cleanup failed: %s', safeErrorFact(error))
-        return 'failed' as const
-      },
-    )
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<'timeout'>(resolveTimeout => {
-      timer = setTimeout(() => { resolveTimeout('timeout') }, config.bindingCleanupTimeoutMs)
-    })
-    const outcome = await Promise.race([cleanup, timeout])
-    if (timer !== undefined) clearTimeout(timer)
-    if (outcome === 'timeout') {
-      ctx.logger.warn('feishu-audit action=binding-cleanup-timeout chat=%s session=%s timeoutMs=%d',
-        auditHash(chatId), auditHash(target), config.bindingCleanupTimeoutMs)
-      void cleanup.then((lateOutcome) => {
-        ctx.logger.info('feishu-audit action=binding-cleanup-late chat=%s session=%s outcome=%s',
-          auditHash(chatId), auditHash(target), lateOutcome)
-      })
-    }
-    return outcome
-  }
-
   /**
    * Persist one candidate binding and compensate only while that exact
    * after-image is still current. Existing agents never carry dispose
@@ -2780,7 +2749,6 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     chatId: FeishuChatId,
     previous: ChatBinding | undefined,
     candidate: ChatBinding,
-    target: BindingOwnership,
     seedCursor = true,
   ): Promise<BindingSwitchResult> => {
     const preparedCursorKey = projectionCursorId(chatId, candidate.sessionId) as string
@@ -2822,35 +2790,30 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       reason = 'binding-changed-during-compensation'
     }
 
-    let cleanup: 'disposed' | 'failed' | 'timeout' | undefined
-    if (target.ownership === 'created-here' && target.dispose !== undefined
-      && !sameBinding(currentBinding, candidate)) {
-      cleanup = await cleanupBindingTarget(chatId, candidate.sessionId, target.dispose)
-    }
-    ctx.logger.warn('feishu-audit action=binding-compensated chat=%s session=%s reason=%s cleanup=%s',
-      auditHash(chatId), auditHash(candidate.sessionId), reason, cleanup ?? 'not-owned')
-
-    const cleanupSuffix = cleanup === 'timeout' || cleanup === 'failed'
-      ? ' 临时会话清理尚未确认。'
-      : ''
+    // No bridge-side disposal here, deliberately. A cold resume this operation
+    // started is already closed by `agent-loop`'s `resumeWith`, whose `finally`
+    // awaits `handle?.close()` on every failure path through setup and
+    // publication. Calling `dispose()` again would release it twice.
+    ctx.logger.warn('feishu-audit action=binding-compensated chat=%s session=%s reason=%s',
+      auditHash(chatId), auditHash(candidate.sessionId), reason)
     if (reason === 'binding-state-uncertain') {
       return {
         ok: false,
         reason,
-        message: `绑定结果不确定，未能确认恢复原绑定；请用 /status 核实。${cleanupSuffix}`,
+        message: `绑定结果不确定，未能确认恢复原绑定；请用 /status 核实。`,
       }
     }
     if (reason === 'binding-changed-during-compensation') {
       return {
         ok: false,
         reason,
-        message: `绑定未完成，期间绑定已被其他操作更新；未覆盖当前绑定，请用 /status 核实。${cleanupSuffix}`,
+        message: `绑定未完成，期间绑定已被其他操作更新；未覆盖当前绑定，请用 /status 核实。`,
       }
     }
     return {
       ok: false,
       reason,
-      message: `绑定失败，当前绑定未改变。${cleanupSuffix}`,
+      message: '绑定失败，当前绑定未改变。',
     }
   }
 
@@ -2939,9 +2902,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
         try {
           await stageTarget?.(targetId as SessionIdString)
           await throwIfRollbackRequested()
-          preparedSwitch = await switchBinding(chatId, currentBinding, binding, {
-            ownership: 'existing',
-          })
+          preparedSwitch = await switchBinding(chatId, currentBinding, binding)
           await throwIfRollbackRequested()
           if (!preparedSwitch.ok) {
             throw new Error(`feishu-bridge: binding preparation failed: ${preparedSwitch.reason}`)
@@ -2977,11 +2938,10 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
       return { ok: true, message: await bindingSuccessMessage(targetId) }
     }
     // A live Agent existed before this operation, or another resolver won the
-    // publication race. It carries no disposal authority; prepare normally.
+    // publication race. Once published, this operation no longer owns the
+    // agent, so the disposer must not be used here.
     await stageTarget?.(targetId as SessionIdString)
-    const switched = await switchBinding(chatId, currentBinding, binding, {
-      ownership: 'existing',
-    })
+    const switched = await switchBinding(chatId, currentBinding, binding)
     if (!switched.ok) {
       return { ok: false, reason: switched.reason, message: switched.message, reject: true }
     }
@@ -3998,9 +3958,7 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
                   if (unpublishedSession === undefined) {
                     throw new Error('feishu-bridge: unpublished agent missing during /new setup')
                   }
-                  preparedSwitch = await switchBinding(chatId, currentBinding, binding, {
-                    ownership: 'existing',
-                  }, false)
+                  preparedSwitch = await switchBinding(chatId, currentBinding, binding, false)
                   await throwIfRollbackRequested()
                   if (!preparedSwitch.ok) {
                     throw new Error(`feishu-bridge: /new binding preparation failed: ${preparedSwitch.reason}`)

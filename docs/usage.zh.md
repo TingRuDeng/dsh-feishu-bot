@@ -64,7 +64,7 @@ pnpm dsh plugin --profile web add /path/to/dsh-feishu-bot
     allowedWorkspaces:
       - /Users/your-name/code
     defaultWorkspace: /Users/your-name/code
-    progressDetail: summary # concise=简洁；summary=标准（默认）；full=详细
+    progressDetail: summary # concise=只显示动作；summary=动作+对象（默认）；full=再加 token 用量
 ```
 
 - `allowedOpenIds` 为空时拒绝所有飞书用户。

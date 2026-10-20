@@ -74,9 +74,8 @@ Bridge options:
 | `freshnessMs` | `600000` | Maximum age of a newly delivered Feishu event |
 | `listingTtlMs` | `300000` | Lifetime of the latest `/ls` card and ordinal snapshot |
 | `cardThrottleMs` | `1000` | Minimum interval between non-terminal task-card patches |
-| `progressDetail` | `summary` | Feishu task-card detail: `concise` hides duration/token facts, `summary` shows duration but hides token usage, `full` shows both |
+| `progressDetail` | `summary` | Feishu task-card detail. Every tier names what a call is *doing* (the Web GUI's own activity vocabulary, e.g. “正在读取文件” instead of the tool name): `concise` shows only the activity, `summary` adds the subject it acts on (the file, command, or query) and the duration, `full` adds token usage |
 | `recoveryTtlMs` | `86400000` | Maximum age of interrupted inbound work eligible for restart recovery |
-| `bindingCleanupTimeoutMs` | `5000` | Independent timeout for disposing a newly-created session after a failed binding switch |
 | `disposeDrainTimeoutMs` | `5000` | Bridge deadline for admitted chat/card/approval/projection work before storage is closed |
 | `inboundRetentionMs` / `inboundMaxRecords` | `604800000` / `50000` | Terminal inbound retention and hard capacity; protected recoverable rows cause backpressure instead of eviction |
 | `outboundRetentionMs` / `outboundMaxRecords` | `604800000` / `10000` | Legacy outbox/dead-letter retention and hard capacity |
