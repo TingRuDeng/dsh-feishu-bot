@@ -42,6 +42,7 @@ import { authorizeCwd, buildWorkspaceFilter, validateDefaultWorkspace } from './
 import { createBridgeAgentResolver, mountDefaultAgentPreset, type ResolveResult } from './resolver.ts'
 import { createModelSelectionRegistry } from './model-selection.ts'
 import { escapeLarkMarkdownLiteral } from './lark-markdown.ts'
+import { BoundedIdSet } from './bounded-set.ts'
 import { formatSessionDisplayTitle } from './display.ts'
 import {
   MODEL_PAGE_SIZE,
@@ -216,6 +217,9 @@ export const Config: z<Config> = z.transform(ConfigSchema, (config) => {
   }
   return config
 }, true)
+
+/** How many consumed answer ids to remember for Feishu's re-delivery window. */
+const ANSWER_CONSUMED_LIMIT = 4_096
 
 export const name = 'feishu-bridge'
 export const inject = [
@@ -2510,8 +2514,15 @@ async function mount(ctx: Context, config: Config, setupSignal: AbortSignal): Pr
     return true
   }
 
-  /** Bound-message ids already consumed as answers, so a redelivery never double-settles. */
-  const answerConsumed = new Set<string>()
+  /**
+   * Bound-message ids already consumed as answers, so a redelivery never
+   * double-settles.
+   *
+   * Bounded on purpose: this is only a re-delivery guard, and the platform
+   * redelivers within a short window. Unbounded retention would keep one entry
+   * per answered message for the life of the process.
+   */
+  const answerConsumed = new BoundedIdSet(ANSWER_CONSUMED_LIMIT)
 
   /**
    * Apply one question-card button click.
