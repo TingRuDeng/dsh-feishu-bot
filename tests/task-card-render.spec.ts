@@ -36,11 +36,13 @@ describe('renderTaskCard', () => {
     expect(card.elements).toEqual([])
     expect(JSON.stringify(card).split('思考中').length - 1).toBe(1)
   })
-  it('running with tools lists current tool names and appends one active thinking hint', () => {
+  it('running with tools names each activity and appends one active thinking hint', () => {
+    // The card names what the calls DO, not the harness tool names: "bash" is
+    // "executing a command", which is what the operator can actually read.
     const card = renderTaskCard({ ...base, status: 'running', currentTools: ['Bash', 'Read'], toolCallCount: 3 })
     const json = JSON.stringify(card)
-    expect(json).toContain('Bash')
-    expect(json).toContain('Read')
+    expect(json).toContain('正在执行命令')
+    expect(json).toContain('正在读取文件')
     expect(json.split('思考中').length - 1).toBe(1)
     expect(card.elements[0]!.text.content.endsWith('思考中.....')).toBe(true)
   })
@@ -62,7 +64,89 @@ describe('renderTaskCard', () => {
     expect(json).not.toContain('Bash …')
   })
 
-  it('falls back to the tool name when a call exposes no useful argument', () => {
+  it('describes a running call by its ACTIVITY rather than its tool name', () => {
+    // A raw argument fragment ("src/bridge/index.ts") never says whether the
+    // agent is reading or writing it. Naming the activity is what makes the
+    // card legible without opening the Web GUI.
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['read'],
+      toolDetails: { read: 'src/bridge/index.ts' },
+      toolCallCount: 1,
+    })
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('正在读取文件')
+    expect(body).toContain('src/bridge/index.ts')
+  })
+
+  it('describes a finished command by its activity and the command it ran', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: [],
+      recentTools: ['bash'],
+      recentToolDetails: { bash: 'pnpm test' },
+      toolCallCount: 1,
+    })
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('已执行命令')
+    expect(body).toContain('pnpm test')
+  })
+
+  it('collapses repeated activities into one count instead of a wall of rows', () => {
+    // Reading five files should read as one line, matching the Web GUI.
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: [],
+      recentTools: ['read', 'read', 'read', 'read', 'read'],
+      recentToolDetails: { read: 'e.ts' },
+      toolCallCount: 5,
+    })
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('已读取文件 5 个')
+    // The newest example still says WHICH file.
+    expect(body).toContain('e.ts')
+  })
+
+  it('concise detail shows the activity without the subject', () => {
+    const card = renderTaskCard(
+      {
+        ...base,
+        status: 'running',
+        currentTools: ['read'],
+        toolDetails: { read: 'secret-plan.md' },
+        toolCallCount: 1,
+      },
+      undefined,
+      { progressDetail: 'concise' },
+    )
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('正在读取文件')
+    expect(body).not.toContain('secret-plan.md')
+  })
+
+  it('says which step failed, semantically, without copying provider text', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'failed',
+      currentTools: [],
+      recentTools: ['bash'],
+      recentToolDetails: { bash: 'pnpm test' },
+      toolCallCount: 1,
+      failureCode: 'TIMEOUT',
+    })
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('失败原因')
+    expect(body).toContain('模型请求超时')
+    // The step that was in flight is named by its activity.
+    expect(body).toContain('已执行命令')
+  })
+
+  it('still names the activity when a call exposes no useful argument', () => {
+    // Without arguments the subject is unknown, but WHAT the call is remains
+    // knowable from the tool name, so the card still says something useful.
     const card = renderTaskCard({
       ...base,
       status: 'running',
@@ -70,8 +154,22 @@ describe('renderTaskCard', () => {
       toolDetails: { Bash: undefined },
       toolCallCount: 1,
     })
-    const json = JSON.stringify(card)
-    expect(json).toContain('Bash')
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('正在执行命令')
+    expect(body).not.toContain('Bash')
+  })
+
+  it('falls back to the raw tool name only for a tool it cannot classify', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['mystery_tool'],
+      toolCallCount: 1,
+    })
+    const body = card.elements[0]!.text.content
+    // Escaped by the Lark-markdown literal rule; the name still reaches the card.
+    expect(body).toContain('正在调用')
+    expect(body).toContain('mystery')
   })
 
   it('renders recent completed tools with their detail too', () => {
@@ -87,6 +185,45 @@ describe('renderTaskCard', () => {
     // than the raw JSON (a literal "-" arrives as "\-").
     expect(card.elements[0]!.text.content).toContain('运行 ls \\-la')
     expect(card.elements[0]!.text.content).not.toContain('✅ Bash')
+  })
+
+  it('renders each repeated tool call with its own detail instead of repeating one', () => {
+    // Reported shape of the defect: two `bash` calls in one task rendered the
+    // SAME detail twice, so the first command vanished from the card.
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: [],
+      currentToolsList: [],
+      recentTools: ['bash', 'bash'],
+      recentToolDetailsList: [
+        { name: 'bash', detail: 'ls -la' },
+        { name: 'bash', detail: 'pnpm test' },
+      ],
+      toolCallCount: 2,
+    })
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('ls \\-la')
+    expect(body).toContain('pnpm test')
+    expect(body.split('pnpm test').length - 1).toBe(1)
+  })
+
+  it('renders concurrent calls of the same tool name with their own details', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['bash', 'bash'],
+      currentToolsList: [
+        { name: 'bash', detail: 'ls -la' },
+        { name: 'bash', detail: 'pnpm test' },
+      ],
+      recentTools: [],
+      recentToolDetailsList: [],
+      toolCallCount: 2,
+    })
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('ls \\-la')
+    expect(body).toContain('pnpm test')
   })
 
   it('completed card carries no duplicate completion body text', () => {
@@ -176,15 +313,15 @@ describe('renderTaskCard', () => {
     expect(json).not.toContain('轮')
   })
 
-  it('recent completed tools scroll in the body as progress (weclaw UX)', () => {
+  it('recent completed tools scroll in the body as activity progress (weclaw UX)', () => {
     const card = renderTaskCard({
       ...base, status: 'running', currentTools: ['Write'],
       recentTools: ['Bash', 'Read'], toolCallCount: 3,
     })
     const json = JSON.stringify(card)
-    expect(json).toContain('✅ Bash')
-    expect(json).toContain('✅ Read')
-    expect(json).toContain('Write')
+    expect(json).toContain('✅ 已执行命令')
+    expect(json).toContain('✅ 已读取文件')
+    expect(json).toContain('正在写入文件')
     expect(json.split('思考中').length - 1).toBe(1)
   })
 
@@ -198,8 +335,8 @@ describe('renderTaskCard', () => {
     })
 
     expect(card.elements[0]!.text.content).toBe([
-      '✅ Bashˋspoofˋ &lt;tag&gt; \\- next',
-      '▸ Write \\- injected \\[approve\\]\\(https://evil.example\\) …',
+      '✅ 已调用 Bashˋspoofˋ &lt;tag&gt; \\- next',
+      '▸ 正在调用 Write \\- injected \\[approve\\]\\(https://evil.example\\) …',
       '已调用工具 2 次',
       '思考中.....',
     ].join('\n'))
@@ -247,7 +384,62 @@ describe('a card recovered after a restart', () => {
     const body = JSON.stringify(card)
     expect(body).toContain('已从重启前的记录恢复')
     // The marker adds a line; it must not replace the actual progress.
-    expect(body).toContain('bash')
+    expect(body).toContain('正在执行命令')
     expect(body).toContain('已调用工具 1 次')
+  })
+})
+
+describe('task card size ceiling', () => {
+  /**
+   * A card that exceeds Feishu's create-message ceiling makes `patchCard`
+   * reject. The card actor then freezes the tracker, so the chat's progress
+   * card stops updating for the rest of the task — the failure is silent and
+   * permanent. Trimming keeps it updating instead.
+   */
+  const hugeSnapshot = (count: number) => {
+    const tools = Array.from({ length: count }, (_, index) => `bash`)
+    return {
+      turn: 1,
+      status: 'running' as const,
+      currentTools: tools,
+      currentToolsList: tools.map((name, index) => ({
+        name,
+        detail: `command-number-${index}-${'x'.repeat(60)}`,
+      })),
+      recentTools: [],
+      recentToolDetailsList: [],
+      toolCallCount: count,
+      durationMs: null,
+      startedAt: null,
+      failureCode: null,
+      retryCount: 0,
+    }
+  }
+
+  it('keeps a pathological card under the Feishu ceiling', () => {
+    const card = renderTaskCard(hugeSnapshot(400) as never, undefined, { progressDetail: 'summary' })
+    const bytes = Buffer.byteLength(JSON.stringify(card), 'utf8')
+    expect(bytes).toBeLessThanOrEqual(24 * 1024)
+  })
+
+  it('says how much progress it hid, instead of dropping it silently', () => {
+    const card = renderTaskCard(hugeSnapshot(400) as never, undefined, { progressDetail: 'summary' })
+    const body = card.elements[0]!.text.content
+    // The operator must be able to tell the view is abbreviated.
+    expect(body).toMatch(/还有 \d+ (个|项|条)/u)
+  })
+
+  it('leaves a normal card exactly as it was', () => {
+    const card = renderTaskCard({
+      ...base,
+      status: 'running',
+      currentTools: ['read'],
+      currentToolsList: [{ name: 'read', detail: 'a.ts' }],
+      toolCallCount: 1,
+    } as never, undefined, { progressDetail: 'summary' })
+    const body = card.elements[0]!.text.content
+    expect(body).toContain('正在读取文件')
+    expect(body).toContain('a.ts')
+    expect(body).not.toMatch(/还有/u)
   })
 })

@@ -109,6 +109,39 @@ describe('reduceTaskCard', () => {
     expect(snap.recentToolDetails).toEqual({ read: 'src/bridge/index.ts' })
   })
 
+  it('keeps each completed call of the SAME tool name with its own detail', () => {
+    // Two `bash` calls used to collapse: the snapshot was a name-keyed record,
+    // so the second call's detail overwrote the first and the card showed the
+    // same line twice. Calling one tool several times in a task is the norm.
+    seq = 0
+    const events = [
+      turnStart(), stepStart(),
+      toolCallWithArgs('c1', 'bash', '{"command":"ls -la"}'),
+      toolResult('c1'),
+      toolCallWithArgs('c2', 'bash', '{"command":"pnpm test"}'),
+      toolResult('c2'),
+    ]
+    const snap = reduceTaskCard(events, 1)!
+    expect(snap.recentToolDetailsList).toEqual([
+      { name: 'bash', detail: 'ls -la' },
+      { name: 'bash', detail: 'pnpm test' },
+    ])
+  })
+
+  it('keeps each OPEN call of the same tool name with its own detail', () => {
+    seq = 0
+    const events = [
+      turnStart(), stepStart(),
+      toolCallWithArgs('c1', 'bash', '{"command":"ls -la"}'),
+      toolCallWithArgs('c2', 'bash', '{"command":"pnpm test"}'),
+    ]
+    const snap = reduceTaskCard(events, 1)!
+    expect(snap.currentToolsList).toEqual([
+      { name: 'bash', detail: 'ls -la' },
+      { name: 'bash', detail: 'pnpm test' },
+    ])
+  })
+
   it('never reads an unrecognized argument key, even when it holds text', () => {
     // The whitelist is the privacy boundary: a tool passing a credential in an
     // unusual field must not get it rendered onto a chat card.

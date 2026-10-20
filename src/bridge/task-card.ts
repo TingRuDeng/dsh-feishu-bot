@@ -11,7 +11,13 @@
  */
 
 import { normalizeProgressDetail, type ProgressDetail } from './display.ts'
+import { RESULT_CARD_SOFT_LIMIT_BYTES } from './result-card.ts'
 import { escapeLarkMarkdownLiteral } from './lark-markdown.ts'
+import {
+  describeToolCall,
+  groupActivityLines,
+  type ActivityLine,
+} from './tool-activity.ts'
 
 /** One turn's card-facing state, frozen at the terminal turn/end. */
 export interface TaskCardSnapshot {
@@ -25,12 +31,31 @@ export interface TaskCardSnapshot {
    * One-line description of what each OPEN tool is doing, keyed by tool name
    * and derived from that call's arguments (a command, a path, a query).
    * Undefined when the call exposes nothing worth showing.
+   *
+   * Name-keyed, so two concurrent calls to the same tool collapse into one
+   * entry. Use {@link currentToolsList} whenever per-call detail matters.
    */
   toolDetails?: Record<string, string | undefined>
+  /**
+   * The OPEN calls in call order, each carrying its own detail.
+   *
+   * A name-keyed record cannot represent two `bash` calls at once: the second
+   * detail overwrote the first and the card printed one line twice. Rendering
+   * reads this list, which is per-call and therefore lossless.
+   */
+  currentToolsList?: readonly ToolProgressEntry[]
   /** Names of the last few COMPLETED tools, oldest first (scrolling progress). */
   recentTools: string[]
-  /** Detail copy for {@link recentTools}, keyed by tool name. */
+  /**
+   * Detail copy for {@link recentTools}, keyed by tool name.
+   *
+   * Name-keyed, so a task that calls one tool several times (the common case)
+   * collapses every entry onto the last detail. Use
+   * {@link recentToolDetailsList} for per-call detail.
+   */
   recentToolDetails?: Record<string, string | undefined>
+  /** The COMPLETED calls, oldest first, each carrying its own detail. */
+  recentToolDetailsList?: readonly ToolProgressEntry[]
   /** Total tool calls observed in this turn. */
   toolCallCount: number
   /** turn/start → turn/end span; null while running. */
@@ -41,6 +66,43 @@ export interface TaskCardSnapshot {
   failureCode: string | null
   /** Number of model retry events observed before the terminal state. */
   retryCount: number
+}
+
+/** One tool call's card row: the tool's name and its one-line description. */
+export interface ToolProgressEntry {
+  /** Tool name as reported by the harness; never arguments. */
+  name: string
+  /** One-line description derived from that call's arguments, when it had one. */
+  detail?: string
+}
+
+/** Build one per-call card row, omitting an absent detail. */
+function toProgressEntry(name: string, detail: string | undefined): ToolProgressEntry {
+  return detail === undefined ? { name } : { name, detail }
+}
+
+/**
+ * The completed calls to show, per call.
+ *
+ * Prefers the ordered list. Falls back to the name-keyed pair only for
+ * snapshots built by older callers, so nothing renders an empty progress view
+ * merely because it predates the list form.
+ * @param snapshot - the folded snapshot.
+ * @returns one row per completed call, oldest first.
+ */
+function completedToolRows(snapshot: TaskCardSnapshot): readonly ToolProgressEntry[] {
+  if (snapshot.recentToolDetailsList !== undefined) return snapshot.recentToolDetailsList
+  return snapshot.recentTools.map((name) => toProgressEntry(name, snapshot.recentToolDetails?.[name]))
+}
+
+/**
+ * The open calls to show, per call.
+ * @param snapshot - the folded snapshot.
+ * @returns one row per open call, in call order.
+ */
+function openToolRows(snapshot: TaskCardSnapshot): readonly ToolProgressEntry[] {
+  if (snapshot.currentToolsList !== undefined) return snapshot.currentToolsList
+  return snapshot.currentTools.map((name) => toProgressEntry(name, snapshot.toolDetails?.[name]))
 }
 
 /** The event fields the reducer reads; structurally satisfied by SessionEvent. */
@@ -362,9 +424,13 @@ export function reduceTaskCard(events: readonly CardEvent[], turn: number): Task
     toolDetails: Object.fromEntries(
       [...open].map(([callId, name]) => [name, openDetails.get(callId)] as const)
         .filter(([, detail]) => detail !== undefined)),
+    // Per-call rows: the name-keyed view above cannot represent two calls to
+    // the same tool, so the ordered list is what the card actually renders.
+    currentToolsList: [...open].map(([callId, name]) => toProgressEntry(name, openDetails.get(callId))),
     recentTools: recent,
     recentToolDetails: Object.fromEntries(
       recent.map((name, index) => [name, recentDetails[index]])),
+    recentToolDetailsList: recent.map((name, index) => toProgressEntry(name, recentDetails[index])),
     toolCallCount,
     durationMs,
     startedAt,
@@ -743,9 +809,14 @@ export function feishuTaskFoldFromState(state: FeishuTaskFoldState): FeishuTaskF
         Object.entries(openTools)
           .map(([callId, name]) => [name, state.openToolDetails[callId]] as const)
           .filter(([, detail]) => detail !== undefined)),
+      // Per-call rows: two calls to one tool name stay distinguishable.
+      currentToolsList: Object.entries(openTools)
+        .map(([callId, name]) => toProgressEntry(name, state.openToolDetails[callId])),
       recentTools: state.recentTools,
       recentToolDetails: Object.fromEntries(
         state.recentTools.map((name, index) => [name, state.recentToolDetails[index]])),
+      recentToolDetailsList: state.recentTools
+        .map((name, index) => toProgressEntry(name, state.recentToolDetails[index])),
       toolCallCount,
       durationMs: settled && startedAt !== null && endedAt !== null ? endedAt - startedAt : null,
       startedAt,
@@ -837,6 +908,47 @@ function formatDuration(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return minutes > 0 ? `${minutes}分${seconds}秒` : `${seconds}秒`
+}
+
+/**
+ * Feishu's documented ceiling for one create-message payload, mirrored from the
+ * result-card path so both card families agree on the same number.
+ */
+export const TASK_CARD_MAX_BYTES = RESULT_CARD_SOFT_LIMIT_BYTES
+
+/**
+ * Drop progress rows until the rendered card fits Feishu's ceiling.
+ *
+ * A card over the ceiling makes `patchCard` reject, and the card actor then
+ * freezes the tracker — so the chat's progress card stops updating for the rest
+ * of the task, silently and permanently. Trimming is strictly better than that:
+ * the newest rows survive (they describe what is happening RIGHT NOW) and one
+ * final row states how much was withheld.
+ *
+ * Trimming works on whole lines so no Markdown construct is cut in half. The
+ * disclosure row is reserved for before any line is measured, so the trim
+ * always terminates.
+ * @param lines - body rows, oldest first, excluding the thinking tail.
+ * @param render - builds the complete card from a body string, for measuring.
+ * @param maxBytes - ceiling for the whole serialized card.
+ * @returns the lines to render, possibly with a trailing disclosure row.
+ */
+function trimBodyToCeiling(
+  lines: readonly string[], render: (body: string) => object, maxBytes: number,
+): string[] {
+  const fits = (body: string): boolean =>
+    Buffer.byteLength(JSON.stringify(render(body)), 'utf8') <= maxBytes
+  if (fits(lines.join('\n'))) return [...lines]
+  // Measure with a pessimistic disclosure row so the real one cannot overflow.
+  let kept = lines.length
+  let hidden = 0
+  while (kept > 0) {
+    kept -= 1
+    hidden = lines.length - kept
+    const candidate = [...lines.slice(0, kept), `还有 ${hidden} 条进度未显示`]
+    if (fits(candidate.join('\n'))) return candidate
+  }
+  return [`还有 ${lines.length} 条进度未显示`]
 }
 
 /** Status → header copy and Feishu header color template. */
@@ -953,20 +1065,51 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   if (context?.resumed === true) lines.push('🔄 已从重启前的记录恢复，下方为当时进度')
   if (snapshot.status === 'running') {
     if (snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0) {
-      // Prefer what the call is DOING over its bare name: "运行 pnpm test"
-      // tells the operator far more than "bash …".
-      for (const name of snapshot.recentTools) {
-        const detail = snapshot.recentToolDetails?.[name]
-        lines.push(`✅ ${escapeLarkMarkdownLiteral(detail ?? name)}`)
+      // Describe what the agent is DOING, in the Web GUI's own vocabulary.
+      // A raw argument fragment ("src/bridge/index.ts") never says whether the
+      // file is being read, written, or edited, and a bare tool name ("bash")
+      // says nothing at all. Each call is classified into an activity and
+      // rendered as an activity phrase plus, when the call exposes one, the
+      // subject it acts on.
+      const completedLines: ActivityLine[] = completedToolRows(snapshot).map(entry =>
+        describeToolCall(entry.name, entry.detail, 'done'))
+      const openLines: ActivityLine[] = openToolRows(snapshot).map(entry =>
+        describeToolCall(entry.name, entry.detail, 'running'))
+      // Repetition collapses into a count: reading five files is one row, the
+      // same way the Web GUI summarizes a step rather than listing every call.
+      // Distinct subjects are all kept, so two different commands never
+      // collapse into one row that hides the other.
+      for (const group of groupActivityLines(completedLines)) {
+        const label = group.count > 1 ? `${group.verb} ${group.count} 个` : group.verb
+        const subjects = detail === 'concise' ? [] : group.subjects
+        lines.push(`✅ ${escapeLarkMarkdownLiteral(label)}${
+          subjects.length === 0 ? '' : ` · ${subjects.map(subject =>
+            escapeLarkMarkdownLiteral(subject)).join('、')}`}`)
       }
-      for (const name of snapshot.currentTools) {
-        lines.push(`▸ ${escapeLarkMarkdownLiteral(snapshot.toolDetails?.[name] ?? name)} …`)
+      // Open calls are never grouped: each one is *currently* happening, and
+      // "正在读取文件 3 个" would hide that several things run at once.
+      for (const line of openLines) {
+        lines.push(`▸ ${escapeLarkMarkdownLiteral(line.verb)}${
+          detail === 'concise' || line.subject === undefined
+            ? ''
+            : ` · ${escapeLarkMarkdownLiteral(line.subject)}`} …`)
       }
-      lines.push(`已调用工具 ${snapshot.toolCallCount} 次`)
+      if (detail !== 'concise') lines.push(`已调用工具 ${snapshot.toolCallCount} 次`)
     }
   } else {
     if (snapshot.status === 'failed') lines.push(formatFailure(snapshot))
-    if (snapshot.toolCallCount > 0) lines.push(`共调用工具 ${snapshot.toolCallCount} 次`)
+    // Name the work that was done (or was in flight) by activity, so a failure
+    // says WHAT failed rather than only that something did.
+    if (snapshot.toolCallCount > 0 && detail !== 'concise') {
+      const done = groupActivityLines(completedToolRows(snapshot).map(entry =>
+        describeToolCall(entry.name, entry.detail, 'done')))
+      const summary = done.map(group => group.count > 1
+        ? `${group.verb} ${group.count} 个`
+        : group.verb).join('，')
+      lines.push(summary === '' ? `共调用工具 ${snapshot.toolCallCount} 次` : `${summary}（共 ${snapshot.toolCallCount} 次）`)
+    } else if (snapshot.toolCallCount > 0) {
+      lines.push(`共调用工具 ${snapshot.toolCallCount} 次`)
+    }
     if (detail !== 'concise' && snapshot.durationMs !== null) lines.push(`耗时 ${formatDuration(snapshot.durationMs)}`)
     if (lines.length === 0) lines.push('（无工具调用）')
   }
@@ -975,21 +1118,27 @@ export function renderTaskCard(snapshot: TaskCardSnapshot, tokens?: TokenInfo, c
   }
   const hasProgress = snapshot.currentTools.length > 0 || snapshot.toolCallCount > 0
   const titleText = snapshot.status === 'running' && !hasProgress ? '思考中.....' : title
-  const body = snapshot.status === 'running'
-    ? hasProgress ? appendActiveThinkingIndicator(lines.join('\n')) : ''
-    : trimActiveThinkingIndicator(lines.join('\n'))
   const name = context?.title ?? '任务'
-  const elements: unknown[] = body === ''
-    ? []
-    : [{ tag: 'div', text: { tag: 'lark_md', content: body } }]
-  // A separator only earns its place when there is progress to separate from.
-  if (context?.interactive !== undefined && context.interactive.length > 0) {
-    if (elements.length > 0) elements.push({ tag: 'hr' })
-    elements.push(...context.interactive)
+  const assemble = (body: string): object => {
+    const elements: unknown[] = body === ''
+      ? []
+      : [{ tag: 'div', text: { tag: 'lark_md', content: body } }]
+    // A separator only earns its place when there is progress to separate from.
+    if (context?.interactive !== undefined && context.interactive.length > 0) {
+      if (elements.length > 0) elements.push({ tag: 'hr' })
+      elements.push(...context.interactive)
+    }
+    return {
+      config: { wide_screen_mode: true },
+      header: { title: { tag: 'plain_text', content: `${name} · ${titleText}` }, template },
+      elements,
+    }
   }
-  return {
-    config: { wide_screen_mode: true },
-    header: { title: { tag: 'plain_text', content: `${name} · ${titleText}` }, template },
-    elements,
-  }
+  const finish = (rows: readonly string[]): string => snapshot.status === 'running'
+    ? hasProgress ? appendActiveThinkingIndicator(rows.join('\n')) : ''
+    : trimActiveThinkingIndicator(rows.join('\n'))
+  // Measure the complete card, not just the body: the ceiling applies to the
+  // create-message payload Feishu receives, and every wrapper field counts.
+  const rows = trimBodyToCeiling(lines, body => assemble(finish(body.split('\n'))), TASK_CARD_MAX_BYTES)
+  return assemble(finish(rows)) as FeishuCard
 }
