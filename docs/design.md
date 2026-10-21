@@ -517,5 +517,17 @@ bridge listener 收到 approval/request
   飞书建-Web 触碰、Web 独有对照三场景），详见 [M7 架构方案](m7-model-selection.md) §6.1/§9。
 - **M7.3 `/status` 与注册表已由源码/自动化确认（2026-08-18）**：桥按 `sessionId` 保存 `ModelSelectionRef`，只为 `/new` 创建或冷恢复的 Agent 安装；Agent dispose 同时卸载 listener 并删除条目，live `existing` 不抢占 Web 所有权。`/status` 区分未绑定、桥持有、live Web-owned、冷/未激活，分别显示当前实际值与新会话默认的 provider/model/effort；effort 名由 `resolveModelInfo` 解析，失败回显原始 id并标记元数据不可用。证据为 `tests/bridge.spec.ts`、`tests/model-selection.spec.ts`，全量 23 文件/372 测试通过，typecheck 通过。
 - **S4 转义统一与 M7.1/M7.2 已由自动化确认（2026-08-18）**：共享 `lark-markdown.ts` 的转义覆盖审批卡、任务卡、会话列表卡、结果卡 header 与全部文本回显路径（`/status` `/effort` `/ls` fallback `/unknown` `/new`），对抗输入回归通过；`/effort` 与 `/model` 三层卡沿用同一四类所有权判定（无绑定/非 boundBy/live Web-owned/冷不隐式恢复），换 model 走 `revalidateEffort` 三分支，全流程点击后下一轮 `agent/request` 实际携带新三元组。证据为 `tests/bridge.spec.ts` S4/M7.1/M7.2 组、`tests/model-card.spec.ts`、`tests/model-selection.spec.ts`。
+- **跨端待处理交互已由源码确认（2026-10-21）**：`approval/request` 与
+  `user-questions/request` 都是 waterfall（`packages/api/remotes/src/remote-events.ts`），
+  桥以 `prepend` 参与并 `Promise.race` 自己的通道；飞书先答完时 Web 那份仍然挂起，
+  没有任何人通知它"这个请求已经解决了"。Web 的卡片正挂在那个 promise 上
+  （`ui-approval/src/client/index.ts` 的 `await pending.result` 与 `finally { remove() }`），
+  所以结算永不执行。此外每个会话只显示一个待处理交互
+  （`ui-session/src/client/index.ts` 按 precedence 取最高），提问 `1` 压过审批 `0`——
+  不关闭的提问窗口会挡住后续审批。`req.signal` 不可用：它就是 `exec.signal`
+  （`tool-ask-user/src/index.ts`），abort 等于宣告工具调用被取消。
+  当前只做收窄（`48b6215`：确认提示里写明另一侧需自行关闭），根治需上游在结算时
+  广播，让各 Client 的 pending 能被外部 resolve；上游修好后应同步去掉那句提示文案。
+
 - **M7 仍待真实部署确认**：真实 provider 的 `listModels` catalog 内容与 `resolveModelInfo` 的 `reasoning` 暴露情况。须实机确认。
-- **仍待真实飞书确认**：平台重复事件与 UUID 去重时间窗；启动期消息和进程中止后的实际重投；timeout/断连的迟到 create；真实非零 patch 业务码；组卡 patch 失败后的独立审批卡；Web/飞书 race 的 UI 表现；HMR drain 与重启补投的最终消息数量。缺少这些证据前不声明端到端 exactly-once 或“完全可靠”。
+- **仍待真实飞书确认**：平台重复事件与 UUID 去重时间窗；启动期消息和进程中止后的实际重投；timeout/断连的迟到 create；真实非零 patch 业务码；组卡 patch 失败后的独立审批卡；HMR drain 与重启补投的最终消息数量。缺少这些证据前不声明端到端 exactly-once 或“完全可靠”。
